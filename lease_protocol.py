@@ -25,11 +25,11 @@ def lease_key(run_id: str) -> str:
     return f"lease:{run_id}"
 
 
-def new_grant(call_id: str, owner: str) -> dict:
+def new_grant(call_id: str, job_type: str) -> dict:
     """
     create the value for the lease manager dict.
     """
-    return {"call_id": call_id, "granted_ts": time.time(), "owner": owner}
+    return {"call_id": call_id, "granted_ts": time.time(), "attempt":1, "job_type": job_type, "last_heartbeat": None}
 
 
 def fence(run_id: str, my_call_id: str, leases) -> tuple[str, dict | None]:
@@ -80,7 +80,7 @@ class Lease:
         # this a plain dict and never reach Modal.
         self.store = store if store is not None else leases
 
-    def confirm(self, label: str = "lease") -> None:
+    def confirm(self, label: str = "lease", leave_heartbeat = False) -> None:
         """check if the grant still names us, or raise LeaseLost.
 
         Someone else's id raises at once; only UNKNOWN (see `fence`) is worth
@@ -94,18 +94,17 @@ class Lease:
         for i in range(1, self.tries + 1):
             verdict, grant = fence(self.run_id, self.call_id, self.store)
             if verdict == MATCH:
-                # `.get`, not `[...]`: `new_grant` writes no attempt, and a grant
                 # that predates the launcher's re-granting still has to log.
-                self.logger.info(f"{label}: lease held (attempt {grant.get('attempt', 1)}, try {i}/{self.tries})")
+                self.logger.info(f"{label}: lease held (attempt {grant['attempt']}, try {i}/{self.tries})")
+                if leave_heartbeat:
+                    grant["last_heartbeat"] = time.time_ns()
                 return
             if verdict == MISMATCH:
                 # Which kind of holder matters to whoever reads this log: an etl
                 # means the run's data is being rebuilt under us, a worker means we
                 # were superseded.
-                raise LeaseLost(f"{label}: another {grant['owner']} holds this run ({grant['call_id']})")
+                raise LeaseLost(f"{label}: another {grant['job_type']} holds this run ({grant['call_id']})")
             if i == self.tries:
                 raise LeaseLost(f"{label}: indeterminate after {self.tries} tries -- ownership never confirmed")
             self.logger.info(f"{label}: indeterminate, retry {i}/{self.tries}")
-            time.sleep(self.backoff * i)  # linear; no jitter needed at this fleet size
-
-
+            time.sleep(self.backoff)

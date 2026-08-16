@@ -22,7 +22,8 @@ The commit is the point of the whole arrangement. It happens once, on the way ou
 and only after a final `confirm` -- so a container that lost the run mid-job
 cannot land its writes, no matter how far it got before anyone noticed.
 """
-
+import time
+import threading
 import logging
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -31,13 +32,13 @@ from pathlib import Path
 
 import modal
 
-from config import STORAGE
+from config import STORAGE, HEARTBEAT_SECONDS
 from lease_protocol import Lease, LeaseLost
 from logs import call_logger, release_call_logger
 
 
 @dataclass(frozen=True)
-class CallScope:
+class Worker:
     """What a job is handed. Everything call-specific, nothing call-specific to build.
 
     `confirm` is the lease's bound method rather than the lease itself: a job has
@@ -48,12 +49,11 @@ class CallScope:
     run_id: str
     call_id: str
     log: logging.Logger
-    confirm: Callable[..., None]
+    confirm_lease: Callable[..., None]
     dir: Path
 
-
 @contextmanager
-def call_scope(run_id: str, owner: str, volume: modal.Volume):
+def initialize_worker(run_id: str, job_type: str, volume: modal.Volume):
     """Set up one call's logger and lease; commit on the way out, if still owed.
 
     `owner` names the actor, not the call -- `worker`, `etl` -- and becomes the log
@@ -70,6 +70,8 @@ def call_scope(run_id: str, owner: str, volume: modal.Volume):
       is worth keeping, and a partial output under a held lease is not a
       correctness problem the way a superseded one is.
     """
+
+
     call_id = modal.current_function_call_id() or "local"
 
     # Before the log file is opened, never after: an open file on the volume
@@ -80,25 +82,35 @@ def call_scope(run_id: str, owner: str, volume: modal.Volume):
     log_dir = run_dir / "logs" / call_id
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    logger = call_logger(call_id, log_dir / f"{owner}.log")
+    logger = call_logger(call_id, log_dir / f"{job_type}.log")
     lease = Lease(run_id, call_id, logger)
-    scope = CallScope(run_id=run_id, call_id=call_id, log=logger, confirm=lease.confirm, dir=run_dir)
+    worker = Worker(run_id=run_id, call_id=call_id, log=logger, confirm_lease=lease.confirm, dir=run_dir)
+
+    def heartbeat():
+        while True:
+            time.sleep(HEARTBEAT_SECONDS)
+            lease.confirm(label="heartbeat",leave_heartbeat=True)
+            logger.debug(f"{job_type}: heartbeat!")
+
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
 
     try:
-        lease.confirm(f"{owner}: boot")
-        yield scope
-        lease.confirm(f"{owner}: commit")
+        heartbeat_thread.start()
+        lease.confirm(f"{job_type}: boot")
+        yield worker
+        lease.confirm(f"{job_type}: commit")
     except LeaseLost as exc:
-        logger.warning(f"{owner}: {exc} -- discarding this call's writes")
+        logger.warning(f"{job_type}: {exc} -- discarding this call's writes")
         release_call_logger()
         raise
     except BaseException:
-        logger.exception(f"{owner}: failed under a held lease")
+        logger.exception(f"{job_type}: failed under a held lease")
         release_call_logger()
         raise
     else:
-        logger.info(f"{owner}: done")
+        logger.info(f"{job_type}: done")
         # Close first, commit second. `release_call_logger` closes the file, so
         # the last lines above are on disk before the commit that ships them.
         release_call_logger()
         volume.commit()
+        heartbeat_thread.
