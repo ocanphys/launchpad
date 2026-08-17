@@ -5,6 +5,7 @@ from pathlib import Path
 
 import modal
 
+import jobs
 from config import APP_NAME, VOLUME_NAME, STORAGE, CONTAINER_LIFETIME, HEARTBEAT_SECONDS
 from lease_protocol import beats, leases, new_grant
 from runtime import initialize_worker
@@ -15,8 +16,8 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 base_image = modal.Image.debian_slim(python_version="3.12")
 
 # The modules every call needs whatever it runs: config, its logger, its lease,
-# and the scope that wires those two together.
-CALL_SOURCE = ("config", "logs", "lease_protocol", "runtime")
+# the scope that wires those two together, and the jobs themselves.
+CALL_SOURCE = ("config", "logs", "lease_protocol", "runtime", "jobs")
 
 # Two images, because a job's dependencies are not every job's dependencies: a
 # job that never runs snakemake should not wait for a container carrying it.
@@ -32,9 +33,23 @@ etl_image = (
     .add_local_python_source(*CALL_SOURCE)
 )
 
-PAGE = Path("/runs.html")  # where web_image mounts it, read at request time
+WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
 
 FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
+
+
+def is_active(grant: dict | None, beat: dict | None, now: float) -> bool:
+    """Is `grant`'s holder currently beating fresh enough to trust?
+
+    Pure -- takes the grant and its holder's beat rather than fetching
+    either, so `read_state` (a batch snapshot, one call_id's beat already
+    looked up per run) and `launch_job` (a single-run lookup, no mount) both
+    decide "active" the same way instead of each having its own rule.
+    """
+    if grant is None or beat is None:
+        return False
+    return now - beat["last_beat_ts"] < FLATLINE * HEARTBEAT_SECONDS
+
 
 # A third image, for the same reason there are two: reading the leases and
 # beats needs fastapi, and none of what a job needs -- no snakemake, no volume.
@@ -47,9 +62,9 @@ FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the
 # gets a crash loop, not a smaller image.
 web_image = (
     base_image.pip_install("fastapi[standard]")
-    # The page is HTML, so it stays HTML -- mounted like the Snakefile, not
-    # pasted into this module as a string.
-    .add_local_file("runs.html", PAGE.as_posix())
+    # The page is HTML/JS, so it stays HTML/JS -- mounted like the Snakefile
+    # dir, not pasted into this module as strings.
+    .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
     .add_local_python_source(*CALL_SOURCE)
 )
 
@@ -84,13 +99,13 @@ def read_state() -> dict:
         grant = grants.get(run_id)
         call_id = grant["call_id"] if grant else None
         beat = beat_records.get(call_id) if call_id else None
-        age = now - beat["last_beat_ts"] if beat else None
         runs[run_id] = {
             "lease": grant,
             "call_id": call_id,
             "job_type": grant["job_type"] if grant else None,
             "last_heartbeat": beat["last_beat_ts"] if beat else None,
-            "active": age is not None and age < FLATLINE * HEARTBEAT_SECONDS,
+            "active": is_active(grant, beat, now),
+            "jobs": jobs.preflight_check(run_id), #get this from local mount
         }
 
     beats_out = {call_id: {**beat, "lease": held_by.get(call_id)} for call_id, beat in beat_records.items()}
@@ -103,7 +118,7 @@ def read_state() -> dict:
     }
 
 
-@app.function(image=web_image, volumes={STORAGE: volume})
+@app.function(image=web_image, volumes={STORAGE: volume}, max_containers=1)
 @modal.asgi_app()
 def leasebook():
     """The page and the data it polls, under one URL.
@@ -114,17 +129,24 @@ def leasebook():
     Served together, `state` is just a relative path, and no CORS question arises.
     """
     from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse
+    from fastapi.staticfiles import StaticFiles
 
     api = FastAPI()
-
-    @api.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        return PAGE.read_text()
 
     @api.get("/state")
     def state() -> dict:
         return read_state()
+
+    @api.post("/launch/{run_id}/{job}")
+    def launch_endpoint(run_id: str, job: str) -> dict:
+        launched, message, _call = attempt_launch(run_id, job)
+        return {"launched": launched, "message": message}
+
+    # Everything else -- index.html at "/" and its same-origin JS modules
+    # (app.js, el.js, render.js) -- is a static file under WEB_DIR. Mounted
+    # last: routes are matched in registration order, so /state and /launch
+    # are claimed above before this catch-all sees them.
+    api.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
 
     return api
 
@@ -166,6 +188,30 @@ def etl(run_id: str, cores:int) -> None:
         volume.commit()
 
 
+@app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
+def job0(run_id: str) -> None:
+    """Run jobs.job0 under this call's own logger and lease. Same shape as
+    `etl`: confirm, do the work, confirm, commit."""
+    with initialize_worker(run_id, job_type=job0.info.function_name, volume=volume) as worker:
+        worker.confirm_lease()
+        job = jobs.job0(run_id, worker.log, worker.confirm_lease)
+        job.run()
+        worker.confirm_lease()
+        volume.commit()
+
+
+@app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
+def job1(run_id: str) -> None:
+    """Run jobs.job1 under this call's own logger and lease. Same shape as
+    `etl`: confirm, do the work, confirm, commit."""
+    with initialize_worker(run_id, job_type=job1.info.function_name, volume=volume) as worker:
+        worker.confirm_lease()
+        job = jobs.job1(run_id, worker.log, worker.confirm_lease)
+        job.run()
+        worker.confirm_lease()
+        volume.commit()
+
+
 @app.local_entrypoint()
 def launch(run_id: str):
     """Grant one run to one call, then stay up until that call is finished.
@@ -195,3 +241,54 @@ def launch(run_id: str):
     leases.put(run_id, new_grant(call.object_id, etl.info.function_name))
     print(f"granted lease for {run_id} -> {call.object_id}, waiting for it to finish")
     call.get()
+
+
+JOBS = {"job0": (job0, jobs.job0), "job1": (job1, jobs.job1)}
+
+
+def attempt_launch(run_id: str, job: str) -> tuple[bool, str, modal.functions.FunctionCall | None]:
+    """Grant `run_id` to one call of `job`, or refuse and say why.
+
+    Shared by `launch_job` (a local entrypoint, which waits on the call) and
+    the web `/launch` route (which cannot wait -- a request has to return) so
+    the checks and the grant/spawn itself are decided in one place, not
+    twice: `run_id`/`job` are untrusted here in a way they weren't for a
+    CLI-only launcher, since a POST route is reachable by anyone with the
+    URL, so both are validated before touching a lease or a path built from
+    either.
+    """
+    if not run_id or "/" in run_id or run_id in (".", ".."):
+        return False, f"invalid run_id {run_id!r}", None
+    if job not in JOBS:
+        return False, f"unknown job {job!r}", None
+
+    fn, job_cls = JOBS[job]
+    job_uid = job_cls.job_uid
+
+    grant = leases.get(run_id)
+    beat = beats.get(grant["call_id"]) if grant else None
+    if is_active(grant, beat, time.time()):
+        return False, f"{job_uid}: run {run_id} already has an active call -- not launching", None
+
+    state = jobs.preflight_check(run_id, volume=volume).get(job_uid)
+    if state is None:
+        return False, f"{job_uid}: no config.json (or not declared) for run {run_id} -- nothing to launch", None
+    if not state["ready"]:
+        return False, f"{job_uid}: blocked on {state['missing_dependencies']} for run {run_id}", None
+
+    leases.pop(run_id, None)
+    call = fn.spawn(run_id)
+    leases.put(run_id, new_grant(call.object_id, fn.info.function_name))
+    return True, f"granted lease for {run_id} -> {call.object_id}", call
+
+
+@app.local_entrypoint()
+def launch_job(run_id: str, job: str):
+    """Grant one run to one job call, then wait for it -- same shape as
+    `launch`. The decision itself is `attempt_launch`'s.
+    """
+    launched, message, call = attempt_launch(run_id, job)
+    print(message)
+    if launched:
+        print("waiting for it to finish")
+        call.get()

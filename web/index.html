@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>runs</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: 0 auto; padding: 2rem 1.5rem; max-width: 48rem;
+  }
+  header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .4rem; }
+  h1 { font-size: 1rem; font-weight: 600; margin: 0; }
+  #conn { font-size: 11px; padding: .1rem .55rem; border: 1px solid; border-radius: 999px; white-space: nowrap; }
+  .ok  { color: #1a7f37; border-color: #1a7f37; }
+  .bad { color: #cf222e; border-color: #cf222e; }
+  #meta { opacity: .55; font-size: 11px; margin-bottom: 1rem; min-height: 1.2em; }
+
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: .4rem .7rem; text-align: left; border-top: 1px solid rgba(128,128,128,.18); }
+  th { opacity: .55; font-weight: 600; font-size: 11px; border-top: none; }
+  td.run { word-break: break-all; }
+  td.call { word-break: break-all; opacity: .8; }
+  .dim { opacity: .45; }
+
+  .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 999px; vertical-align: middle; }
+  .dot.active { background: #1a7f37; }
+  .dot.stale  { background: #cf222e; }
+  .dot.none   { background: rgba(128,128,128,.4); }
+
+  /* Square blocks, one per job_uid, stacked horizontally in a run's row. */
+  .job-buttons { display: flex; gap: .3rem; flex-wrap: wrap; }
+  .job-btn {
+    width: 1.9rem; height: 1.9rem; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    font: 9px/1 inherit; overflow: hidden;
+    border: 1px solid #1a7f37; border-radius: 3px;
+    background: transparent; color: #1a7f37;
+    cursor: pointer;
+  }
+  .job-btn:hover:not(:disabled) { background: rgba(26,127,55,.15); }
+  /* Not ready (or the run is already active): pale and frozen -- no color,
+     no hover, no pointer. The button still shows up so its slot in the row
+     doesn't shift once it does become launchable. */
+  .job-btn:disabled {
+    border-color: rgba(128,128,128,.3); color: rgba(128,128,128,.5);
+    cursor: default;
+  }
+
+  .empty { opacity: .55; padding: 1rem 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>runs</h1>
+  <span id="conn" class="bad">loading</span>
+</header>
+<div id="meta"></div>
+<table>
+  <thead>
+    <tr><th></th><th>run</th><th>job type</th><th>call</th><th>last heartbeat</th><th>jobs</th></tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+<p class="empty" id="empty" hidden>no run folders on the volume yet.</p>
+
+<!-- One entry point. type="module" gives us import/export with no bundler.
+     Note: ES modules only load over http(s), not file:// — serve the folder
+     (which your orchestrator already does, since the page fetches /state). -->
+<script type="module" src="app.js"></script>
+
+</body>
+</html>
