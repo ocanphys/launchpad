@@ -33,7 +33,7 @@ from pathlib import Path
 import modal
 
 from config import STORAGE, HEARTBEAT_SECONDS
-from lease_protocol import Lease, LeaseLost
+from lease_protocol import Lease, LeaseLost, beats
 from logs import call_logger, release_call_logger
 
 
@@ -87,11 +87,26 @@ def initialize_worker(run_id: str, job_type: str, volume: modal.Volume):
     worker = Worker(run_id=run_id, call_id=call_id, log=logger, confirm_lease=lease.confirm, dir=run_dir)
 
     def heartbeat():
+        # No fence check first -- see `Lease.confirm`'s note on why. A single
+        # key write, not a read-modify-write: `beats` keys on call_id directly,
+        # so this call's beat lives at a key nobody else ever writes to. Two
+        # containers that have both, at different times, held this run get two
+        # different keys -- this beat can never land on top of another call's,
+        # and no read is needed first to avoid it. A reader tells a stale beat
+        # from a live one by checking whether its call_id is still the run's
+        # current holder (`main.read_book` does this), not by racing to write
+        # first.
         while True:
             time.sleep(HEARTBEAT_SECONDS)
-            lease.confirm(label="heartbeat",leave_heartbeat=True)
-            logger.debug(f"{job_type}: heartbeat!")
+            try:
+                beats.put(call_id, {"run_id": run_id, "last_beat_ts": time.time()})
+                logger.debug(f"{job_type}: heartbeat!")
+            except Exception as exc:
+                logger.warning(f"heartbeat: not recorded ({exc})")
 
+    # A daemon thread, not a task: nothing here is async, so the only way to have
+    # this run alongside the job's own code is a second thread. It dies with the
+    # process on its own -- nothing to cancel on the way out.
     heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
 
     try:
@@ -113,4 +128,3 @@ def initialize_worker(run_id: str, job_type: str, volume: modal.Volume):
         # the last lines above are on disk before the commit that ships them.
         release_call_logger()
         volume.commit()
-        heartbeat_thread.

@@ -1,10 +1,15 @@
 import time
-from contextlib import contextmanager
 
 import modal
-from config import DICT_NAME, VOLUME_NAME
+from config import APP_NAME, VOLUME_NAME
 
-leases = modal.Dict.from_name(DICT_NAME, create_if_missing=True)
+# Two Dicts, not one shared store with prefixed keys: a run_id is already a
+# unique key in `leases`, a call_id is already a unique key in `beats`, and they
+# never need to tell each other's keys apart because they are never in the same
+# Dict. Every key any of this ever touches is a top-level key -- no blob, no
+# read-modify-write, no chance of one write clobbering an unrelated entry.
+leases = modal.Dict.from_name(f"{APP_NAME}-leases", create_if_missing=True)
+beats = modal.Dict.from_name(f"{APP_NAME}-beats", create_if_missing=True)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 LEASE_RETRIES = 5  # how many times an indeterminate lease read is worth re-asking
@@ -21,32 +26,31 @@ class LeaseLost(Exception):
     """
 
 
-def lease_key(run_id: str) -> str:
-    return f"lease:{run_id}"
-
-
 def new_grant(call_id: str, job_type: str) -> dict:
     """
-    create the value for the lease manager dict.
+    create the value stored under leases[run_id].
     """
-    return {"call_id": call_id, "granted_ts": time.time(), "attempt":1, "job_type": job_type, "last_heartbeat": None}
+    return {"call_id": call_id, "granted_ts": time.time(), "attempt":1, "job_type": job_type}
 
 
-def fence(run_id: str, my_call_id: str, leases) -> tuple[str, dict | None]:
-    """Do we own this run? One fresh Dict read, three answers -- never two.
+def fence(run_id: str, my_call_id: str) -> tuple[str, dict | None]:
+    """Do we own this run? One fresh read, three answers -- never two.
 
     The grant comes back with the verdict: the read already fetched it, and callers
     want to name *who* holds the run, not just whether we do.
 
     - MATCH / MISMATCH are real answers. Someone else's id means stop at once;
       asking again is just hoping it changes.
-    - UNKNOWN (no key, or the read failed) is silence, not a no -- a Dict outage, a
-      7-day expiry, or a call never granted anything. Denying on silence takes
-      down the fleet on one blip; granting on it lets a zombie write. So callers
-      wait a bounded time, then give up.
+    - UNKNOWN (no key, or the read failed) is silence, not a no -- a Dict outage,
+      or a call never granted anything. Denying on silence takes down the fleet
+      on one blip; granting on it lets a zombie write. So callers wait a bounded
+      time, then give up.
+
+    Always the module's own `leases` Dict. Nothing here runs anywhere but inside a
+    container or the local entrypoint, both of which have a real Dict to reach.
     """
     try:
-        grant = leases.get(lease_key(run_id))
+        grant = leases.get(run_id)
     except Exception:
         return UNKNOWN, None
     if grant is None:
@@ -68,19 +72,14 @@ class Lease:
         logger,
         tries: int = LEASE_RETRIES,
         backoff: float = LEASE_BACKOFF,
-        store=None,
     ):
         self.run_id = run_id
         self.call_id = call_id
         self.logger = logger
         self.tries = tries
         self.backoff = backoff
-        # Named `store` so it does not shadow the module-level Dict it defaults to.
-        # Injectable because `fence` takes the Dict as an argument: a test can hand
-        # this a plain dict and never reach Modal.
-        self.store = store if store is not None else leases
 
-    def confirm(self, label: str = "lease", leave_heartbeat = False) -> None:
+    def confirm(self, label: str = "lease") -> None:
         """check if the grant still names us, or raise LeaseLost.
 
         Someone else's id raises at once; only UNKNOWN (see `fence`) is worth
@@ -92,12 +91,9 @@ class Lease:
         committed from one that was merely allowed to.
         """
         for i in range(1, self.tries + 1):
-            verdict, grant = fence(self.run_id, self.call_id, self.store)
+            verdict, grant = fence(self.run_id, self.call_id)
             if verdict == MATCH:
-                # that predates the launcher's re-granting still has to log.
                 self.logger.info(f"{label}: lease held (attempt {grant['attempt']}, try {i}/{self.tries})")
-                if leave_heartbeat:
-                    grant["last_heartbeat"] = time.time_ns()
                 return
             if verdict == MISMATCH:
                 # Which kind of holder matters to whoever reads this log: an etl
