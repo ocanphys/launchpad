@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>runs</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: 0 auto; padding: 2rem 1.5rem; max-width: 48rem;
+  }
+  header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .4rem; }
+  h1 { font-size: 1rem; font-weight: 600; margin: 0; }
+  #conn { font-size: 11px; padding: .1rem .55rem; border: 1px solid; border-radius: 999px; white-space: nowrap; }
+  .ok  { color: #1a7f37; border-color: #1a7f37; }
+  .bad { color: #cf222e; border-color: #cf222e; }
+  #meta { opacity: .55; font-size: 11px; margin-bottom: 1rem; min-height: 1.2em; }
+
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: .4rem .7rem; text-align: left; border-top: 1px solid rgba(128,128,128,.18); }
+  th { opacity: .55; font-weight: 600; font-size: 11px; border-top: none; }
+  td.run { word-break: break-all; }
+  td.call { word-break: break-all; opacity: .8; }
+  .dim { opacity: .45; }
+
+  .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 999px; vertical-align: middle; }
+  .dot.active { background: #1a7f37; }
+  .dot.stale  { background: #cf222e; }
+  .dot.none   { background: rgba(128,128,128,.4); }
+
+  .empty { opacity: .55; padding: 1rem 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>runs</h1>
+  <span id="conn" class="bad">loading</span>
+</header>
+<div id="meta"></div>
+<table>
+  <thead>
+    <tr><th></th><th>run</th><th>job type</th><th>call</th><th>last heartbeat</th></tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+<p class="empty" id="empty" hidden>no run folders on the volume yet.</p>
+
+<script>
+"use strict";
+
+// How often to ask. Same reasoning as leasebook's old page: this is about how
+// stale the screen is allowed to look, nothing more.
+const EVERY_MS = 2000;
+
+const connEl = document.getElementById("conn");
+const metaEl = document.getElementById("meta");
+const rowsEl = document.getElementById("rows");
+const emptyEl = document.getElementById("empty");
+
+function setConn(text, cls) {
+  connEl.textContent = text;
+  connEl.className = cls;
+}
+
+// Built through the DOM, never innerHTML: run ids and call ids are strings
+// someone else chose, and this page should not care what is in them.
+function draw(payload) {
+  const runs = payload.runs || {};
+  const ids = Object.keys(runs).sort();
+
+  metaEl.textContent = ids.length + (ids.length === 1 ? " run" : " runs") +
+    " · polled " + new Date().toLocaleTimeString();
+
+  rowsEl.replaceChildren();
+  emptyEl.hidden = ids.length > 0;
+
+  for (const id of ids) {
+    const run = runs[id];
+    const tr = document.createElement("tr");
+
+    const dotTd = document.createElement("td");
+    const dot = document.createElement("span");
+    // green: a lease, held by a call whose heartbeat is fresh.
+    // red: a lease, but the holder's heartbeat is stale or missing.
+    // gray: no lease at all -- never started, or superseded and never reclaimed.
+    dot.className = "dot " + (!run.call_id ? "none" : run.active ? "active" : "stale");
+    dotTd.appendChild(dot);
+    tr.appendChild(dotTd);
+
+    const runTd = document.createElement("td");
+    runTd.className = "run";
+    runTd.textContent = id;
+    tr.appendChild(runTd);
+
+    const jobTd = document.createElement("td");
+    if (run.job_type) {
+      jobTd.textContent = run.job_type;
+    } else {
+      const s = document.createElement("span");
+      s.className = "dim";
+      s.textContent = "—";
+      jobTd.appendChild(s);
+    }
+    tr.appendChild(jobTd);
+
+    const callTd = document.createElement("td");
+    callTd.className = "call";
+    if (run.call_id) {
+      callTd.textContent = run.call_id;
+    } else {
+      const s = document.createElement("span");
+      s.className = "dim";
+      s.textContent = "no lease";
+      callTd.appendChild(s);
+    }
+    tr.appendChild(callTd);
+
+    const beatTd = document.createElement("td");
+    if (run.last_heartbeat) {
+      beatTd.textContent = new Date(run.last_heartbeat * 1000).toLocaleTimeString();
+    } else {
+      const s = document.createElement("span");
+      s.className = "dim";
+      s.textContent = "—";
+      beatTd.appendChild(s);
+    }
+    tr.appendChild(beatTd);
+
+    rowsEl.appendChild(tr);
+  }
+}
+
+async function poll() {
+  try {
+    // Same origin as this page -- the server that sent it also serves the
+    // data, so there is no URL to configure and no CORS to satisfy.
+    const res = await fetch("state", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    draw(await res.json());
+    setConn("live", "ok");
+  } catch (err) {
+    // Keep the last good screen up: a missed poll is not news, and blanking
+    // the page on one blip hides the state someone is watching.
+    setConn(String(err.message || err), "bad");
+  }
+}
+
+poll();
+setInterval(poll, EVERY_MS);
+</script>
+
+</body>
+</html>

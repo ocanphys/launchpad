@@ -5,7 +5,7 @@ from pathlib import Path
 
 import modal
 
-from config import APP_NAME, VOLUME_NAME, STORAGE, CONTAINER_LIFETIME
+from config import APP_NAME, VOLUME_NAME, STORAGE, CONTAINER_LIFETIME, HEARTBEAT_SECONDS
 from lease_protocol import beats, leases, new_grant
 from runtime import initialize_worker
 
@@ -32,7 +32,9 @@ etl_image = (
     .add_local_python_source(*CALL_SOURCE)
 )
 
-PAGE = Path("/page.html")  # where web_image mounts it, read at request time
+PAGE = Path("/runs.html")  # where web_image mounts it, read at request time
+
+FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
 
 # A third image, for the same reason there are two: reading the leases and
 # beats needs fastapi, and none of what a job needs -- no snakemake, no volume.
@@ -47,56 +49,61 @@ web_image = (
     base_image.pip_install("fastapi[standard]")
     # The page is HTML, so it stays HTML -- mounted like the Snakefile, not
     # pasted into this module as a string.
-    .add_local_file("page.html", PAGE.as_posix())
+    .add_local_file("runs.html", PAGE.as_posix())
     .add_local_python_source(*CALL_SOURCE)
 )
 
-def read_book() -> dict:
-    """One read of the whole book: every lease, each with its latest heartbeat.
+def read_state() -> dict:
+    """One read of the whole book, starting from the runs that exist rather
+    than the leases that were granted.
 
-    `leases` and `beats` are two separate Dicts, written by different actors --
-    the launcher grants, the worker beats -- so they are joined back together
-    here, per run, which is the only shape anyone reads them in. The join is a
-    direct lookup, `beat_records[grant["call_id"]]`: a beat is keyed by the call
-    that wrote it, so whatever comes back under the *current* holder's call_id is
-    unambiguously the current holder's, never a superseded call's leftover.
+    `runs` comes from the volume's `runs/` directory, not from `leases`: a
+    folder with no lease -- never started, or superseded and never reclaimed --
+    is exactly the gap worth being able to see, and starting from `leases`
+    instead would hide it.
 
-    `age` is computed here rather than left to the reader, because it is the
-    answer everyone actually wants and the clock it needs is this one. A reader's
-    clock is its own, and a laptop a few seconds off would make a healthy run look
-    dead.
-
-    The beats also go back untouched, beside the joined view. The join answers
-    "is this run alive"; the raw beats answer "what is actually written down",
-    which is the question worth asking when the join says something surprising.
+    `leases` and `beats` go back close to untouched: `leases` verbatim, `beats`
+    with one field added per entry, `lease`, naming which run that call_id is
+    the *current* holder for (None if it is not the current holder of anything
+    -- a superseded container still beating, or one that never held a lease at
+    all). Both reads come from the one snapshot taken here, so a beat's `lease`
+    always agrees with what `runs` says that call holds.
     """
+    volume.reload()
+    runs_root = Path(STORAGE) / "runs"
+    run_ids = sorted(p.name for p in runs_root.iterdir() if p.is_dir()) if runs_root.exists() else []
+
     grants = dict(leases.items())
     beat_records = dict(beats.items())
-
     now = time.time()
+
+    held_by = {grant["call_id"]: run_id for run_id, grant in grants.items()}
+
     runs = {}
-    for run_id, grant in sorted(grants.items()):
-        beat = beat_records.get(grant["call_id"])
+    for run_id in run_ids:
+        grant = grants.get(run_id)
+        call_id = grant["call_id"] if grant else None
+        beat = beat_records.get(call_id) if call_id else None
+        age = now - beat["last_beat_ts"] if beat else None
         runs[run_id] = {
-            **grant,
+            "lease": grant,
+            "call_id": call_id,
+            "job_type": grant["job_type"] if grant else None,
             "last_heartbeat": beat["last_beat_ts"] if beat else None,
-            "heartbeat_age": round(now - beat["last_beat_ts"], 1) if beat else None,
+            "active": age is not None and age < FLATLINE * HEARTBEAT_SECONDS,
         }
 
-    # call_ids beating for a run they are not (or no longer) the granted holder
-    # of: a superseded container still going, or a beat outliving its lease.
-    held_call_ids = {grant["call_id"] for grant in grants.values()}
-    orphans = sorted(set(beat_records) - held_call_ids)
+    beats_out = {call_id: {**beat, "lease": held_by.get(call_id)} for call_id, beat in beat_records.items()}
 
     return {
         "now": now,
         "runs": runs,
-        "beats": beat_records,
-        "orphan_beats": orphans,
+        "beats": beats_out,
+        "leases": grants,
     }
 
 
-@app.function(image=web_image)
+@app.function(image=web_image, volumes={STORAGE: volume})
 @modal.asgi_app()
 def leasebook():
     """The page and the data it polls, under one URL.
@@ -104,7 +111,7 @@ def leasebook():
     An ASGI app rather than two `fastapi_endpoint`s because two endpoints are two
     URLs on two subdomains: the page would have to be told where its data lives,
     and the browser would treat the answer as cross-origin and refuse to read it.
-    Served together, `data` is just a relative path, and no CORS question arises.
+    Served together, `state` is just a relative path, and no CORS question arises.
     """
     from fastapi import FastAPI
     from fastapi.responses import HTMLResponse
@@ -115,9 +122,9 @@ def leasebook():
     def index() -> str:
         return PAGE.read_text()
 
-    @api.get("/data")
-    def data() -> dict:
-        return read_book()
+    @api.get("/state")
+    def state() -> dict:
+        return read_state()
 
     return api
 
@@ -158,8 +165,6 @@ def etl(run_id: str, cores:int) -> None:
         worker.confirm_lease()
         volume.commit()
 
-
-FLATLINE = 5 # if heartbeat age is longer than this then lease is considered expired.
 
 @app.local_entrypoint()
 def launch(run_id: str):
