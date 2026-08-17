@@ -6,10 +6,19 @@ the run's own config.json, some depending on others having finished first:
     {
       "metadata": {...},
       "jobs": {
-        "<job_uid>": {"parameters": {...}, "dependencies": ["<job_uid>", ...]},
+        "<job_uid>": {
+          "parameters": {...},
+          "dependencies": ["<job_uid>", ...],
+          "resources": {"cpu": 1, "gpu_type": "A100", "gpu_count": 1}
+        },
         ...
       }
     }
+
+`resources` is optional, and so is every key inside it -- an absent
+sub-key (or an absent `resources` entirely) means "use Modal's platform
+default for that dimension," which is every job_uid's behavior today.
+`main.py` is the only reader; nothing in this module inspects it.
 
 A job_uid names both the config entry and the class below that runs it --
 `main.py` looks the class up by that exact name, so a new job is one class
@@ -52,7 +61,9 @@ def load_config(run_id: str) -> dict | None:
         return None
 
 
-def check_dependencies(config: dict, present: set[str], job_uid: str) -> tuple[bool, list[str]]:
+def check_dependencies(
+    config: dict, present: set[str], job_uid: str
+) -> tuple[bool, list[str]]:
     """True + [] once every dependency job_uid has left its artifact behind;
     else False + the ones still missing. Pure -- takes a snapshot rather than
     reading anything itself, so the same decision runs whether that snapshot
@@ -93,13 +104,30 @@ def preflight_check(run_id: str, volume: modal.Volume | None = None) -> dict[str
     its artifact yet, so job1 is stuck behind it):
 
         preflight_check(run_id) == {
-            "job0": {"done": False, "ready": True,  "missing_dependencies": []},
-            "job1": {"done": False, "ready": False, "missing_dependencies": ["job0"]},
+            "job0": {"done": False, "ready": True,  "missing_dependencies": [], "dependencies": [],       "resources": {}},
+            "job1": {"done": False, "ready": False, "missing_dependencies": ["job0"], "dependencies": ["job0"], "resources": {}},
         }
+
+    `dependencies` is the config's declared list verbatim -- unlike
+    `missing_dependencies` it doesn't go empty once satisfied, which is the
+    whole graph's edges, not just the blocking ones. Nothing here reads it;
+    it rides along for the web UI to draw the dependency graph from, without
+    a second endpoint that re-parses config.json.
+
+    `resources` rides along the same way, `{}` when the job_uid declares
+    none. `attempt_launch` is the one reader (it turns this into
+    `Function.with_options()` kwargs before spawning) -- and it comes from
+    this same snapshot rather than its own read for more than style:
+    `attempt_launch` runs from both `leasebook` (STORAGE mounted) and
+    `launch_job` (not), so anything it needs has to come through whichever
+    of the two branches above actually ran, same as `dependencies` and
+    `done` already do.
     """
     if volume is not None:
         try:
-            config = json.loads(b"".join(volume.read_file(f"runs/{run_id}/config.json")))
+            config = json.loads(
+                b"".join(volume.read_file(f"runs/{run_id}/config.json"))
+            )
         except FileNotFoundError:
             return {}
         present = {Path(entry.path).name for entry in volume.listdir(f"runs/{run_id}")}
@@ -115,12 +143,14 @@ def preflight_check(run_id: str, volume: modal.Volume | None = None) -> dict[str
     # artifact is too, `missing_dependencies` naming what's blocking it when
     # it isn't.
     states = {}
-    for job_uid in config.get("jobs", {}):
+    for job_uid, job_config in config.get("jobs", {}).items():
         ready, missing = check_dependencies(config, present, job_uid)
         states[job_uid] = {
             "done": artifact_name(job_uid) in present,
             "ready": ready,
             "missing_dependencies": missing,
+            "dependencies": job_config.get("dependencies", []),
+            "resources": job_config.get("resources", {}),
         }
     return states
 
@@ -141,7 +171,9 @@ class job0:
 
         self.config = load_config(run_id)
         if self.config is None:
-            raise JobError(f"{self.job_uid}: config.json missing or unparseable for run {run_id}")
+            raise JobError(
+                f"{self.job_uid}: config.json missing or unparseable for run {run_id}"
+            )
 
         params = self.config.get("jobs", {}).get(self.job_uid, {}).get("parameters", {})
         self.max = params.get("max", 20)
@@ -188,7 +220,9 @@ class job1:
 
         self.config = load_config(run_id)
         if self.config is None:
-            raise JobError(f"{self.job_uid}: config.json missing or unparseable for run {run_id}")
+            raise JobError(
+                f"{self.job_uid}: config.json missing or unparseable for run {run_id}"
+            )
 
         params = self.config.get("jobs", {}).get(self.job_uid, {}).get("parameters", {})
         self.max = params.get("max", 30)

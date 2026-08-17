@@ -22,6 +22,7 @@ The commit is the point of the whole arrangement. It happens once, on the way ou
 and only after a final `confirm` -- so a container that lost the run mid-job
 cannot land its writes, no matter how far it got before anyone noticed.
 """
+
 import time
 import threading
 import logging
@@ -52,6 +53,7 @@ class Worker:
     confirm_lease: Callable[..., None]
     dir: Path
 
+
 @contextmanager
 def initialize_worker(run_id: str, job_type: str, volume: modal.Volume):
     """Set up one call's logger and lease; commit on the way out, if still owed.
@@ -71,7 +73,6 @@ def initialize_worker(run_id: str, job_type: str, volume: modal.Volume):
       correctness problem the way a superseded one is.
     """
 
-
     call_id = modal.current_function_call_id() or "local"
 
     # Before the log file is opened, never after: an open file on the volume
@@ -84,7 +85,13 @@ def initialize_worker(run_id: str, job_type: str, volume: modal.Volume):
 
     logger = call_logger(call_id, log_dir / f"{job_type}.log")
     lease = Lease(run_id, call_id, logger)
-    worker = Worker(run_id=run_id, call_id=call_id, log=logger, confirm_lease=lease.confirm, dir=run_dir)
+    worker = Worker(
+        run_id=run_id,
+        call_id=call_id,
+        log=logger,
+        confirm_lease=lease.confirm,
+        dir=run_dir,
+    )
 
     def heartbeat():
         # No fence check first -- see `Lease.confirm`'s note on why. A single

@@ -6,5 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "modal>=1.5.4",
+    "ruff>=0.16.3",
     "snakemake>=9.25.1",
 ]

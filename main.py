@@ -1,4 +1,3 @@
-
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -28,8 +27,10 @@ worker_image = base_image.add_local_python_source(*CALL_SOURCE)
 
 etl_image = (
     base_image.pip_install("snakemake~=9.25")
-    .add_local_dir(local_path="etl", remote_path="/etl") #copy Snakefile to the container.
-    #keep it lightweight: four .py files mounted at runtime, not the package or its deps.
+    .add_local_dir(
+        local_path="etl", remote_path="/etl"
+    )  # copy Snakefile to the container.
+    # keep it lightweight: four .py files mounted at runtime, not the package or its deps.
     .add_local_python_source(*CALL_SOURCE)
 )
 
@@ -68,6 +69,7 @@ web_image = (
     .add_local_python_source(*CALL_SOURCE)
 )
 
+
 def read_state() -> dict:
     """One read of the whole book, starting from the runs that exist rather
     than the leases that were granted.
@@ -86,7 +88,11 @@ def read_state() -> dict:
     """
     volume.reload()
     runs_root = Path(STORAGE) / "runs"
-    run_ids = sorted(p.name for p in runs_root.iterdir() if p.is_dir()) if runs_root.exists() else []
+    run_ids = (
+        sorted(p.name for p in runs_root.iterdir() if p.is_dir())
+        if runs_root.exists()
+        else []
+    )
 
     grants = dict(leases.items())
     beat_records = dict(beats.items())
@@ -105,10 +111,13 @@ def read_state() -> dict:
             "job_type": grant["job_type"] if grant else None,
             "last_heartbeat": beat["last_beat_ts"] if beat else None,
             "active": is_active(grant, beat, now),
-            "jobs": jobs.preflight_check(run_id), #get this from local mount
+            "jobs": jobs.preflight_check(run_id),  # get this from local mount
         }
 
-    beats_out = {call_id: {**beat, "lease": held_by.get(call_id)} for call_id, beat in beat_records.items()}
+    beats_out = {
+        call_id: {**beat, "lease": held_by.get(call_id)}
+        for call_id, beat in beat_records.items()
+    }
 
     return {
         "now": now,
@@ -151,13 +160,11 @@ def leasebook():
     return api
 
 
-
 RUN_DIR = Path(STORAGE) / "data"
 
 
-
 @app.function(image=etl_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
-def etl(run_id: str, cores:int) -> None:
+def etl(run_id: str, cores: int) -> None:
     """Run any job under this call's own logger and lease.
 
     The job is the only thing passed in. The logger and the `confirm` it gets are
@@ -167,15 +174,18 @@ def etl(run_id: str, cores:int) -> None:
     """
     # The same string the grant carries, read off the same object: inside the
     # container `etl` is the Function, not this def.
-    with initialize_worker(run_id, job_type=etl.info.function_name, volume=volume) as worker:
+    with initialize_worker(
+        run_id, job_type=etl.info.function_name, volume=volume
+    ) as worker:
         import subprocess
+
         worker.confirm_lease()
         RUN_DIR.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [
                 "snakemake",
                 "--snakefile",
-                "/etl/Snakefile", #point to Snakefile in the container.
+                "/etl/Snakefile",  # point to Snakefile in the container.
                 "--directory",
                 str(RUN_DIR),
                 "--cores",
@@ -189,24 +199,22 @@ def etl(run_id: str, cores:int) -> None:
 
 
 @app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
-def job0(run_id: str) -> None:
-    """Run jobs.job0 under this call's own logger and lease. Same shape as
-    `etl`: confirm, do the work, confirm, commit."""
-    with initialize_worker(run_id, job_type=job0.info.function_name, volume=volume) as worker:
-        worker.confirm_lease()
-        job = jobs.job0(run_id, worker.log, worker.confirm_lease)
-        job.run()
-        worker.confirm_lease()
-        volume.commit()
+def run_job(run_id: str, job_uid: str) -> None:
+    """Run any jobs.py job_uid under this call's own logger and lease. Same
+    shape as `etl`: confirm, do the work, confirm, commit.
 
-
-@app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
-def job1(run_id: str) -> None:
-    """Run jobs.job1 under this call's own logger and lease. Same shape as
-    `etl`: confirm, do the work, confirm, commit."""
-    with initialize_worker(run_id, job_type=job1.info.function_name, volume=volume) as worker:
+    job_uid is passed straight through as `job_type`, not read off this
+    function's own `.info.function_name` the way `job0`/`job1` used to:
+    that name is `"run_job"` for every call now, where it used to equal the
+    job_uid only because the Modal function and the job class happened to
+    share a name. The log file's name, the lease-mismatch message, and the
+    dashboard's job-type column all key off `job_type`, so it's threaded
+    through explicitly here to keep all three unchanged.
+    """
+    job_cls = JOBS[job_uid]
+    with initialize_worker(run_id, job_type=job_uid, volume=volume) as worker:
         worker.confirm_lease()
-        job = jobs.job1(run_id, worker.log, worker.confirm_lease)
+        job = job_cls(run_id, worker.log, worker.confirm_lease)
         job.run()
         worker.confirm_lease()
         volume.commit()
@@ -243,10 +251,46 @@ def launch(run_id: str):
     call.get()
 
 
-JOBS = {"job0": (job0, jobs.job0), "job1": (job1, jobs.job1)}
+JOBS = {cls.job_uid: cls for cls in (jobs.job0, jobs.job1)}
 
 
-def attempt_launch(run_id: str, job: str) -> tuple[bool, str, modal.functions.FunctionCall | None]:
+def resource_options(resources: dict) -> dict:
+    """A job's config `resources` -> `Function.with_options()` kwargs.
+
+        resource_options({}) == {}
+        resource_options({"cpu": 2}) == {"cpu": 2}
+        resource_options({"gpu_type": "A100"}) == {"gpu": "A100"}
+        resource_options({"gpu_type": "A100", "gpu_count": 2}) == {"gpu": "A100:2"}
+
+    Unvalidated by design -- config.json is only ever written by the
+    trusted `push_config.py` (or a human editing it by hand), and Modal
+    itself rejects a bad cpu/gpu value server-side at spawn time. Three
+    interpretations worth being explicit about instead of leaving to
+    accident:
+
+    - `"cpu": null` counts as not declared, same as the key being absent.
+      Calling `with_options()` at all, even with every argument at its own
+      default, still moves the call into its own dynamically configured
+      container pool (see `attempt_launch`), and a no-op override is
+      exactly the case not worth paying that for.
+    - `gpu_count` with no `gpu_type` is dropped -- nothing to attach a
+      count to, so the job runs GPU-less rather than erroring.
+    - `gpu_count: 0` reads the same as omitted -- Modal's own "TYPE:COUNT"
+      string has no way to ask for zero of a GPU.
+    """
+    options = {}
+    if resources.get("cpu") is not None:
+        options["cpu"] = resources["cpu"]
+    gpu_type = resources.get("gpu_type")
+    if gpu_type:
+        gpu_count = resources.get("gpu_count")
+        options["gpu"] = f"{gpu_type}:{gpu_count}" if gpu_count else gpu_type
+    return options
+
+
+def attempt_launch(
+    run_id: str, job: str
+) -> tuple[bool, str, modal.functions.FunctionCall | None]:
     """Grant `run_id` to one call of `job`, or refuse and say why.
 
     Shared by `launch_job` (a local entrypoint, which waits on the call) and
@@ -256,29 +300,54 @@ def attempt_launch(run_id: str, job: str) -> tuple[bool, str, modal.functions.Fu
     CLI-only launcher, since a POST route is reachable by anyone with the
     URL, so both are validated before touching a lease or a path built from
     either.
+
+    Resources are never a parameter -- not here, not in `launch_job`, not in
+    the web route. They come only from `run_id`'s own config.json, read the
+    same way `state["ready"]` already is a few lines below, and turned into
+    `Function.with_options()` kwargs by `resource_options`. That call is
+    skipped entirely when a job_uid declares none (`options` empty): calling
+    it unconditionally would move every launch into its own dynamically
+    configured container pool, separate even from another call with the
+    same empty options, so a job_uid that asks for nothing special stays
+    pooled on `run_job`'s own base configuration -- the same pool job0 and
+    job1's traffic has always shared, before this function existed.
     """
     if not run_id or "/" in run_id or run_id in (".", ".."):
         return False, f"invalid run_id {run_id!r}", None
     if job not in JOBS:
         return False, f"unknown job {job!r}", None
 
-    fn, job_cls = JOBS[job]
+    job_cls = JOBS[job]
     job_uid = job_cls.job_uid
 
     grant = leases.get(run_id)
     beat = beats.get(grant["call_id"]) if grant else None
     if is_active(grant, beat, time.time()):
-        return False, f"{job_uid}: run {run_id} already has an active call -- not launching", None
+        return (
+            False,
+            f"{job_uid}: run {run_id} already has an active call -- not launching",
+            None,
+        )
 
     state = jobs.preflight_check(run_id, volume=volume).get(job_uid)
     if state is None:
-        return False, f"{job_uid}: no config.json (or not declared) for run {run_id} -- nothing to launch", None
+        return (
+            False,
+            f"{job_uid}: no config.json (or not declared) for run {run_id} -- nothing to launch",
+            None,
+        )
     if not state["ready"]:
-        return False, f"{job_uid}: blocked on {state['missing_dependencies']} for run {run_id}", None
+        return (
+            False,
+            f"{job_uid}: blocked on {state['missing_dependencies']} for run {run_id}",
+            None,
+        )
 
     leases.pop(run_id, None)
-    call = fn.spawn(run_id)
-    leases.put(run_id, new_grant(call.object_id, fn.info.function_name))
+    options = resource_options(state["resources"])
+    fn = run_job.with_options(**options) if options else run_job
+    call = fn.spawn(run_id, job_uid)
+    leases.put(run_id, new_grant(call.object_id, job_uid))
     return True, f"granted lease for {run_id} -> {call.object_id}", call
 
 

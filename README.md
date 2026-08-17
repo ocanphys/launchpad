@@ -6,9 +6,9 @@ Dicts and one web container.
 ## Where things live
 
 - **Volume (`trainvols`)**: one folder per run, `runs/{run_id}/`. Holds
-  `config.json` (which job_uids this run declares, their parameters and
-  dependencies), each job's `{job_uid}_artifact.txt` (its completion
-  marker), and `logs/{call_id}/{job_type}.log`.
+  `config.json` (which job_uids this run declares, their parameters,
+  dependencies, and resources), each job's `{job_uid}_artifact.txt` (its
+  completion marker), and `logs/{call_id}/{job_type}.log`.
 - **Dict `launchpad-leases`**: one entry per run_id, naming the call_id
   currently holding that run (there can be only one at a time -- a run's
   lease).
@@ -28,7 +28,7 @@ Dicts and one web container.
   - `/launch/{run_id}/{job}`: pops the stale lease key, spawns the job's
     Modal function, writes the new grant -- then returns immediately, it
     doesn't wait for the job to finish.
-- **Job containers** (`etl`, `job0`, `job1`) mount the volume too, write
+- **Job containers** (`etl`, `run_job`) mount the volume too, write
   locally, and only publish those writes with an explicit `volume.commit()`
   right before exiting -- nothing is visible to any reader, mounted or not,
   until that commit lands.
@@ -40,6 +40,55 @@ Dicts and one web container.
 So the volume is always the actual source of truth; every reader --
 mounted or not -- is working from some snapshot of it: a local mount
 refreshed on `reload()`, or a live-but-slower API call.
+
+## Jobs
+
+**Organized** as plain classes in `jobs.py`, one per job_uid, no base class
+-- two classes implementing the same three members don't need a third to
+agree on it:
+
+- `job_uid: str`, a class attribute -- names both the class and its
+  config.json entry (below), and is what the artifact filename, the log
+  file's name, and every log line's own labels are built from.
+- `__init__(self, run_id, logger, confirm_lease)` -- reads this job_uid's
+  own entry out of the run's `config.json`, and raises `JobError` if the
+  run isn't one it can run (no config.json, or the entry's missing).
+- `.run() -> None` -- does the work, checking its own dependencies first,
+  and calls `self.confirm(label)` (which can raise `LeaseLost`) before
+  anything it wouldn't want a superseded container to have done.
+
+`main.py`'s `JOBS` dict is built from each class's own `job_uid`
+(`{cls.job_uid: cls for cls in (...)}`, never a hand-typed string), and
+its `run_job(run_id, job_uid)` Modal function is the only thing that ever
+constructs or calls one -- looked up by `job_uid`, one function for every
+job rather than one per class. Adding a job is one class here plus one
+entry in some run's config; nothing else to wire up.
+
+**Specified** per run, in that run's `config.json`, under `"jobs"`:
+
+```json
+{"jobs": {"<job_uid>": {
+    "parameters": {...},
+    "dependencies": ["<job_uid>", ...],
+    "resources": {"cpu": 1, "gpu_type": "A100", "gpu_count": 1}
+}}}
+```
+
+- `parameters` -- read by the job class itself, inside its own
+  `__init__` (e.g. job0's `max`). Nothing outside the class touches these.
+- `dependencies` -- other job_uids that must have already left their
+  artifact behind. Checked twice, deliberately: once by `attempt_launch`
+  before spawning at all (so a blocked job never burns a container), and
+  again by the job itself inside `.run()` (so a dependency that goes
+  missing between that check and the container actually booting still
+  gets caught).
+- `resources` -- optional, and read only by `attempt_launch`, never by the
+  job -- turned into `Function.with_options(cpu=..., gpu=...)` kwargs
+  before spawning. A job_uid that declares none runs on `run_job`'s own
+  default pool, the same one every job runs on today.
+
+A job_uid with no entry in a run's `config.json` can't be launched at all
+-- `attempt_launch` refuses before ever touching a lease.
 
 ## One job, traced
 
@@ -54,7 +103,7 @@ sequenceDiagram
     participant V as Volume (source of truth)
     participant Le as Leases (Dict)
     participant B as Beats (Dict)
-    participant J as Job container (job0/job1)
+    participant J as Job container (run_job)
 
     L->>V: GET config+listdir (volume API)
     L->>Le: DELETE stale grant
