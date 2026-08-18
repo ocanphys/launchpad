@@ -2,7 +2,7 @@
 // This is the only file that talks to the network or holds mutable state.
 // Rendering is delegated to render.js; DOM building to el.js.
 
-import { runRow } from "./render.js";
+import { runRow, problemRow } from "./render.js";
 
 // --- config -----------------------------------------------------------------
 
@@ -22,6 +22,9 @@ const connEl = document.getElementById("conn");
 const metaEl = document.getElementById("meta");
 const rowsEl = document.getElementById("rows");
 const emptyEl = document.getElementById("empty");
+const problemsEl = document.getElementById("problems");
+const problemCountEl = document.getElementById("problemCount");
+const problemRowsEl = document.getElementById("problemRows");
 
 // --- app state --------------------------------------------------------------
 
@@ -82,6 +85,15 @@ function draw(payload) {
 
   rowsEl.replaceChildren(...ids.map((id) => runRow(id, runs[id], ctx)));
   emptyEl.hidden = ids.length > 0;
+
+  // Only touches #problemRows' children and the count text -- never
+  // recreates <details id="problems"> itself, so a poll can't clobber
+  // whether the user has it open.
+  const problems = payload.problem_runs || {};
+  const problemIds = Object.keys(problems).sort();
+  problemRowsEl.replaceChildren(...problemIds.map((id) => problemRow(id, problems[id])));
+  problemCountEl.textContent = problemIds.length;
+  problemsEl.hidden = problemIds.length === 0;
 }
 
 // Redraw from the last good payload (used after local state changes).

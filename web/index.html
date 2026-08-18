@@ -49,6 +49,14 @@
   }
 
   .empty { opacity: .55; padding: 1rem 0; }
+
+  details#problems { margin-top: 1.5rem; }
+  details#problems summary {
+    cursor: pointer; font-size: 11px; font-weight: 600; color: #cf222e;
+  }
+  details#problems table { margin-top: .6rem; table-layout: fixed; }
+  details#problems td.run { width: 30%; }
+  td.error { word-break: break-word; white-space: pre-wrap; opacity: .85; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -65,6 +73,20 @@
   <tbody id="rows"></tbody>
 </table>
 <p class="empty" id="empty" hidden>no run folders on the volume yet.</p>
+
+<!-- Only a run whose preflight check itself raised lands here -- a normal
+     run, even an empty or blocked one, never does. Hidden entirely when
+     there are none; collapsed by default when there are, since these are
+     the exception, not what a glance at the page is usually for. -->
+<details id="problems" hidden>
+  <summary>problem runs (<span id="problemCount">0</span>)</summary>
+  <table>
+    <thead>
+      <tr><th>run</th><th>error</th></tr>
+    </thead>
+    <tbody id="problemRows"></tbody>
+  </table>
+</details>
 
 <!-- One entry point. type="module" gives us import/export with no bundler.
      Note: ES modules only load over http(s), not file:// — serve the folder

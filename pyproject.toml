@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "ipykernel>=7.3.0",
     "modal>=1.5.4",
+    "pydantic>=2.13.4",
     "ruff>=0.16.3",
     "snakemake>=9.25.1",
 ]

@@ -17,6 +17,7 @@ LEASE_BACKOFF = 5.0  # seconds between retries.
 
 MATCH, MISMATCH, UNKNOWN = "match", "mismatch", "unknown"
 
+
 class LeaseLost(Exception):
     """We can no longer prove we own this run, so we must stop writing.
 
@@ -30,7 +31,12 @@ def new_grant(call_id: str, job_type: str) -> dict:
     """
     create the value stored under leases[run_id].
     """
-    return {"call_id": call_id, "granted_ts": time.time(), "attempt":1, "job_type": job_type}
+    return {
+        "call_id": call_id,
+        "granted_ts": time.time(),
+        "attempt": 1,
+        "job_type": job_type,
+    }
 
 
 def fence(run_id: str, my_call_id: str) -> tuple[str, dict | None]:
@@ -93,14 +99,20 @@ class Lease:
         for i in range(1, self.tries + 1):
             verdict, grant = fence(self.run_id, self.call_id)
             if verdict == MATCH:
-                self.logger.info(f"{label}: lease held (attempt {grant['attempt']}, try {i}/{self.tries})")
+                self.logger.info(
+                    f"{label}: lease held (attempt {grant['attempt']}, try {i}/{self.tries})"
+                )
                 return
             if verdict == MISMATCH:
                 # Which kind of holder matters to whoever reads this log: an etl
                 # means the run's data is being rebuilt under us, a worker means we
                 # were superseded.
-                raise LeaseLost(f"{label}: another {grant['job_type']} holds this run ({grant['call_id']})")
+                raise LeaseLost(
+                    f"{label}: another {grant['job_type']} holds this run ({grant['call_id']})"
+                )
             if i == self.tries:
-                raise LeaseLost(f"{label}: indeterminate after {self.tries} tries -- ownership never confirmed")
+                raise LeaseLost(
+                    f"{label}: indeterminate after {self.tries} tries -- ownership never confirmed"
+                )
             self.logger.info(f"{label}: indeterminate, retry {i}/{self.tries}")
             time.sleep(self.backoff)

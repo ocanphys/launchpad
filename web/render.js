@@ -77,3 +77,13 @@ export function runRow(id, run, ctx) {
     el("td", { class: "job-buttons" }, jobButtons(id, run, ctx)),
   );
 }
+
+// One <tr> in the problem-runs table: a run whose preflight check itself
+// raised, so there's no lease/heartbeat/jobs snapshot to show for it --
+// just which run and what the check said.
+export function problemRow(id, problem) {
+  return el("tr", {},
+    el("td", { class: "run", text: id }),
+    el("td", { class: "error", text: problem.error }),
+  );
+}
