@@ -20,6 +20,11 @@ sub-key (or an absent `resources` entirely) means "use Modal's platform
 default for that dimension," which is every job_uid's behavior today.
 `main.py` is the only reader; nothing in this module inspects it.
 
+The schema above is `run_config.RunConfig` -- `load_config` parses and
+validates through it, so a malformed config.json fails loudly (a
+pydantic `ValidationError`) instead of surfacing as a `KeyError` deep
+inside a job's `__init__`. See config-schema.md.
+
 A job_uid names both the config entry and the class below that runs it --
 `main.py` looks the class up by that exact name, so a new job is one class
 here plus one entry in some run's config, nothing else to wire up.
@@ -28,13 +33,15 @@ here plus one entry in some run's config, nothing else to wire up.
 its artifact file behind (`artifact_name`) -- nothing fancier than that yet.
 """
 
-import json
 import time
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 import modal
+from pydantic import ValidationError
 
 from config import STORAGE
+from run_config import RunConfig, resolve_import_ref
 
 RUNS = Path(STORAGE) / "runs"
 
@@ -51,91 +58,65 @@ def artifact_name(job_uid: str) -> str:
     return f"{job_uid}_artifact.txt"
 
 
-def load_config(run_id: str) -> dict | None:
-    """Read config.json off the mounted volume. Only valid where STORAGE is
-    actually mounted -- inside a job's own container, which is the only
-    place this is called from."""
+def load_config(run_id: str) -> RunConfig | None:
+    """Read and validate config.json off the mounted volume. Only valid
+    where STORAGE is actually mounted -- inside a job's own container,
+    which is the only place this is called from."""
     try:
-        return json.loads((run_dir(run_id) / "config.json").read_text())
-    except (OSError, ValueError):
+        return RunConfig.model_validate_json((run_dir(run_id) / "config.json").read_text())
+    except (OSError, ValidationError):
         return None
 
 
-def check_dependencies(
-    config: dict, present: set[str], job_uid: str
+def _check_dependencies(
+    config: RunConfig, present: set[str], job_uid: str
 ) -> tuple[bool, list[str]]:
     """True + [] once every dependency job_uid has left its artifact behind;
     else False + the ones still missing. Pure -- takes a snapshot rather than
     reading anything itself, so the same decision runs whether that snapshot
     came from `preflight_check`'s local mounted read or its Volume API one.
     """
-    deps = config.get("jobs", {}).get(job_uid, {}).get("dependencies", [])
+    entry = config.jobs.get(job_uid)
+    deps = entry.dependencies if entry else []
     missing = [d for d in deps if artifact_name(d) not in present]
     return not missing, missing
 
 
 def preflight_check(run_id: str, volume: modal.Volume | None = None) -> dict[str, dict]:
-    """Per-run, per-job_uid state: done (artifact present), ready (every
-    dependency done), and what's still missing if not.
+    """Per-job_uid state from a run's config.json -- done, ready, what's
+    missing, and (read by `attempt_launch`, not by anything here) each
+    job_uid's declared dependencies and resources.
 
-    Two ways to get the (config, present-filenames) snapshot this is built
-    from, picked by whether `volume` is passed:
+    preflight_check(run_id) -> {
+        "job0": {"done": False, "ready": True, "missing_dependencies": [],
+                 "dependencies": [], "resources": {}},
+        "job1": {"done": False, "ready": False, "missing_dependencies": ["job0"],
+                 "dependencies": ["job0"], "resources": {}},
+    }
+    # job1 depends on job0, which hasn't written its artifact yet
 
-    `volume` given -- one `listdir` and one `read_file` over the Volume API.
-    For callers with no local mount at all, like `launch_job` / `attempt_launch`
-    (the latter runs both inside `leasebook`, which does have STORAGE mounted,
-    and from the unmounted `launch_job` local_entrypoint -- since it must work
-    for both, it always passes `volume` and takes the API path).
+    Reads over the Volume API if `volume` is given, else off the local mount.
 
-    `volume` omitted -- read straight off the local mount instead. For
-    `read_state`: its container (`leasebook`) already has `STORAGE` mounted,
-    so a network round-trip per run for data already sitting on local disk is
-    pure waste -- and under load it's worse than waste, since `leasebook` is
-    pinned to one container (`max_containers=1`): a slow Volume API call
-    there queues every other request behind it instead of spreading across
-    containers.
-
-    Example -- a run whose config.json declares:
-
-        {"jobs": {"job0": {"dependencies": []},
-                   "job1": {"dependencies": ["job0"]}}}
-
-    and whose folder holds only "config.json" so far (job0 hasn't written
-    its artifact yet, so job1 is stuck behind it):
-
-        preflight_check(run_id) == {
-            "job0": {"done": False, "ready": True,  "missing_dependencies": [], "dependencies": [],       "resources": {}},
-            "job1": {"done": False, "ready": False, "missing_dependencies": ["job0"], "dependencies": ["job0"], "resources": {}},
-        }
-
-    `dependencies` is the config's declared list verbatim -- unlike
-    `missing_dependencies` it doesn't go empty once satisfied, which is the
-    whole graph's edges, not just the blocking ones. Nothing here reads it;
-    it rides along for the web UI to draw the dependency graph from, without
-    a second endpoint that re-parses config.json.
-
-    `resources` rides along the same way, `{}` when the job_uid declares
-    none. `attempt_launch` is the one reader (it turns this into
-    `Function.with_options()` kwargs before spawning) -- and it comes from
-    this same snapshot rather than its own read for more than style:
-    `attempt_launch` runs from both `leasebook` (STORAGE mounted) and
-    `launch_job` (not), so anything it needs has to come through whichever
-    of the two branches above actually ran, same as `dependencies` and
-    `done` already do.
+    The local-mount branch does not swallow errors: no config.json for
+    `run_id` (`FileNotFoundError`) or one that fails `RunConfig` validation
+    both raise. This is the branch `read_state` uses to check every run on
+    the volume, one by one -- it decides per run_id whether a raise here
+    means "not ready yet" or "broken," this function just tells the truth
+    about which run_id it was.
     """
     if volume is not None:
         try:
-            config = json.loads(
-                b"".join(volume.read_file(f"runs/{run_id}/config.json"))
-            )
+            raw = b"".join(volume.read_file(f"runs/{run_id}/config.json"))
         except FileNotFoundError:
+            return {}
+        try:
+            config = RunConfig.model_validate_json(raw)
+        except ValidationError:
             return {}
         present = {Path(entry.path).name for entry in volume.listdir(f"runs/{run_id}")}
     else:
-        config = load_config(run_id)
-        if config is None:
-            return {}
         rdir = run_dir(run_id)
+        config = RunConfig.model_validate_json((rdir / "config.json").read_text())
         present = {p.name for p in rdir.iterdir()} if rdir.exists() else set()
 
     # Per-job_uid state for every job_uid this run's config declares: `done`
@@ -143,110 +124,172 @@ def preflight_check(run_id: str, volume: modal.Volume | None = None) -> dict[str
     # artifact is too, `missing_dependencies` naming what's blocking it when
     # it isn't.
     states = {}
-    for job_uid, job_config in config.get("jobs", {}).items():
-        ready, missing = check_dependencies(config, present, job_uid)
+    for job_uid, entry in config.jobs.items():
+        ready, missing = _check_dependencies(config, present, job_uid)
         states[job_uid] = {
             "done": artifact_name(job_uid) in present,
             "ready": ready,
             "missing_dependencies": missing,
-            "dependencies": job_config.get("dependencies", []),
-            "resources": job_config.get("resources", {}),
+            "dependencies": entry.dependencies,
+            "resources": entry.resources.model_dump(exclude_none=True),
         }
     return states
 
 
-class job0:
-    """Counts to config["jobs"]["job0"]["parameters"]["max"] (default 20),
-    logging every step, then leaves job0_artifact.txt behind for anything
-    that depends on it.
+class Job(ABC):
+    """The contract every job class in this module honors -- previously
+    just a convention (see job0/job1 below, which predate it and don't
+    inherit from it), now enforced: instantiating a subclass that's
+    missing a piece raises immediately, not the first time something
+    calls it.
+
+    __init__ is concrete, not abstract: every job reads run_id/logger/
+    confirm_lease and its own config.json entry the same way, so that part
+    lives here once instead of once per subclass. A subclass with its own
+    setup calls super().__init__(...) first, then does the rest -- see
+    toy_job below.
     """
 
-    job_uid = "job0"
+    @property
+    @abstractmethod
+    def job_uid(self) -> str:
+        """Names both this class and its entry in a run's config.json."""
 
-    def __init__(self, run_id: str, logger, confirm_lease):
+    def __init__(self, run_id: str, logger, worker):
+        """Read this job_uid's own config.json entry into self.config;
+        raise JobError if this run isn't one it can run."""
         self.run_id = run_id
-        self.log = logger
-        self.confirm = confirm_lease
+        self.logger = logger
+        self.confirm_lease = worker.confirm_lease
         self.rdir = run_dir(run_id)
-
         self.config = load_config(run_id)
         if self.config is None:
-            raise JobError(
-                f"{self.job_uid}: config.json missing or unparseable for run {run_id}"
-            )
-
-        params = self.config.get("jobs", {}).get(self.job_uid, {}).get("parameters", {})
-        self.max = params.get("max", 20)
-        self.count = 0
+            raise JobError(f"{self.job_uid}: config.json missing or unparseable for run {run_id}")
+        entry = self.config.jobs.get(self.job_uid)
+        if entry is None:
+            raise JobError(f"{self.job_uid}: no entry for this job in config.json for run {run_id}")
+        self.resources = entry.resources
+        self.dependencies = entry.dependencies
+        self.parameters = entry.parameters
+        self.metadata = self.config.metadata
 
     def check_dependencies(self) -> tuple[bool, list[str]]:
+        """True + [] once every dependency job_uid's artifact is present;
+        else False + the ones still missing."""
         present = {p.name for p in self.rdir.iterdir()} if self.rdir.exists() else set()
-        return check_dependencies(self.config, present, self.job_uid)
+        return _check_dependencies(self.config, present, self.job_uid)
 
-    def progress(self) -> float:
-        return self.count / self.max
-
-    def status(self) -> str:
-        return "finished" if self.count >= self.max else "in progress"
-
-    def run(self) -> None:
+    def start(self) -> None:
+        """Check deps, run the job and leave artifact_name(self.job_uid) behind"""
         ok, missing = self.check_dependencies()
         if not ok:
             raise JobError(f"{self.job_uid}: blocked on dependencies {missing}")
 
-        while self.count < self.max:
-            self.count += 1
-            self.log.info(f"{self.job_uid}: count {self.count}/{self.max}")
-            time.sleep(1)
+        try:
+            self.run() # run the job!
 
-        self.confirm(f"{self.job_uid}: before artifact")
-        (self.rdir / artifact_name(self.job_uid)).write_text("done")
+            self.confirm(f"{self.job_uid}: before artifact")
+            (self.rdir / artifact_name(self.job_uid)).write_text("done")
+        except Exception as e:
+            raise JobError(f"{self.job_uid}: failed -- {e}")
+
+    @abstractmethod
+    def run(self) -> float:
+        """Main content of the job - pytorch loop, """
+
+    @abstractmethod
+    def progress(self) -> float:
+        """How far through its work this job is, 0.0 to 1.0."""
+
+    @abstractmethod
+    def status(self) -> str:
+        """Returns one of the following: 'new', 'in progress', 'finished' """
 
 
-class job1:
-    """Counts to config["jobs"]["job1"]["parameters"]["max"] (default 30),
-    logging every step, then leaves job1_artifact.txt behind. Depends on
-    job0 by convention in a run's config, not by anything here -- see
-    `check_dependencies`.
+def get_job_class(job_uid: str) -> type[Job] | None:
+    """Resolve job_uid to its Job subclass in this module -- job_uid IS
+    the class name, so "ETL" resolves to jobs.ETL directly via
+    resolve_import_ref, no separate registry to keep in sync with whatever
+    classes are actually defined here. `RunConfig` calls this too, to
+    validate every job_uid at config-parse time rather than launch time.
+
+    get_job_class("ETL") -> jobs.ETL
+    get_job_class("nope") -> None
+    """
+    try:
+        cls = resolve_import_ref(f"jobs.{job_uid}")
+    except (ImportError, AttributeError):
+        return None
+    if isinstance(cls, type) and issubclass(cls, Job) and cls is not Job:
+        return cls
+    return None
+
+
+class Count(Job):
+    """Smallest possible Job: no config parameters, no dependencies -- just
+    sleeps, then leaves its artifact behind. Demonstrates the contract
+    above; not registered in main.py's JOBS, so it isn't launchable as-is.
     """
 
-    job_uid = "job1"
+    job_uid = "count10"
 
-    def __init__(self, run_id: str, logger, confirm_lease):
-        self.run_id = run_id
-        self.log = logger
-        self.confirm = confirm_lease
-        self.rdir = run_dir(run_id)
-
-        self.config = load_config(run_id)
-        if self.config is None:
-            raise JobError(
-                f"{self.job_uid}: config.json missing or unparseable for run {run_id}"
-            )
-
-        params = self.config.get("jobs", {}).get(self.job_uid, {}).get("parameters", {})
-        self.max = params.get("max", 30)
-        self.count = 0
-
-    def check_dependencies(self) -> tuple[bool, list[str]]:
-        present = {p.name for p in self.rdir.iterdir()} if self.rdir.exists() else set()
-        return check_dependencies(self.config, present, self.job_uid)
+    def __init__(self, run_id: str, logger, worker):
+        super().__init__(run_id, logger, worker)
 
     def progress(self) -> float:
-        return self.count / self.max
+        return 1.0 if self.done else 0.0
 
     def status(self) -> str:
-        return "finished" if self.count >= self.max else "in progress"
+        match self.progress:
+            case 0.0:
+                return "new"
+            case 1.0:
+                return "finished" 
+            case _:
+                return "in progress"
 
     def run(self) -> None:
-        ok, missing = self.check_dependencies()
-        if not ok:
-            raise JobError(f"{self.job_uid}: blocked on dependencies {missing}")
 
-        while self.count < self.max:
-            self.count += 1
-            self.log.info(f"{self.job_uid}: count {self.count}/{self.max}")
-            time.sleep(1)
+        self.logger.info(f"{self.job_uid}: sleeping")
+        time.sleep(1)
 
-        self.confirm(f"{self.job_uid}: before artifact")
-        (self.rdir / artifact_name(self.job_uid)).write_text("done")
+
+class ETL(Job):
+    job_uid = "etl"
+
+    def __init__(self, run_id: str, logger, worker):
+        super().__init__(run_id, logger, worker)
+
+    def progress(self) -> float:
+        return 1.0 if self.done else 0.0
+
+    def status(self) -> str:
+        match self.progress:
+            case 0.0:
+                return "new"
+            case 1.0:
+                return "finished" 
+            case _:
+                return "in progress"
+            
+    def run(self) -> None:
+        import subprocess
+
+        self.confirm_lease()
+        self.rdir.mkdir(parents=True, exist_ok=True)
+        cores = self.resources.cpu
+        subprocess.run(
+            [
+                "snakemake",
+                "--snakefile",
+                "/etl/Snakefile",  # point to Snakefile in the container.
+                "--directory",
+                str(self.rdir),
+                "--cores",
+                str(cores),
+            ],
+            check=True,
+        )
+        time.sleep(20)
+        self.confirm_lease()
+        self.volume.commit()

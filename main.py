@@ -5,7 +5,7 @@ from pathlib import Path
 import modal
 
 import jobs
-from config import APP_NAME, VOLUME_NAME, STORAGE, CONTAINER_LIFETIME, HEARTBEAT_SECONDS
+from config import APP_NAME, VOLUME_NAME, STORAGE, CONTAINER_LIFETIME, HEARTBEAT_SECONDS, FLATLINE
 from lease_protocol import beats, leases, new_grant
 from runtime import initialize_worker
 
@@ -15,18 +15,24 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 base_image = modal.Image.debian_slim(python_version="3.12")
 
 # The modules every call needs whatever it runs: config, its logger, its lease,
-# the scope that wires those two together, and the jobs themselves.
-CALL_SOURCE = ("config", "logs", "lease_protocol", "runtime", "jobs")
+# the scope that wires those two together, the config.json schema, and the
+# jobs themselves.
+CALL_SOURCE = ("config", "logs", "lease_protocol", "runtime", "run_config", "jobs")
 
 # Two images, because a job's dependencies are not every job's dependencies: a
 # job that never runs snakemake should not wait for a container carrying it.
 # Both descend from base_image rather than worker_image from etl_image --
 # add_local_* must come last in a chain, so nothing can be pip-installed on top
 # of an image that already has local files added.
-worker_image = base_image.add_local_python_source(*CALL_SOURCE)
+#
+# Both also need pydantic explicitly: it's not one of CALL_SOURCE's own local
+# files, it's a dependency of one (run_config.py, imported by jobs.py) --
+# add_local_python_source copies .py files into the image, it doesn't install
+# what they import.
+worker_image = base_image.pip_install("pydantic>=2.13.4").add_local_python_source(*CALL_SOURCE)
 
 etl_image = (
-    base_image.pip_install("snakemake~=9.25")
+    base_image.pip_install("snakemake~=9.25", "pydantic>=2.13.4")
     .add_local_dir(
         local_path="etl", remote_path="/etl"
     )  # copy Snakefile to the container.
@@ -34,9 +40,7 @@ etl_image = (
     .add_local_python_source(*CALL_SOURCE)
 )
 
-WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
 
-FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
 
 
 def is_active(grant: dict | None, beat: dict | None, now: float) -> bool:
@@ -61,6 +65,8 @@ def is_active(grant: dict | None, beat: dict | None, now: float) -> bool:
 # web container needs every module main.py names at import time, whether or not
 # serving a stream ever calls into it. Trimming this to what the endpoint reads
 # gets a crash loop, not a smaller image.
+WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
+
 web_image = (
     base_image.pip_install("fastapi[standard]")
     # The page is HTML/JS, so it stays HTML/JS -- mounted like the Snakefile
@@ -85,6 +91,14 @@ def read_state() -> dict:
     -- a superseded container still beating, or one that never held a lease at
     all). Both reads come from the one snapshot taken here, so a beat's `lease`
     always agrees with what `runs` says that call holds.
+
+    `jobs.preflight_check` raises rather than reporting "not ready" the same
+    way as "broken" (see its own docstring) -- so this is the one place that
+    decides what a raise means for a whole run: not `runs`, but
+    `problem_runs`, keyed the same way, holding the error instead of a
+    lease/heartbeat/jobs snapshot. One run_id's raise doesn't cost the rest
+    of the book -- the loop below catches it per run_id, not around the
+    whole loop.
     """
     volume.reload()
     runs_root = Path(STORAGE) / "runs"
@@ -101,7 +115,14 @@ def read_state() -> dict:
     held_by = {grant["call_id"]: run_id for run_id, grant in grants.items()}
 
     runs = {}
+    problem_runs = {}
     for run_id in run_ids:
+        try:
+            job_states = jobs.preflight_check(run_id)  # local mount
+        except Exception as exc:
+            problem_runs[run_id] = {"error": str(exc)}
+            continue
+
         grant = grants.get(run_id)
         call_id = grant["call_id"] if grant else None
         beat = beat_records.get(call_id) if call_id else None
@@ -111,7 +132,7 @@ def read_state() -> dict:
             "job_type": grant["job_type"] if grant else None,
             "last_heartbeat": beat["last_beat_ts"] if beat else None,
             "active": is_active(grant, beat, now),
-            "jobs": jobs.preflight_check(run_id),  # get this from local mount
+            "jobs": job_states,
         }
 
     beats_out = {
@@ -122,6 +143,7 @@ def read_state() -> dict:
     return {
         "now": now,
         "runs": runs,
+        "problem_runs": problem_runs,
         "beats": beats_out,
         "leases": grants,
     }
@@ -160,44 +182,6 @@ def leasebook():
     return api
 
 
-RUN_DIR = Path(STORAGE) / "data"
-
-
-@app.function(image=etl_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
-def etl(run_id: str, cores: int) -> None:
-    """Run any job under this call's own logger and lease.
-
-    The job is the only thing passed in. The logger and the `confirm` it gets are
-    built here, from the call id this container was actually given -- which is why
-    they cannot be handed down from the launcher: the launcher does not know the
-    call id until the call exists.
-    """
-    # The same string the grant carries, read off the same object: inside the
-    # container `etl` is the Function, not this def.
-    with initialize_worker(
-        run_id, job_type=etl.info.function_name, volume=volume
-    ) as worker:
-        import subprocess
-
-        worker.confirm_lease()
-        RUN_DIR.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [
-                "snakemake",
-                "--snakefile",
-                "/etl/Snakefile",  # point to Snakefile in the container.
-                "--directory",
-                str(RUN_DIR),
-                "--cores",
-                str(cores),
-            ],
-            check=True,
-        )
-        time.sleep(20)
-        worker.confirm_lease()
-        volume.commit()
-
-
 @app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
 def run_job(run_id: str, job_uid: str) -> None:
     """Run any jobs.py job_uid under this call's own logger and lease. Same
@@ -210,48 +194,23 @@ def run_job(run_id: str, job_uid: str) -> None:
     share a name. The log file's name, the lease-mismatch message, and the
     dashboard's job-type column all key off `job_type`, so it's threaded
     through explicitly here to keep all three unchanged.
+
+    job_cls is resolved here, from job_uid itself (`jobs.get_job_class`) --
+    no registry in this file to keep in sync with jobs.py. job_uid IS the
+    class name (`RunConfig` already validated that this run's config.json
+    only ever declares job_uids that resolve, when it was written), so
+    this is a re-check against jobs.py as currently deployed, not a first
+    one.
     """
-    job_cls = JOBS[job_uid]
+    job_cls = jobs.get_job_class(job_uid)
+    if job_cls is None:
+        raise jobs.JobError(f"{job_uid}: no such class in jobs.py")
     with initialize_worker(run_id, job_type=job_uid, volume=volume) as worker:
         worker.confirm_lease()
-        job = job_cls(run_id, worker.log, worker.confirm_lease)
+        job = job_cls(run_id, worker.log, worker)
         job.run()
         worker.confirm_lease()
         volume.commit()
-
-
-@app.local_entrypoint()
-def launch(run_id: str):
-    """Grant one run to one call, then stay up until that call is finished.
-
-    `run_id` is required. It defaulted to None, and nothing rejected that: the
-    grant went to the key "lease:None" and the container built a path under a
-    directory named None.
-
-    Two orderings here are load-bearing.
-
-    The stale key goes *before* the spawn. The call id does not exist until the
-    spawn returns, so the grant cannot be written first -- but a container that
-    boots fast enough to read the previous run's grant under this same run_id
-    finds a call id that is not its own, and a mismatch is fatal on sight. Clearing
-    the key first turns that into the silence `fence` already knows how to wait
-    out, which is the difference between a run that starts late and one that dies.
-
-    The wait at the end is not politeness. `modal run` builds an ephemeral app and
-    tears it down the moment this function returns -- spawned calls included -- so
-    a launcher that spawns and exits kills the container it just started, usually
-    before it has finished booting. For a launcher that genuinely should not wait,
-    deploy the app and spawn through `modal.Function.from_name`, where the call
-    outlives whoever started it.
-    """
-    leases.pop(run_id, None)
-    call = etl.spawn(run_id, cores=1)
-    leases.put(run_id, new_grant(call.object_id, etl.info.function_name))
-    print(f"granted lease for {run_id} -> {call.object_id}, waiting for it to finish")
-    call.get()
-
-
-JOBS = {cls.job_uid: cls for cls in (jobs.job0, jobs.job1)}
 
 
 def resource_options(resources: dict) -> dict:
@@ -309,45 +268,46 @@ def attempt_launch(
     it unconditionally would move every launch into its own dynamically
     configured container pool, separate even from another call with the
     same empty options, so a job_uid that asks for nothing special stays
-    pooled on `run_job`'s own base configuration -- the same pool job0 and
-    job1's traffic has always shared, before this function existed.
+    pooled on `run_job`'s own base configuration.
+
+    `job` is a job_uid, not looked up against a registry here -- `RunConfig`
+    already validated, when this run's config.json was written, that every
+    job_uid it declares resolves to a real class in jobs.py. So the only
+    question left is whether `run_id`'s config declares *this* job_uid at
+    all, which `preflight_check` (below) answers by returning None for one
+    it's never heard of.
     """
     if not run_id or "/" in run_id or run_id in (".", ".."):
         return False, f"invalid run_id {run_id!r}", None
-    if job not in JOBS:
-        return False, f"unknown job {job!r}", None
-
-    job_cls = JOBS[job]
-    job_uid = job_cls.job_uid
 
     grant = leases.get(run_id)
     beat = beats.get(grant["call_id"]) if grant else None
     if is_active(grant, beat, time.time()):
         return (
             False,
-            f"{job_uid}: run {run_id} already has an active call -- not launching",
+            f"{job}: run {run_id} already has an active call -- not launching",
             None,
         )
 
-    state = jobs.preflight_check(run_id, volume=volume).get(job_uid)
+    state = jobs.preflight_check(run_id, volume=volume).get(job)
     if state is None:
         return (
             False,
-            f"{job_uid}: no config.json (or not declared) for run {run_id} -- nothing to launch",
+            f"{job}: no config.json (or not declared) for run {run_id} -- nothing to launch",
             None,
         )
     if not state["ready"]:
         return (
             False,
-            f"{job_uid}: blocked on {state['missing_dependencies']} for run {run_id}",
+            f"{job}: blocked on {state['missing_dependencies']} for run {run_id}",
             None,
         )
 
     leases.pop(run_id, None)
     options = resource_options(state["resources"])
     fn = run_job.with_options(**options) if options else run_job
-    call = fn.spawn(run_id, job_uid)
-    leases.put(run_id, new_grant(call.object_id, job_uid))
+    call = fn.spawn(run_id, job)
+    leases.put(run_id, new_grant(call.object_id, job))
     return True, f"granted lease for {run_id} -> {call.object_id}", call
 
 
