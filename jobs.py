@@ -8,7 +8,7 @@ the run's own config.json, some depending on others having finished first:
       "jobs": {
         "<job_uid>": {
           "parameters": {...},
-          "dependencies": ["<job_uid>", ...],
+          "dependencies": ["<path relative to the volume root>", ...],
           "resources": {"cpu": 1, "gpu_type": "A100", "gpu_count": 1}
         },
         ...
@@ -29,8 +29,13 @@ A job_uid names both the config entry and the class below that runs it --
 `main.py` looks the class up by that exact name, so a new job is one class
 here plus one entry in some run's config, nothing else to wire up.
 
-"Finished", for whatever a job_uid's dependents are waiting on, means it left
-its artifact file behind (`artifact_name`) -- nothing fancier than that yet.
+`dependencies` are files, not job_uids: paths relative to the volume root
+that must exist before a job's own `.run()` may start. A job that needs
+another job's artifact spells that out as a path to it (typically
+`f"runs/{run_id}/{artifact_name(other.job_uid)}"`) rather than naming the
+job_uid -- a dependency can live anywhere on the volume this way, not only
+in this run's own folder (a job upstream of every run, writing to `/data`
+once, is exactly why).
 """
 
 import time
@@ -68,17 +73,30 @@ def load_config(run_id: str) -> RunConfig | None:
         return None
 
 
-def _check_dependencies(
-    config: RunConfig, present: set[str], job_uid: str
-) -> tuple[bool, list[str]]:
-    """True + [] once every dependency job_uid has left its artifact behind;
-    else False + the ones still missing. Pure -- takes a snapshot rather than
-    reading anything itself, so the same decision runs whether that snapshot
-    came from `preflight_check`'s local mounted read or its Volume API one.
+def _path_exists(path: str, volume: modal.Volume | None) -> bool:
+    """Does `path` (relative to the volume root) exist? Same volume-or-
+    local-mount split as `preflight_check` -- a dependency can live in any
+    directory on the volume, not just the current run's, so this checks
+    one path directly rather than matching against a pre-listed set.
+
+    _path_exists("runs/r1/etl_artifact.txt", None) -> True/False
     """
-    entry = config.jobs.get(job_uid)
-    deps = entry.dependencies if entry else []
-    missing = [d for d in deps if artifact_name(d) not in present]
+    if volume is not None:
+        try:
+            names = {Path(e.path).name for e in volume.listdir(str(Path(path).parent))}
+        except FileNotFoundError:
+            return False
+        return Path(path).name in names
+    return (Path(STORAGE) / path).exists()
+
+
+def _check_dependencies(deps: list[str], volume: modal.Volume | None) -> tuple[bool, list[str]]:
+    """True + [] once every dependency path exists on the volume; else
+    False + the ones still missing.
+
+    _check_dependencies(["runs/r1/etl_artifact.txt"], None) -> (True, [])
+    """
+    missing = [d for d in deps if not _path_exists(d, volume)]
     return not missing, missing
 
 
@@ -88,12 +106,13 @@ def preflight_check(run_id: str, volume: modal.Volume | None = None) -> dict[str
     job_uid's declared dependencies and resources.
 
     preflight_check(run_id) -> {
-        "job0": {"done": False, "ready": True, "missing_dependencies": [],
-                 "dependencies": [], "resources": {}},
-        "job1": {"done": False, "ready": False, "missing_dependencies": ["job0"],
-                 "dependencies": ["job0"], "resources": {}},
+        "etl": {"done": False, "ready": True, "missing_dependencies": [],
+                "dependencies": [], "resources": {}},
+        "count10": {"done": False, "ready": False,
+                    "missing_dependencies": ["runs/r1/etl_artifact.txt"],
+                    "dependencies": ["runs/r1/etl_artifact.txt"], "resources": {}},
     }
-    # job1 depends on job0, which hasn't written its artifact yet
+    # count10 depends on a path etl hasn't written yet
 
     Reads over the Volume API if `volume` is given, else off the local mount.
 
@@ -125,7 +144,7 @@ def preflight_check(run_id: str, volume: modal.Volume | None = None) -> dict[str
     # it isn't.
     states = {}
     for job_uid, entry in config.jobs.items():
-        ready, missing = _check_dependencies(config, present, job_uid)
+        ready, missing = _check_dependencies(entry.dependencies, volume)
         states[job_uid] = {
             "done": artifact_name(job_uid) in present,
             "ready": ready,
@@ -174,10 +193,9 @@ class Job(ABC):
         self.metadata = self.config.metadata
 
     def check_dependencies(self) -> tuple[bool, list[str]]:
-        """True + [] once every dependency job_uid's artifact is present;
+        """True + [] once every dependency path this job declared exists;
         else False + the ones still missing."""
-        present = {p.name for p in self.rdir.iterdir()} if self.rdir.exists() else set()
-        return _check_dependencies(self.config, present, self.job_uid)
+        return _check_dependencies(self.dependencies, volume=None)
 
     def start(self) -> None:
         """Check deps, run the job and leave artifact_name(self.job_uid) behind"""
@@ -293,3 +311,70 @@ class ETL(Job):
         time.sleep(20)
         self.confirm_lease()
         self.volume.commit()
+
+
+class Download(Job):
+    def __init__(self, run_id: str, logger, worker):
+        super().__init__(run_id, logger, worker)
+
+
+class Source(Job):
+    """Downloads every source in self.parameters["sources"] to
+    data/sources/{name}/content.txt -- shared, not run-scoped, so a later
+    run naming an already-downloaded source reuses it instead of
+    refetching. Not implemented -- placeholder for the download logic.
+    """
+
+    job_uid = "Source"
+
+    def progress(self) -> float:
+        return 0.0
+
+    def status(self) -> str:
+        return "not implemented"
+
+    def run(self) -> None:
+        raise NotImplementedError(
+            "download each of self.parameters['sources'] to data/sources/{name}/content.txt"
+        )
+
+
+class Tokenize(Job):
+    """Fits a tokenizer on self.parameters["fit_source"], writing it to
+    data/tokenizers/{hash of self.parameters}/tokenizer.json -- shared and
+    hash-addressed, so the same configuration is never fit twice. Not
+    implemented -- placeholder for the fit logic.
+    """
+
+    job_uid = "Tokenize"
+
+    def progress(self) -> float:
+        return 0.0
+
+    def status(self) -> str:
+        return "not implemented"
+
+    def run(self) -> None:
+        raise NotImplementedError(
+            "fit a tokenizer per self.parameters, write it to data/tokenizers/{hash}/tokenizer.json"
+        )
+
+
+class Train(Job):
+    """Trains against the tokenizer named by
+    self.parameters["tokenizer_hash"]. Not implemented -- placeholder for
+    the training loop.
+    """
+
+    job_uid = "Train"
+
+    def progress(self) -> float:
+        return 0.0
+
+    def status(self) -> str:
+        return "not implemented"
+
+    def run(self) -> None:
+        raise NotImplementedError(
+            "train against data/tokenizers/{self.parameters['tokenizer_hash']}/tokenizer.json"
+        )

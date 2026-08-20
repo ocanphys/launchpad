@@ -75,7 +75,10 @@ class CallFormatter(logging.Formatter):
     converter = time.gmtime
 
     def __init__(self):
-        super().__init__(fmt="%(asctime)s.%(msecs)03dZ %(prefix)s%(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
+        super().__init__(
+            fmt="%(asctime)s.%(msecs)03dZ %(prefix)s%(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
 
     def format(self, record):
         record.prefix = "" if record.levelno == logging.INFO else f"{record.levelname} "
