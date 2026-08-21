@@ -14,6 +14,7 @@ import time
 import modal
 
 from config import APP_NAME, VOLUME_NAME
+from jobs import ETL, artifact_name
 from run_config import JobEntry, ResourcesSpec, RunConfig
 
 app = modal.App(f"{APP_NAME}-push-config")
@@ -30,7 +31,10 @@ def template_config(run_id: str) -> RunConfig:
     generates one.
 
     Job_uid here must name a real class in jobs.py ("ETL", "Count") --
-    `RunConfig` checks that at construction, right below.
+    `RunConfig` checks that at construction, right below. Count's
+    dependency is a path to ETL's actual artifact file, not ETL's name --
+    built from `ETL.job_uid` (what `ETL.start()` itself names the file),
+    not the "ETL" key above (which only has to match the class name).
     """
     return RunConfig(
         metadata={"run_id": run_id, "pushed_ts": time.time()},
@@ -39,7 +43,7 @@ def template_config(run_id: str) -> RunConfig:
                 resources=ResourcesSpec(cpu=1),
             ),
             "Count": JobEntry(
-                dependencies=["ETL"],
+                dependencies=[f"runs/{run_id}/{artifact_name(ETL.job_uid)}"],
             ),
         },
     )

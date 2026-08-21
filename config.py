@@ -7,7 +7,9 @@ FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the
 
 import subprocess
 from pathlib import Path
+
 PROJECT_ROOT = Path(__file__).resolve().parent
+
 
 def get_git_commit(dirty_suffix: bool = True) -> str:
     """Git commit hash of PROJECT_ROOT's current HEAD. Meant to be called from
@@ -25,11 +27,19 @@ def get_git_commit(dirty_suffix: bool = True) -> str:
     not just the last commit.
     """
     commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True
+        ["git", "rev-parse", "HEAD"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     if dirty_suffix:
         dirty = subprocess.run(
-            ["git", "status", "--porcelain"], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True
+            ["git", "status", "--porcelain"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         if dirty:
             commit += "-dirty"

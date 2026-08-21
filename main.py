@@ -5,7 +5,14 @@ from pathlib import Path
 import modal
 
 import jobs
-from config import APP_NAME, VOLUME_NAME, STORAGE, CONTAINER_LIFETIME, HEARTBEAT_SECONDS, FLATLINE
+from config import (
+    APP_NAME,
+    VOLUME_NAME,
+    STORAGE,
+    CONTAINER_LIFETIME,
+    HEARTBEAT_SECONDS,
+    FLATLINE,
+)
 from lease_protocol import beats, leases, new_grant
 from runtime import initialize_worker
 
@@ -29,7 +36,9 @@ CALL_SOURCE = ("config", "logs", "lease_protocol", "runtime", "run_config", "job
 # files, it's a dependency of one (run_config.py, imported by jobs.py) --
 # add_local_python_source copies .py files into the image, it doesn't install
 # what they import.
-worker_image = base_image.pip_install("pydantic>=2.13.4").add_local_python_source(*CALL_SOURCE)
+worker_image = base_image.pip_install("pydantic>=2.13.4").add_local_python_source(
+    *CALL_SOURCE
+)
 
 etl_image = (
     base_image.pip_install("snakemake~=9.25", "pydantic>=2.13.4")
@@ -39,8 +48,6 @@ etl_image = (
     # keep it lightweight: four .py files mounted at runtime, not the package or its deps.
     .add_local_python_source(*CALL_SOURCE)
 )
-
-
 
 
 def is_active(grant: dict | None, beat: dict | None, now: float) -> bool:

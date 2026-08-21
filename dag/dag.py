@@ -14,16 +14,45 @@ Status = Literal["done", "runnable", "blocked"]
 def topo_sort(*roots: Job) -> list[Job]:
     """DFS post-order over every dependency list, deduped by id --
     dependencies always come before whatever depends on them. Frozen nodes
-    stop recursion on their own (their .deps is already {}), so they need
-    no special case here.
+    stop recursion on their own (their .deps is already {}).
+
+    A live and a frozen job can share the same id (a deep from_manifest load
+    and a frozen=True load of the same manifest, say) -- when both are
+    reachable from the given roots, the live one always wins the dedup,
+    regardless of which one the traversal happens to reach first, so the
+    result doesn't depend on root order or on which object some other job's
+    .deps happens to still be pointing at.
     """
-    seen: dict[str, Job] = {}
+    # Pass 1: resolve each id to its best (live-over-frozen) representative,
+    # walking a live representative's own deps even if a frozen duplicate
+    # of it was already found -- that's the only way to discover a live
+    # node's real upstream when a frozen dupe was reached first.
+    canonical: dict[str, Job] = {}
+
+    def resolve(job: Job) -> None:
+        prior = canonical.get(job.id)
+        if prior is not None and (not prior.frozen or job.frozen):
+            return
+        canonical[job.id] = job
+        for deps in job.deps.values():
+            for dep in deps:
+                resolve(dep)
+
+    for root in roots:
+        resolve(root)
+
+    # Pass 2: normal topological DFS post-order, redirecting every
+    # dependency reference through `canonical` first -- so a stale frozen
+    # reference stored inside some other job's .deps still resolves to the
+    # live representative, not to itself.
     order: list[Job] = []
+    visited: set[str] = set()
 
     def visit(job: Job) -> None:
-        if job.id in seen:
+        job = canonical[job.id]
+        if job.id in visited:
             return
-        seen[job.id] = job
+        visited.add(job.id)
         for deps in job.deps.values():
             for dep in deps:
                 visit(dep)
@@ -48,12 +77,16 @@ def status(job: Job) -> Status:
     # Same non-empty guard per named input: an input sourced from a glob
     # family that hasn't been materialized yet resolves to [], which must
     # block rather than vacuously satisfy "every path exists".
-    if all(paths and all(p.exists() for p in paths) for paths in job.input_paths().values()):
+    if all(
+        paths and all(p.exists() for p in paths) for paths in job.input_paths().values()
+    ):
         return "runnable"
     return "blocked"
 
 
-def scheduled(job: Job, statuses: dict[str, Status], _memo: dict[str, bool] | None = None) -> bool:
+def scheduled(
+    job: Job, statuses: dict[str, Status], _memo: dict[str, bool] | None = None
+) -> bool:
     """A node is scheduled if it isn't done, or anything upstream of it is
     scheduled. A frozen node is never scheduled, regardless of its status --
     it's taken as given, not something this DAG would (re)run.
@@ -68,7 +101,9 @@ def scheduled(job: Job, statuses: dict[str, Status], _memo: dict[str, bool] | No
         result = True
     else:
         result = any(
-            scheduled(dep, statuses, _memo) for deps in job.deps.values() for dep in deps
+            scheduled(dep, statuses, _memo)
+            for deps in job.deps.values()
+            for dep in deps
         )
     _memo[job.id] = result
     return result
@@ -153,14 +188,17 @@ def dag_svg(
         j.id: max(
             70,
             int(max(len(labels[j.id][0]), len(labels[j.id][1])) * char_w) + 16,
-            int(max((len(line) for line in reasons[j.id]), default=0) * reason_char_w) + 16,
+            int(max((len(line) for line in reasons[j.id]), default=0) * reason_char_w)
+            + 16,
         )
         for j in order
     }
 
     # Rows whose jobs list blocking reasons need extra height for those
     # lines, so row y-offsets accumulate rather than using a fixed stride.
-    row_lines = {r: max((len(reasons[j.id]) for j in js), default=0) for r, js in rows.items()}
+    row_lines = {
+        r: max((len(reasons[j.id]) for j in js), default=0) for r, js in rows.items()
+    }
     row_y: dict[int, float] = {}
     y_cursor = 0.0
     for r in sorted(rows):
@@ -233,7 +271,7 @@ def dag_svg(
         title = f"{type(j).__name__} {j.id} [{st}]" + (" (frozen)" if j.frozen else "")
         label, short_id = labels[j.id]
         parts.append(
-            f'<g><title>{_esc(title)}</title>'
+            f"<g><title>{_esc(title)}</title>"
             f'<rect x="{x:.0f}" y="{y:.0f}" width="{w:.0f}" height="{h:.0f}" '
             f'rx="6" fill="{fill}" stroke="{stroke}" stroke-width="2"{dash}/>'
             f'<text x="{x + w / 2:.0f}" y="{y + h / 2 - 3:.0f}" '
@@ -243,7 +281,9 @@ def dag_svg(
         )
         for i, line in enumerate(reasons[j.id]):
             ry = y + h + 12 + i * line_h
-            parts.append(f'<text x="{x:.0f}" y="{ry:.0f}" font-size="9" fill="#888">{_esc(line)}</text>')
+            parts.append(
+                f'<text x="{x:.0f}" y="{ry:.0f}" font-size="9" fill="#888">{_esc(line)}</text>'
+            )
 
     parts.append("</svg>")
     return SVG("".join(parts))
