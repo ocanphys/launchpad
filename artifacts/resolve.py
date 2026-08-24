@@ -15,7 +15,7 @@ Status = Literal["done", "runnable", "blocked"]
 
 
 def producer_for(artifact: Artifact) -> Job:
-    return REGISTRY[type(artifact)].for_output(artifact)
+    return REGISTRY[type(artifact)].for_artifact(artifact)
 
 
 def resolve(artifact: Artifact, stack: tuple[Artifact, ...] = ()) -> dict:
