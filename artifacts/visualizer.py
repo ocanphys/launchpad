@@ -13,16 +13,8 @@ from artifact import Artifact
 from job import Job
 from resolve import Status, status
 
-_ARTIFACT_COLORS = {
-    "Source": "#cfe3ff",
-    "Tokenizer": "#bfe6e0",
-    "TokenizedSource": "#c9d6f7",
-}
-_JOB_COLORS = {
-    "SourceJob": "#ffe4b3",
-    "TokenizerJob": "#ffcfa8",
-    "TokenizeSourceJob": "#f7c6e0",
-}
+_ARTIFACT_COLORS = {"Source": "#cfe3ff", "CombinedSource": "#d7f3d7"}
+_JOB_COLORS = {"SourceJob": "#ffe4b3", "CombineJob": "#f5d6ff"}
 _DEFAULT_COLOR = "#e8e8e8"
 _STATUS_COLORS: dict[Status, str] = {
     "done": "#2a8f2a",
@@ -107,15 +99,7 @@ def visualize(
     for n in nodes:
         rows.setdefault(rank[n], []).append(n)
 
-    def _display(kind: str, type_name: str, obj: Job | Artifact) -> str:
-        # full uid, untruncated -- uid formats vary now (a bare name, or a
-        # readable-prefix-plus-hash), so a fixed-width slice can chop the hash off.
-        return f"{type_name}: {obj.uid}" if kind == "artifact" else type_name
-
-    widths = {
-        n: max(70, int(len(_display(kind, label, obj)) * char_w) + 24)
-        for n, (kind, label, obj) in nodes.items()
-    }
+    widths = {n: max(70, int(len(label) * char_w) + 24) for n, (_, label, _) in nodes.items()}
 
     pos: dict[str, tuple[float, float, float, float]] = {}
     max_row_w = 0.0
@@ -174,7 +158,6 @@ def visualize(
     for n, (kind, label, obj) in nodes.items():
         x, y, w, h = pos[n]
         x, y = x + ox, y + oy
-        display = _display(kind, label, obj)
         if kind == "artifact":
             fill = _ARTIFACT_COLORS.get(label, _DEFAULT_COLOR)
             stroke = _STATUS_COLORS["done"] if (root is not None and obj.exists(root)) else "#666"
@@ -184,10 +167,10 @@ def visualize(
             stroke = _STATUS_COLORS[status(obj, root)] if root is not None else "#666"
             cx, cy = x + w / 2, y + h / 2
             shape = f'<ellipse cx="{cx:.0f}" cy="{cy:.0f}" rx="{w / 2:.0f}" ry="{h / 2:.0f}" fill="{fill}" stroke="{stroke}" stroke-width="2"/>'
-        title = display if root is None else f"{display} [{status(obj, root) if kind == 'job' else ('done' if obj.exists(root) else 'pending')}]"
+        title = label if root is None else f"{label} [{status(obj, root) if kind == 'job' else ('done' if obj.exists(root) else 'pending')}]"
         parts.append(
             f"<g><title>{_esc(title)}</title>{shape}"
-            f'<text x="{x + w / 2:.0f}" y="{y + h / 2 + 4:.0f}" text-anchor="middle">{_esc(display)}</text></g>'
+            f'<text x="{x + w / 2:.0f}" y="{y + h / 2 + 4:.0f}" text-anchor="middle">{_esc(label)}</text></g>'
         )
 
     parts.append("</svg>")
