@@ -1,5 +1,5 @@
 """Job definitions -- each job imports the artifact type(s) it produces and
-registers itself as their producer (see spec.md, sections 4-5).
+registers itself as their producer
 """
 
 from __future__ import annotations
@@ -9,9 +9,9 @@ import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from artifact import Artifact, Source, Tokenizer, TokenizedSource
+from artifact import Artifact, DataSet, Source, TokenizedSource, Tokenizer
 
-REGISTRY: dict[type[Artifact], type["Job"]] = {}  # artifact type -> the job that produces it
+REGISTRY: dict[type[Artifact], type[Job]] = {}  # artifact type -> the job that produces it
 
 
 class Job(ABC):
@@ -24,7 +24,7 @@ class Job(ABC):
         REGISTRY[cls.produces] = cls  # registration happens at class-definition time, not lookup time
 
     @classmethod
-    def for_artifact(cls, artifact: Artifact) -> "Job":
+    def for_artifact(cls, artifact: Artifact) -> Job:
         """Takes one artifact this job type produces (of cls.produces) and
         returns the job instance that would produce it -- the full output
         set included, even if that means expanding out from the single
@@ -43,8 +43,9 @@ class Job(ABC):
 
     @property
     def inputs(self) -> list[Artifact]:
-        return [ref for out in self.outputs for ref in out.refs()]  # derived, not declared
-
+        # extract the list of artifacts the outputs DIRECTLY depend on.
+        # Artifact.deps() are the dependencies (Artifact type)
+        return [dep for out in self.outputs for dep in out.deps()]  
     @abstractmethod
     def run(self, root: Path) -> None:
         """Do the work, writing self.outputs under root."""
@@ -68,7 +69,7 @@ class SourceJob(Job):
                 raise ValueError(f"{self.artifact.url} is not a text file (content-type: {content_type})")
             body = response.read().decode("utf-8")
 
-        path = self.artifact.path(root)
+        path = self.artifact.paths(root)["body"]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
 
@@ -85,9 +86,9 @@ class TokenizerJob(Job):
 
     def run(self, root: Path) -> None:
         tok = self.artifact
-        text = "".join(source.path(root).read_text() for source in tok.sources)
+        text = "".join(source.paths(root)["body"].read_text() for source in tok.sources)
         vocab = sorted(set(text.split()))[: tok.vocab_size]  # mock: first N unique words, not real BPE merges
-        path = tok.path(root)
+        path = tok.paths(root)["tokenizer"]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(
@@ -115,9 +116,31 @@ class TokenizeSourceJob(Job):
 
     def run(self, root: Path) -> None:
         art = self.artifact
-        vocab = json.loads(art.tokenizer.path(root).read_text())["vocab"]
+        vocab = json.loads(art.tokenizer.paths(root)["tokenizer"].read_text())["vocab"]
         ids = {word: i for i, word in enumerate(vocab)}
-        token_ids = [ids.get(word, -1) for word in art.source.path(root).read_text().split()]  # -1 = unk
-        path = art.path(root)
+        token_ids = [ids.get(word, -1) for word in art.source.paths(root)["body"].read_text().split()]  # -1 = unk
+        path = art.paths(root)["tokens"]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(" ".join(map(str, token_ids)))  # mock binary encoding as whitespace-joined ids
+
+
+class DataSetJob(Job):
+    produces = DataSet
+
+    def __init__(self, artifact: DataSet):
+        self.artifact = artifact
+
+    @property
+    def outputs(self) -> list[Artifact]:
+        return [self.artifact]
+
+    def run(self, root: Path) -> None:
+        ds = self.artifact
+        paths = ds.paths(root)
+        for path, tokenized_sources in (
+            (paths["training set"], ds.train_set),
+            (paths["validation set"], ds.valid_set),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            token_ids = " ".join(ts.paths(root)["tokens"].read_text() for ts in tokenized_sources)
+            path.write_text(token_ids)  # mock: concat the whitespace-joined id strings, same mock encoding as TokenizeSourceJob

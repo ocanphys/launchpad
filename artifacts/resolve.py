@@ -19,6 +19,13 @@ def producer_for(artifact: Artifact) -> Job:
 
 
 def resolve(artifact: Artifact, stack: tuple[Artifact, ...] = ()) -> dict:
+    """Build the manifest -- a dict recipe describing the complete dependency
+    graph -- needed to produce `artifact`.
+
+    `stack` is the chain of artifacts encountered while recursing down the
+    tree, used only to detect cycles: if we hit an artifact already on the
+    stack, we're stuck in a loop.
+    """
     if artifact in stack:
         raise ValueError(f"cycle: {artifact} already on the resolution stack")
     job = producer_for(artifact)
@@ -37,7 +44,7 @@ def job_list(manifest: dict) -> list[Job]:
     def visit(node: dict) -> None:
         for child in node["inputs"]:
             visit(child)  # dependencies before dependents -- post-order DFS
-        key = tuple(out.relpath() for out in node["outputs"])
+        key = tuple(p for out in node["outputs"] for p in out.files.values())
         if key not in seen:
             seen.add(key)
             order.append(node["job"])
@@ -57,8 +64,9 @@ def status(job: Job, root: Path) -> Status:
 def run_all(artifact: Artifact, root: Path) -> None:
     manifest = resolve(artifact)
     for job in job_list(manifest):
+        relpaths = ", ".join(str(p) for out in job.outputs for p in out.files.values())
         if status(job, root) == "done":
-            print(f"skip  {job.outputs[0].relpath()}  (already done)")
+            print(f"skip  {relpaths}  (already done)")
             continue
         job.run(root)
-        print(f"run   {job.outputs[0].relpath()}")
+        print(f"run   {relpaths}")

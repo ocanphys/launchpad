@@ -53,13 +53,14 @@ def _collect(manifest: dict) -> tuple[dict[str, tuple[str, str, Job | Artifact]]
     def walk(node: dict) -> None:
         artifact = node["outputs"][0]
         job = node["job"]
-        a_id, j_id = f"a:{artifact.relpath()}", f"j:{artifact.relpath()}"
+        artifact_id = next(iter(artifact.files.values()))
+        a_id, j_id = f"a:{artifact_id}", f"j:{artifact_id}"
         nodes[a_id] = ("artifact", type(artifact).__name__, artifact)
         nodes[j_id] = ("job", type(job).__name__, job)
         edges.add((j_id, a_id))  # job produces artifact
         for child in node["inputs"]:
             child_artifact = child["outputs"][0]
-            in_id = f"a:{child_artifact.relpath()}"
+            in_id = f"a:{next(iter(child_artifact.files.values()))}"
             edges.add((in_id, j_id))  # artifact feeds job
             walk(child)
 
