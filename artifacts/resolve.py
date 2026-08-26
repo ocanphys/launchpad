@@ -39,7 +39,9 @@ def resolve(artifact: Artifact, stack: tuple[Artifact, ...] = ()) -> dict:
 
 def job_list(manifest: dict) -> list[Job]:
     order: list[Job] = []
-    seen: set[tuple] = set()  # dedup key: the job's output paths, since outputs define a job's identity
+    seen: set[tuple] = (
+        set()
+    )  # dedup key: the job's output paths, since outputs define a job's identity
 
     def visit(node: dict) -> None:
         for child in node["inputs"]:

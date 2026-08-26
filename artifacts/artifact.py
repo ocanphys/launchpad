@@ -51,13 +51,11 @@ class Source(Artifact):
 
     @property
     def uid(self) -> str:
-        return (
-            self.name
-        )  # not digested -- guardrails against name collisions come later
+        return self.name
 
     @property
     def files(self) -> dict[str, Path]:
-        return {"body": Path(self.name) / "body.txt"}
+        return {"raw text": "sources" / Path(self.name) / "body.txt"}
 
 
 @dataclass(frozen=True)
@@ -65,7 +63,7 @@ class Tokenizer(Artifact):
     vocab_size: int
     special_tokens: tuple[str, ...]
     sources: tuple[Source, ...]  # trained on these, in order
-    kind: str = "bpe"
+    kind: str
 
     def deps(self) -> list[Artifact]:
         return list(self.sources)
@@ -101,10 +99,7 @@ class TokenizedSource(Artifact):
 
     @property
     def files(self) -> dict[str, Path]:
-        tokenizer_dir = self.tokenizer.files[
-            "tokenizer"
-        ].parent  # tokenizers/{tokenizer_uid}
-        return {"tokens": tokenizer_dir / "bin" / f"{self.source.uid}.bin"}
+        return {"tokenized source": self.tokenizer.uid / "bin" / f"{self.source.uid}.bin"}
 
 
 @dataclass(frozen=True)
@@ -141,3 +136,32 @@ class DataSet(Artifact):
             "training set": Path("datasets") / self.uid / "train.bin",
             "validation set": Path("datasets") / self.uid / "valid.bin",
         }
+
+
+@dataclass(frozen=True)
+class PretrainingConfig:
+    hidden_size: int = 64
+    num_layers: int = 2
+    lr: float = 1e-3
+    seed: int = 0
+
+
+@dataclass(frozen=True)
+class PretrainingCheckpoint(Artifact):
+    dataset: DataSet
+    tokenizer: Tokenizer
+    config: PretrainingConfig
+
+    step: int  # train up to (and checkpoint at) this step
+
+    def deps(self) -> list[Artifact]:
+        return [self.dataset, self.tokenizer]
+
+    @property
+    def uid(self) -> str:
+        digest = _digest(self.config)
+        return f"{self.dataset.uid}-{digest}-step{self.step}"
+
+    @property
+    def files(self) -> dict[str, Path]:
+        return {"checkpoint": Path("checkpoints") / self.uid / "checkpoint.json"}
