@@ -1,72 +1,68 @@
-"""Job definitions -- each job imports the artifact type(s) it produces and
-registers itself as their producer
-"""
+"""Job definitions -- each job annotates the artifact type it produces and
+registers itself as that type's producer.
 
-from __future__ import annotations
+One job, one artifact. That artifact may comprise several files, but they
+all live in its folder, and the resolver has already created that folder
+(writing the manifest into it) before run() is called -- so no job makes
+directories of its own.
+"""
 
 import json
 import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from artifact import Artifact, Checkpoint, DataSet, Source, TokenizedSource, Tokenizer
+from artifact import (
+    Artifact,
+    DataSet,
+    Pretraining,
+    Source,
+    TokenizedSource,
+    Tokenizer,
+)
 
-REGISTRY: dict[
-    type[Artifact], type[Job]
-] = {}  # artifact type -> the job that produces it
+REGISTRY: dict[type[Artifact], type["Job"]] = {}  # artifact type -> its producer
 
 
 class Job(ABC):
-    produces: type[Artifact]  # declared by each subclass
+    """Produces exactly one artifact, which is all it is given.
+
+    A subclass declares itself with a single line -- `artifact: Tokenizer`.
+    That annotation registers the job as Tokenizer's producer and types
+    self.artifact, so the job sees its dependencies for what they are.
+
+    A job with dependencies binds them in __init__, under the same names the
+    artifact gives them, and run() uses those: self.tokenizer, never
+    self.tok. What a job reads is then declared in one place instead of
+    being spelled out again at each use, and the artifact's own parameters
+    stay on self.artifact -- which keeps the two kinds of field apart.
+    """
+
+    artifact: Artifact
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        if cls.produces in REGISTRY:
+        produces = cls.__annotations__.get("artifact")
+        if produces is None:
             raise TypeError(
-                f"{cls.produces} already registered to {REGISTRY[cls.produces]}"
+                f"{cls.__name__} must annotate `artifact:` with the type it produces"
             )
-        REGISTRY[cls.produces] = (
+        if produces in REGISTRY:
+            raise TypeError(f"{produces} already registered to {REGISTRY[produces]}")
+        REGISTRY[produces] = (
             cls  # registration happens at class-definition time, not lookup time
         )
 
-    @classmethod
-    def for_artifact(cls, artifact: Artifact) -> Job:
-        """Takes one artifact this job type produces (of cls.produces) and
-        returns the job instance that would produce it -- the full output
-        set included, even if that means expanding out from the single
-        requested artifact (e.g. a discriminated sibling set).
-
-        Default assumes a job with exactly one output, constructed from
-        that one artifact -- true for every job below. Override this for a
-        job whose real output set is a sibling group: reconstruct it from
-        the requested artifact's non-discriminating parameters instead."""
-        return cls(artifact)
-
-    @property
-    @abstractmethod
-    def outputs(self) -> list[Artifact]:
-        """The full output set this job produces (usually just one artifact)."""
-
-    @property
-    def inputs(self) -> list[Artifact]:
-        # extract the list of artifacts the outputs DIRECTLY depend on.
-        # Artifact.deps() are the dependencies (Artifact type)
-        return [dep for out in self.outputs for dep in out.deps()]
+    def __init__(self, artifact: Artifact):
+        self.artifact = artifact
 
     @abstractmethod
     def run(self, root: Path) -> None:
-        """Do the work, writing self.outputs under root."""
+        """Do the work, writing self.artifact's files under root."""
 
 
 class SourceJob(Job):
-    produces = Source
-
-    def __init__(self, artifact: Source):
-        self.artifact = artifact
-
-    @property
-    def outputs(self) -> list[Artifact]:
-        return [self.artifact]
+    artifact: Source  # no dependencies: a source is downloaded, not derived
 
     def run(self, root: Path) -> None:
         request = urllib.request.Request(
@@ -84,36 +80,33 @@ class SourceJob(Job):
                 )
             body = response.read().decode("utf-8")
 
-        path = self.artifact.paths(root)["body"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(body)
+        self.artifact.paths(root)["raw text"].write_text(body)
 
 
 class TokenizerJob(Job):
-    produces = Tokenizer
+    artifact: Tokenizer
 
     def __init__(self, artifact: Tokenizer):
-        self.artifact = artifact
-
-    @property
-    def outputs(self) -> list[Artifact]:
-        return [self.artifact]
+        super().__init__(artifact)
+        self.sources = artifact.sources
 
     def run(self, root: Path) -> None:
-        tok = self.artifact
-        text = "".join(source.paths(root)["body"].read_text() for source in tok.sources)
+        # sorted by uid, matching Tokenizer.uid: if source order doesn't change
+        # which tokenizer this is, it mustn't change what gets trained either
+        text = "".join(
+            source.paths(root)["raw text"].read_text()
+            for source in sorted(self.sources, key=lambda s: s.uid)
+        )
         vocab = sorted(set(text.split()))[
-            : tok.vocab_size
+            : self.artifact.vocab_size
         ]  # mock: first N unique words, not real BPE merges
-        path = tok.paths(root)["tokenizer"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        self.artifact.paths(root)["tokenizer"].write_text(
             json.dumps(
                 {
-                    "kind": tok.kind,
-                    "vocab_size": tok.vocab_size,
-                    "special_tokens": list(tok.special_tokens),
-                    "trained_on": [source.name for source in tok.sources],
+                    "kind": self.artifact.kind,
+                    "vocab_size": self.artifact.vocab_size,
+                    "special_tokens": list(self.artifact.special_tokens),
+                    "trained_on": sorted(source.uid for source in self.sources),
                     "vocab": vocab,
                 },
                 indent=2,
@@ -122,96 +115,86 @@ class TokenizerJob(Job):
 
 
 class TokenizeSourceJob(Job):
-    produces = TokenizedSource
+    artifact: TokenizedSource
 
     def __init__(self, artifact: TokenizedSource):
-        self.artifact = artifact
-
-    @property
-    def outputs(self) -> list[Artifact]:
-        return [self.artifact]
+        super().__init__(artifact)
+        self.tokenizer = artifact.tokenizer
+        self.source = artifact.source
 
     def run(self, root: Path) -> None:
-        art = self.artifact
-        vocab = json.loads(art.tokenizer.paths(root)["tokenizer"].read_text())["vocab"]
+        vocab = json.loads(self.tokenizer.paths(root)["tokenizer"].read_text())["vocab"]
         ids = {word: i for i, word in enumerate(vocab)}
         token_ids = [
             ids.get(word, -1)
-            for word in art.source.paths(root)["body"].read_text().split()
+            for word in self.source.paths(root)["raw text"].read_text().split()
         ]  # -1 = unk
-        path = art.paths(root)["tokens"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        self.artifact.paths(root)["tokens"].write_text(
             " ".join(map(str, token_ids))
         )  # mock binary encoding as whitespace-joined ids
 
 
 class DataSetJob(Job):
-    produces = DataSet
+    artifact: DataSet
 
     def __init__(self, artifact: DataSet):
-        self.artifact = artifact
-
-    @property
-    def outputs(self) -> list[Artifact]:
-        return [self.artifact]
+        super().__init__(artifact)
+        self.train_set = artifact.train_set
+        self.valid_set = artifact.valid_set
 
     def run(self, root: Path) -> None:
-        ds = self.artifact
-        paths = ds.paths(root)
+        paths = self.artifact.paths(root)
         for path, tokenized_sources in (
-            (paths["training set"], ds.train_set),
-            (paths["validation set"], ds.valid_set),
+            (paths["training set"], self.train_set),
+            (paths["validation set"], self.valid_set),
         ):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            token_ids = " ".join(
-                ts.paths(root)["tokens"].read_text() for ts in tokenized_sources
-            )
             path.write_text(
-                token_ids
-            )  # mock: concat the whitespace-joined id strings, same mock encoding as TokenizeSourceJob
+                " ".join(
+                    tokenized_source.paths(root)["tokens"].read_text()
+                    for tokenized_source in tokenized_sources
+                )
+            )  # mock: concat the id strings, same encoding as TokenizeSourceJob
 
 
 class PretrainJob(Job):
-    produces = Checkpoint
+    artifact: Pretraining
 
-    def __init__(self, artifact: Checkpoint):
-        self.artifact = artifact
-
-    @property
-    def outputs(self) -> list[Artifact]:
-        return [self.artifact]
+    def __init__(self, artifact: Pretraining):
+        super().__init__(artifact)
+        self.dataset = artifact.dataset
+        self.tokenizer = artifact.tokenizer
 
     def run(self, root: Path) -> None:
-        ck = self.artifact
         train_ids = [
-            int(t) for t in ck.dataset.paths(root)["training set"].read_text().split()
+            int(token)
+            for token in self.dataset.paths(root)["training set"].read_text().split()
         ]
         vocab_size = len(
-            json.loads(ck.tokenizer.paths(root)["tokenizer"].read_text())["vocab"]
+            json.loads(self.tokenizer.paths(root)["tokenizer"].read_text())["vocab"]
         )
 
-        loss = 10.0
-        for _ in range(ck.step):
-            loss *= 0.99  # mock decay, not a real training loop
-
-        path = ck.paths(root)["checkpoint"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "step": ck.step,
-                    "config": {
-                        "hidden_size": ck.config.hidden_size,
-                        "num_layers": ck.config.num_layers,
-                        "lr": ck.config.lr,
-                        "seed": ck.config.seed,
+        config = self.artifact.config
+        paths = self.artifact.paths(root)
+        loss, done = 10.0, 0
+        for step in self.artifact.checkpoint_steps:  # one file per checkpoint, in order
+            for _ in range(step - done):
+                loss *= 0.99  # mock decay, not a real training loop
+            done = step
+            paths[f"step {step}"].write_text(
+                json.dumps(
+                    {
+                        "step": step,
+                        "config": {
+                            "hidden_size": config.hidden_size,
+                            "num_layers": config.num_layers,
+                            "lr": config.lr,
+                            "seed": config.seed,
+                        },
+                        "vocab_size": vocab_size,
+                        "trained_on": self.dataset.uid,
+                        "num_train_tokens": len(train_ids),
+                        "loss": loss,
                     },
-                    "vocab_size": vocab_size,
-                    "trained_on": ck.dataset.uid,
-                    "num_train_tokens": len(train_ids),
-                    "final_loss": loss,
-                },
-                indent=2,
+                    indent=2,
+                )
             )
-        )

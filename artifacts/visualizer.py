@@ -17,15 +17,20 @@ _ARTIFACT_COLORS = {
     "Source": "#cfe3ff",
     "Tokenizer": "#bfe6e0",
     "TokenizedSource": "#c9d6f7",
+    "DataSet": "#d9d0f7",
+    "Pretraining": "#f7d6c6",
 }
 _JOB_COLORS = {
     "SourceJob": "#ffe4b3",
     "TokenizerJob": "#ffcfa8",
     "TokenizeSourceJob": "#f7c6e0",
+    "DataSetJob": "#e8c6f7",
+    "PretrainJob": "#ffc6c6",
 }
 _DEFAULT_COLOR = "#e8e8e8"
 _STATUS_COLORS: dict[Status, str] = {
     "done": "#2a8f2a",
+    "started": "#8f2a8f",  # manifest on disk, files incomplete
     "runnable": "#2a6f9f",
     "blocked": "#c9820a",
 }
@@ -48,22 +53,19 @@ def _collect(
     """Flatten the manifest into bipartite nodes (kind, label, obj) keyed by
     id, plus the artifact<->job edges between them. Ids are prefixed so an
     artifact and its producing job never collide even though they share a
-    relpath."""
+    folder."""
     nodes: dict[str, tuple[str, str, Job | Artifact]] = {}
     edges: set[tuple[str, str]] = set()
 
     def walk(node: dict) -> None:
-        artifact = node["outputs"][0]
+        artifact = node["artifact"]
         job = node["job"]
-        artifact_id = next(iter(artifact.files.values()))
-        a_id, j_id = f"a:{artifact_id}", f"j:{artifact_id}"
+        a_id, j_id = f"a:{artifact.artifact_path}", f"j:{artifact.artifact_path}"
         nodes[a_id] = ("artifact", type(artifact).__name__, artifact)
         nodes[j_id] = ("job", type(job).__name__, job)
         edges.add((j_id, a_id))  # job produces artifact
-        for child in node["inputs"]:
-            child_artifact = child["outputs"][0]
-            in_id = f"a:{next(iter(child_artifact.files.values()))}"
-            edges.add((in_id, j_id))  # artifact feeds job
+        for child in node["dependencies"]:
+            edges.add((f"a:{child['artifact'].artifact_path}", j_id))  # feeds job
             walk(child)
 
     walk(manifest)
