@@ -23,15 +23,19 @@ resolver. Each layer is usable, and testable, without the ones above it.
 ## 2. Artifact
 
 ```
-Artifact(parameters)
+Artifact(parameters, commit)
 
   parameters        identifying; may contain other artifacts
+  commit            the code its job runs; recorded, never identifying
   metadata          descriptive, never identifying
   refs()            the artifact-valued parameters, one level deep
   relpath()         readable(parameters) / digest(refs())
   path(root)        root / relpath()
   check_status()    the file is there
   identity          (root_kind, relpath())
+
+  manifest()        this artifact as JSON, recursively
+  from_manifest()   the inverse
 ```
 
 An artifact is a value: a set of parameters and a location derived from them.
@@ -71,6 +75,47 @@ contact with the world, and it is never consulted during resolution.
 
 An artifact still does not know how it is made. Carrying what it is made *from*
 is not the same as carrying a producer.
+
+### The manifest
+
+```
+{ artifact:     type name
+  commit:       the code its job runs
+  parameters:   the fields that aren't artifacts
+  dependencies: the fields that are, each a manifest }
+```
+
+Because parameters are the complete definition and nest, writing them out is
+writing the artifact out. `manifest()` does exactly that and nothing more:
+`from_manifest()` rebuilds an equal object, so a `manifest.json` on disk and a
+constructor call in a notebook are two spellings of one artifact. **The file is
+the source of truth.** Everything else about an artifact — where it lives, what
+files it comprises, which job produces it, whether it is done — is derived from
+the type and the parameters, so none of it is recorded. A recorded derivation is
+a second answer that can disagree with the first.
+
+The parameters/dependencies split is presentational: it separates what was
+plugged in from what was plugged in *from*, and reconstruction merges them back
+into the one argument set they were.
+
+**Every dict in the tree is key-ordered** — the four above by the order written,
+everything below them by sorting. Dict equality ignores key order, so no
+comparison in Python can see this drifting, while every byte on disk can:
+without it, reordering a dataclass's fields silently rewrites every manifest
+mentioning that type. Ordered, the file is a pure function of the artifact, and
+so diffable, and so hashable.
+
+Commit is the exception to *parameters are everything*. It is what pins the code
+the producing job runs, without which identical parameters do not imply identical
+bytes — and it cannot be a parameter, because then every commit would rename
+every artifact. So it is recorded per node and excluded from identity: an
+artifact rebuilt from a manifest written months ago is the *same* artifact.
+
+Recording it per node rather than per file is what makes drift legible. An
+artifact loaded from disk keeps the commit it was produced under; a new artifact
+built on top of it is stamped with HEAD; and the resulting tree carries both, so
+asking whether the graph was built by one version of the code is a walk over it.
+Nothing enforces agreement — a mixed tree is normal, and usually fine.
 
 ## 3. Scope
 
@@ -175,7 +220,7 @@ on either side of it.
 resolve(artifact, stack):
     artifact in stack -> cycle, error
     job = producer_for(artifact)
-    manifest {
+    plan {
         artifact
         job      { type }
         outputs  [ artifact, ... ]
@@ -184,15 +229,20 @@ resolve(artifact, stack):
 ```
 
 ```
-job_list(manifest):
+job_list(plan):
     walk inputs depth first
     collect jobs, deduplicated by output set
     sort topologically
 ```
 
-Requesting an artifact yields a manifest: the artifact, the job that produces
-it, that job's full output set, and a manifest for each input, recursively to
-leaf jobs.
+Requesting an artifact yields a plan: the artifact, the job that produces it,
+that job's full output set, and a plan for each input, recursively to leaf jobs.
+
+A plan is the manifest with the jobs attached, and it is the layer that may be
+thrown away. It is never written; what lands in each folder is the artifact's
+own manifest, which names no job at all. The job is looked up from the artifact's
+type and the commit says which version of it — recording the job would fix in a
+file something the registry already decides.
 
 Resolution is a pure function of the request. It does not touch the filesystem,
 prunes nothing that already exists, and cuts no branch short. The same request
@@ -202,36 +252,69 @@ Because ancestry is carried in parameters, the shape of the graph is already
 latent in the request; the registry supplies the implementation at each node
 rather than the structure between them.
 
-A manifest and a live artifact are interchangeable as a starting point — one is
-a tree to be built, the other a tree already built.
+A manifest on disk and a live artifact are interchangeable as a starting point —
+one is a tree written down, the other a tree in memory, and resolution takes
+either.
 
-Flattening a manifest into an ordered job list is separate: walk it, collect
-jobs deduplicated by their output set, sort topologically. An artifact
-reappearing on the recursion stack is a cycle and an error.
+Flattening a plan into an ordered job list is separate: walk it, collect jobs
+deduplicated by their output set, sort topologically. An artifact reappearing on
+the recursion stack is a cycle and an error.
 
-## 7. Scheduling
+## 7. Declaration
 
 ```
-Scheduler(data_root, runs_root, execution)
+check(artifact, root, strict_commit) -> Declaration
 
-  done       every output reports produced
-  runnable   not done, every input reports produced
-  blocked    not done, some input does not
+  per artifact in the plan, dependency-ordered:
 
-  scheduled  not done, or anything earlier in the order is scheduled
+    new         nothing there; write will declare it
+    declared    manifest agrees, no outputs yet
+    partial     manifest agrees, some outputs
+    done        manifest agrees, every output present
+    conflict    a manifest is there and describes something else   BLOCKS
+    undeclared  outputs nobody declared                            BLOCKS
+
+  drift       declared under another commit; blocks only if strict_commit
+
+Declaration.write()  -> the `new` manifests, dependencies first
 ```
 
-The only stage that looks at the world. It holds the roots, so it is the only
-thing that can turn an artifact into a path; it holds the execution parameters,
-so it is the only thing that can start work.
+Manifests are written **ahead of the work**, for the whole graph, and are
+immutable once written. That is the pivot the rest of this section turns on: a
+manifest stops being a record of what happened and becomes a declaration of what
+is meant to happen, and the disk becomes the interface between planning and
+execution. A notebook declares; a launcher discovers.
 
-A job is done when all of its outputs report produced, runnable when its inputs
-do, blocked otherwise. It is scheduled if it is not done, or if anything before
-it in the order is scheduled — reproducing an upstream artifact must rerun what
-depends on it, even where those downstream outputs still exist.
+Because they are immutable, a manifest that disagrees with the one being
+requested is never a re-declaration. It means the history recorded there was
+edited, and it blocks. Changing parameters is a new run, and `write` only ever
+adds — never modifies, never deletes. Correcting a declaration means removing it
+by hand, which is deliberate: it is the one operation that discards history.
 
-A plan whose leaves are all present schedules nothing. That is not a special
-case; it is what asking a fully resolved graph about the world returns.
+This also settles the coherence question the duplicated subtrees raise. The same
+artifact is written once at its own path and again inside every dependent, and
+those copies can disagree only if they were written at different times. Checking
+every node in the plan against the manifest at its own path catches exactly that,
+because the plan being checked is internally coherent by construction — so no
+separate reconciliation pass is needed.
+
+Nothing about it needs a lease. Manifests are canonically serialized, so two
+processes declaring the same artifact write identical bytes; `write` creates
+exclusively and, on losing the race, compares — equal is someone else declaring
+the same thing, different is a conflict. Declaring is therefore local, offline
+and idempotent, and only running needs to coordinate.
+
+`check` does not police run scope. Each artifact already carries its own
+`run_id` where one is needed, and `Declaration`'s header reads it off the
+requested artifact for display — but nothing compares it against the rest of
+the plan. A plan that quietly mixes two runs (a dependency built for one run,
+reused as another's input) reconciles cleanly against disk like any other; see
+Limitations.
+
+**Status is not scheduling.** These six say what is on disk, not what to run
+next. Runnability — a job whose dependencies are satisfied — is the launcher's
+question, answered by walking the declared manifests under a run, and it is
+where leasing and preflight belong.
 
 ---
 
@@ -240,11 +323,30 @@ case; it is what asking a fully resolved graph about the world returns.
 These follow from the design rather than from anything left undone. Some are
 prices worth paying; all are worth knowing before they are discovered.
 
-**Existence is not correctness.** `check_status()` asks whether a file is there,
-not whether it is right. A truncated write, an interrupted job, or a file
-produced by an earlier version of the code all report produced. Until failure
-and partial output are handled, a job that dies midway leaves the plan claiming
-work that did not happen.
+**Existence is not correctness.** Status asks whether a file is there, not
+whether it is right. A truncated write or a file produced by an earlier version
+of the code both report produced. Declaring an explicit completion marker last,
+after the real outputs are durable, narrows this — the marker cannot appear
+before the bytes it vouches for — but it does not close it.
+
+**Interruption is no longer visible in the file set.** Writing manifests ahead of
+the work means "manifest present, outputs absent" is the normal declared state,
+not evidence a job died. Only `partial` — some declared outputs, not all —
+suggests interruption, and an artifact declaring a single file cannot even be
+partial. Distinguishing running from abandoned needs the lease, which status does
+not consult.
+
+**Declaration is one-way.** `write` only adds. A declaration made in error can be
+undone only by deleting the file, outside the system and unrecorded. This is the
+deliberate price of immutability, but it means the recovery path for the most
+likely mistake is the one operation nothing checks.
+
+**Run scope is not checked.** A run-scoped artifact can be handed as a
+dependency to a request from a different run — a `toy2` `Pretraining` built on
+`toy`'s `DataSet`, say — and `check` will not object: the mismatched artifact
+already reconciles against disk on its own path, which is all `check` looks at.
+The invariant that a run-scoped job's run-scoped inputs share one run
+identifier is therefore a modeling discipline, not something enforced in code.
 
 **A change at a leaf renames everything below it.** Because ancestry is carried
 in parameters and parameters determine the path, retokenizing with a different
@@ -254,8 +356,45 @@ escape hatch for a change that did not really matter, and no way to say so.
 
 **Paths are one-way.** The digest half of the encoding cannot be read back into
 the parameters that made it. A directory listing shows what kind of thing is
-where, not what it was made from. Recovering that requires the manifest, which
-means a plan is not reconstructible from the tree alone.
+where, not what it was made from. The manifest in each folder answers that, but
+only for folders that have one — a path alone still says nothing.
+
+**Leg decomposition is identifying.** A run is a chain of legs, each continuing
+the one named by `base`, and where it is cut is operational — a container does
+not live forever — not scientific: with seeds carried deterministically, one leg
+to 2000 and two legs through 1000 produce the same weights. But they are
+different artifacts at one path, so declaring one and later wanting the other is
+a conflict. Re-cutting a run's legs means a new run, even though the science is
+unchanged. The alternative — making `base` non-identifying — would remove the
+ordering from the manifest, which is worse.
+
+**The recovery checkpoint is invisible, and that is correct.** A leg resumes from
+mutable training state that appears in no manifest. It stays out because its
+contents are determined by parameters that *are* declared — seed, step, config,
+the base chain — so it is a cache, and deleting it costs recomputation rather
+than correctness. That reasoning holds only as long as the training loop derives
+its RNG stream and data order from the seed. A loop that carried genuinely
+unreproducible state would silently make every leg boundary an undeclared input,
+and nothing here would detect it.
+
+**Manifests repeat themselves.** The tree is written as a tree, so an artifact
+reached by several routes — a tokenizer under each of its tokenized sources —
+is written out once per route. It is correct, self-contained and readable, and
+it grows with the square of a wide graph. Interning repeated nodes behind a
+reference is the escape hatch, at the cost of a file you can no longer read
+top to bottom.
+
+**The commit is recorded, not honoured.** Nothing checks a manifest's commit
+before running its job; a job always runs as the code currently on disk. The
+commit says what produced an artifact, and comparing it to HEAD is available to
+anyone who asks — but it is a report, not a gate, and it cannot make an old
+manifest run under old code.
+
+**A session stamps one commit.** HEAD is read once per process, so committing
+mid-session doesn't change what subsequent artifacts record. Because the read
+includes a `-dirty` marker, an artifact built from uncommitted work says so —
+which is honest and also means the commit does not always identify code that
+exists anywhere but that working tree.
 
 **The encoding is load-bearing forever.** Identity is location, so changing how
 paths are rendered orphans everything already produced. The encoding cannot be
@@ -298,10 +437,14 @@ behind it.
 
 Roughly in order of how soon each is likely to be wanted.
 
-**Verification alongside existence.** A sidecar recording size, digest and the
-manifest that produced it turns `check_status()` from "a file is there" into "the
-right file is there", and makes partial output detectable. It is also where a
-produced-by-which-code-version check would live.
+**Verification alongside existence.** A sidecar recording size and digest turns
+`check_status()` from "a file is there" into "the right file is there", and makes
+partial output detectable. The manifest is already beside the file; what is
+missing is anything about the bytes.
+
+**Commit checking.** A walk comparing each manifest node's commit against HEAD,
+and a policy for what to do when they differ — report, refuse, or rebuild. The
+data is recorded; only the question is unasked.
 
 **Atomic production.** Writing to a temporary location and moving into place on
 success makes existence mean completion, and removes most of the need for the
@@ -312,13 +455,21 @@ well as its type, so one type can arrive by several routes. The uniqueness check
 becomes mutual exclusion of predicates, which is not decidable in general and
 would have to be approximated or checked at plan time.
 
-**Leasing.** A claim on an artifact for the duration of a job, so concurrent
-plans touching one graph do not duplicate or corrupt work. Necessary before more
-than one scheduler runs at a time.
+**Leasing.** A claim for the duration of a job, so concurrent plans touching one
+graph do not duplicate or corrupt work. The existing protocol keys on `run_id`,
+which is already the right scope for a run's legs — they contend on the shared
+training state, and the key serializes them whatever the plan says. It leaves
+shared artifacts uncovered, since those carry no run id; their natural key is
+their path.
 
-**Provenance records.** Writing the manifest and the execution parameters beside
-the artifact after a run. Cheap, and it answers the questions the one-way path
-encoding cannot.
+**Execution records.** The manifest is already written beside the artifact; the
+execution parameters a run was given are not. They are excluded from identity by
+design, which is exactly why nothing currently records that they happened.
+
+**Runnability and the launcher.** Reading the declared manifests under a run,
+resolving them to jobs, and launching whatever has its dependencies satisfied.
+Status says what is on disk; this is what turns that into a queue, and it is
+where leasing and preflight attach.
 
 **A path index.** A record mapping rendered paths back to parameters, which
 restores readability of the tree and gives a place where collisions would be
@@ -346,12 +497,19 @@ reachable from a set of held manifests would give one.
 - An artifact never references a job, a producer, or a dependency list.
 - Resolution never touches the filesystem.
 - Roots and execution parameters never appear in a manifest.
+- A manifest records only parameters and commit; anything derivable is derived.
+- `from_manifest(a.manifest()) == a`, for every artifact.
+- Every dict in a manifest is key-ordered, so its bytes depend on nothing but
+  the artifact.
+- A manifest is never modified once written; declaration only adds.
+- An artifact declares only files it is certain to write.
+- Declaring needs no lease, and no network.
 - A shared artifact never depends on a run-scoped one.
-- A run-scoped job's run-scoped inputs share one run identifier.
 - Distinct parameters render to distinct paths.
 
 ## Deferred
 
+- when we create artifacts, save them to a temp path and only when they are finished we actually move them to the path we want.
 - the readable half of the path encoding, per artifact type
 - dispatching on parameters, and more than one producer per artifact
 - leasing, so two jobs cannot work on one artifact concurrently

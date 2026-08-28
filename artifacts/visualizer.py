@@ -1,4 +1,4 @@
-"""Render a resolve() manifest as an SVG graph, inline in a notebook cell.
+"""Render a resolve() plan as an SVG graph, inline in a notebook cell.
 
 Style follows dag/dag.py: hand-built SVG (no graphviz/dot/networkx), rows by
 rank, one shape per node kind. Artifacts are boxes (they're data at rest);
@@ -30,9 +30,11 @@ _JOB_COLORS = {
 _DEFAULT_COLOR = "#e8e8e8"
 _STATUS_COLORS: dict[Status, str] = {
     "done": "#2a8f2a",
-    "started": "#8f2a8f",  # manifest on disk, files incomplete
-    "runnable": "#2a6f9f",
-    "blocked": "#c9820a",
+    "declared": "#2a6f9f",  # manifest written, work not started
+    "partial": "#8f2a8f",  # some outputs -- interrupted, or still running
+    "new": "#8a8a8a",  # not declared yet
+    "conflict": "#c22a2a",  # a manifest there describes something else
+    "undeclared": "#c9820a",  # outputs nobody declared
 }
 
 
@@ -48,9 +50,9 @@ def _esc(s: str) -> str:
 
 
 def _collect(
-    manifest: dict,
+    plan: dict,
 ) -> tuple[dict[str, tuple[str, str, Job | Artifact]], set[tuple[str, str]]]:
-    """Flatten the manifest into bipartite nodes (kind, label, obj) keyed by
+    """Flatten the plan into bipartite nodes (kind, label, obj) keyed by
     id, plus the artifact<->job edges between them. Ids are prefixed so an
     artifact and its producing job never collide even though they share a
     folder."""
@@ -68,7 +70,7 @@ def _collect(
             edges.add((f"a:{child['artifact'].artifact_path}", j_id))  # feeds job
             walk(child)
 
-    walk(manifest)
+    walk(plan)
     return nodes, edges
 
 
@@ -93,19 +95,19 @@ def _ranks(nodes: dict, edges: set[tuple[str, str]]) -> dict[str, int]:
 
 
 def visualize(
-    manifest: dict,
+    plan: dict,
     root: Path | None = None,
     node_h: int = 40,
     char_w: float = 6.2,
     row_gap: int = 50,
     col_gap: int = 20,
 ) -> SVG:
-    """Render manifest (from resolve.resolve()) as a bipartite artifact/job
+    """Render a plan (from resolve.resolve()) as a bipartite artifact/job
     graph: boxes for artifacts, ellipses for jobs, fill color by type, and
     -- when root is given -- outline color by resolve.status(). Just call
     it as a cell's last line in Jupyter.
     """
-    nodes, edges = _collect(manifest)
+    nodes, edges = _collect(plan)
     rank = _ranks(nodes, edges)
 
     rows: dict[int, list[str]] = {}
@@ -184,11 +186,41 @@ def visualize(
             parts.append(f'<text x="{lx + 14}" y="13">{st}</text>')
             lx += 14 + len(st) * 6 + 16
 
+    # Fan edges across a node's width instead of bunching every edge at its
+    # center: when a row is centered, same-column nodes share an x, and
+    # center-to-center edges land exactly on top of each other.
+    def _fan(center_x: float, w: float, n: int) -> list[float]:
+        if n <= 1:
+            return [center_x]
+        margin = min(w * 0.3, 10)
+        span = w - 2 * margin
+        return [center_x - w / 2 + margin + span * i / (n - 1) for i in range(n)]
+
+    out_edges: dict[str, list[str]] = {}
+    in_edges: dict[str, list[str]] = {}
     for src, dst in edges:
-        sx, sy, sw, sh = pos[src]
-        dx, dy, dw, _ = pos[dst]
-        x1, y1 = sx + ox + sw / 2, sy + oy + sh
-        x2, y2 = dx + ox + dw / 2, dy + oy
+        out_edges.setdefault(src, []).append(dst)
+        in_edges.setdefault(dst, []).append(src)
+
+    src_anchor: dict[tuple[str, str], float] = {}
+    for src, dsts in out_edges.items():
+        sx, _, sw, _ = pos[src]
+        order = sorted(dsts, key=lambda d: pos[d][0])
+        for d, ax in zip(order, _fan(sx + ox + sw / 2, sw, len(order))):
+            src_anchor[(src, d)] = ax
+
+    dst_anchor: dict[tuple[str, str], float] = {}
+    for dst, srcs in in_edges.items():
+        dx, _, dw, _ = pos[dst]
+        order = sorted(srcs, key=lambda s: pos[s][0])
+        for s, ax in zip(order, _fan(dx + ox + dw / 2, dw, len(order))):
+            dst_anchor[(s, dst)] = ax
+
+    for src, dst in edges:
+        _, sy, _, sh = pos[src]
+        _, dy, _, _ = pos[dst]
+        x1, y1 = src_anchor[(src, dst)], sy + oy + sh
+        x2, y2 = dst_anchor[(src, dst)], dy + oy
         ym = (y1 + y2) / 2
         parts.append(
             f'<path d="M{x1:.0f},{y1:.0f} C{x1:.0f},{ym:.0f} {x2:.0f},{ym:.0f} {x2:.0f},{y2:.0f}" '
@@ -201,22 +233,22 @@ def visualize(
         lines = _display(kind, label, obj)
         if kind == "artifact":
             fill = _ARTIFACT_COLORS.get(label, _DEFAULT_COLOR)
-            stroke = (
-                _STATUS_COLORS["done"]
-                if (root is not None and obj.exists(root))
-                else "#666"
-            )
+            stroke = _STATUS_COLORS[status(obj, root)] if root is not None else "#666"
             shape = f'<rect x="{x:.0f}" y="{y:.0f}" width="{w:.0f}" height="{h:.0f}" rx="6" fill="{fill}" stroke="{stroke}" stroke-width="2"/>'
         else:
             fill = _JOB_COLORS.get(label, _DEFAULT_COLOR)
-            stroke = _STATUS_COLORS[status(obj, root)] if root is not None else "#666"
+            stroke = (
+                _STATUS_COLORS[status(obj.artifact, root)]
+                if root is not None
+                else "#666"
+            )
             cx, cy = x + w / 2, y + h / 2
             shape = f'<ellipse cx="{cx:.0f}" cy="{cy:.0f}" rx="{w / 2:.0f}" ry="{h / 2:.0f}" fill="{fill}" stroke="{stroke}" stroke-width="2"/>'
         display = ": ".join(lines)
         title = (
             display
             if root is None
-            else f"{display} [{status(obj, root) if kind == 'job' else ('done' if obj.exists(root) else 'pending')}]"
+            else f"{display} [{status(obj.artifact if kind == 'job' else obj, root)}]"
         )
         cx = x + w / 2
         # multi-line labels stack around vertical center; a lone line just sits on it
