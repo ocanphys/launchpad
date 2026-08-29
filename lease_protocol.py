@@ -87,7 +87,7 @@ class Lease:
         self.tries = tries
         self.backoff = backoff
 
-    def confirm(self, label: str = "lease") -> None:
+    def confirm(self, label: str) -> None:
         """check if the grant still names us, or raise LeaseLost.
 
         Someone else's id raises at once; only UNKNOWN (see `fence`) is worth
@@ -96,7 +96,11 @@ class Lease:
         merely lost the Dict still looks alive there.
 
         Passes are logged too: afterwards only the log tells a boundary that
-        committed from one that was merely allowed to.
+        committed from one that was merely allowed to. `label` has no default --
+        a caller states what point in its own work this confirm guards (e.g.
+        "before run", "before commit"), because the log line is only useful if
+        it says what was about to happen, and two confirms sharing an unstated
+        default read as one confirm logged twice.
         """
         for i in range(1, self.tries + 1):
             verdict, grant = fence(self.artifact_path, self.call_id)

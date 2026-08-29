@@ -321,12 +321,11 @@ def run_job(artifact_path: str) -> None:
     this. Nothing about launching (`attempt_launch`) has to know it either.
     """
     with initialize_worker(artifact_path, volume) as worker:
-        worker.confirm_lease()
+        worker.confirm_lease("pre run")
         artifact = Artifact.load(Path(STORAGE) / artifact_path / MANIFEST)
         job = artifacts_resolve.producer_for(artifact)
         job.run(Path(STORAGE))
-        worker.confirm_lease()
-        volume.commit()
+        worker.confirm_lease("pre vol commit")
 
 
 @app.function(image=worker_image, volumes={STORAGE: volume})
