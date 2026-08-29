@@ -36,6 +36,7 @@ makes it impossible for a handler to write back into the stream it writes from.
 """
 
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -44,6 +45,12 @@ from pathlib import Path
 # identity, because the call that installed them is exactly the thing that is
 # gone by the time anyone needs to clean them up.
 _MARK = "_call_handler"
+
+# The name every call's log file is written under, inside its own
+# `{artifact_path}/logs/{call_id}/` folder -- named here so the reading side
+# (`read_call_logs`) and the writing side (`runtime.initialize_worker`) can't
+# drift apart on what the file is called.
+LOG_FILENAME = "job.log"
 
 
 def logger_name(call_id: str | None) -> str:
@@ -139,3 +146,68 @@ def release_call_logger() -> None:
         if getattr(handler, _MARK, False):
             root.removeHandler(handler)
             handler.close()
+
+
+# --- reading a call's log back out -------------------------------------------
+#
+# The inverse of CallFormatter: a dashboard reads these files, not just tails
+# them, so parsing the one column-1 contract it promises (see CallFormatter's
+# docstring) back into structured entries lives here too, next to the format
+# it undoes.
+
+_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) (.*)$")
+_LEVELS = ("DEBUG", "WARNING", "ERROR", "CRITICAL")  # INFO is the bare, unmarked case
+
+
+def parse_log_line(line: str) -> tuple[str, str, str] | None:
+    """One CallFormatter line back into (timestamp, level, message), or None
+    for a continuation line -- a traceback frame, printed after `logger.
+    exception` with no timestamp of its own.
+
+    parse_log_line("2026-08-28T12:00:00.000Z boot") -> ("2026-08-28T12:00:00.000Z", "INFO", "boot")
+    parse_log_line("2026-08-28T12:00:00.000Z WARNING low disk") -> ("2026-08-28T12:00:00.000Z", "WARNING", "low disk")
+    """
+    match = _LINE.match(line)
+    if not match:
+        return None
+    ts, rest = match.group(1), match.group(2)
+    for level in _LEVELS:
+        if rest.startswith(level + " "):
+            return ts, level, rest[len(level) + 1 :]
+    return ts, "INFO", rest
+
+
+def read_log(path: Path, call_id: str) -> list[dict]:
+    """One call's log file as timestamped entries. A continuation line folds
+    into the message of the entry above it, so a traceback stays with the
+    line that raised it instead of becoming entries of its own.
+    """
+    entries: list[dict] = []
+    for line in path.read_text(errors="replace").splitlines():
+        parsed = parse_log_line(line)
+        if parsed:
+            ts, level, message = parsed
+            entries.append({"ts": ts, "level": level, "call_id": call_id, "message": message})
+        elif entries:
+            entries[-1]["message"] += "\n" + line
+    return entries
+
+
+def read_call_logs(logs_dir: Path) -> list[dict]:
+    """Every call under one artifact's `logs/` directory, merged into a
+    single timeline sorted on the one column every entry shares.
+
+    One artifact's `logs/` holds one subfolder per call_id that has ever held
+    its lease (see `runtime.initialize_worker`) -- this is that artifact's
+    whole history, superseded attempts included, not just its current call.
+    """
+    if not logs_dir.exists():
+        return []
+    call_dirs = sorted((p for p in logs_dir.iterdir() if p.is_dir()), key=lambda p: p.name)
+    entries: list[dict] = []
+    for call_dir in call_dirs:
+        log_path = call_dir / LOG_FILENAME
+        if log_path.exists():
+            entries.extend(read_log(log_path, call_dir.name))
+    entries.sort(key=lambda e: e["ts"])
+    return entries

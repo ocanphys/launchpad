@@ -113,6 +113,20 @@ def _decode(annotation: object, value: object) -> object:
     return value
 
 
+@dataclass(frozen=True)
+class Resources:
+    """What a job should be given to run this artifact -- absent (None)
+    means "use Modal's platform default for that dimension." Never part of
+    an artifact's identity (see Artifact.allocated_resources).
+
+    Resources(gpu_type="A100", gpu_count=2)
+    """
+
+    cpu: float | None = None
+    gpu_type: str | None = None
+    gpu_count: int | None = None
+
+
 @dataclass(
     frozen=True
 )  # frozen: identity is its fields, so it must be hashable/immutable
@@ -124,6 +138,14 @@ class Artifact(ABC):
     commit: str = field(
         default_factory=_head, compare=False, repr=False, kw_only=True
     )  # kw_only: a defaulted base field would force defaults on every subclass
+
+    # What to run this artifact's job with -- never identity (same reasoning
+    # as commit, same compare=False mechanism) and never defaulted from
+    # anything but Modal's own platform default: a non-default Resources
+    # only ever comes from being passed explicitly at construction.
+    allocated_resources: Resources = field(
+        default_factory=Resources, compare=False, repr=False, kw_only=True
+    )
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -160,14 +182,15 @@ class Artifact(ABC):
         parameters: dict[str, object] = {}
         dependencies: dict[str, object] = {}
         for f in fields(self):
-            if f.name == "commit":
-                continue  # its own top-level key, being about code and not state
+            if f.name in ("commit", "allocated_resources"):
+                continue  # their own top-level keys, being about running and not state
             value = getattr(self, f.name)
             target = dependencies if _artifacts(value) else parameters
             target[f.name] = _encode(value)
         return {
             "artifact": type(self).__name__,
             "commit": self.commit,
+            "allocated_resources": _encode(self.allocated_resources),
             "parameters": dict(sorted(parameters.items())),
             "dependencies": dict(sorted(dependencies.items())),
         }
@@ -182,6 +205,7 @@ class Artifact(ABC):
         plugged = {**manifest["parameters"], **manifest["dependencies"]}
         return cls(
             commit=manifest["commit"],
+            allocated_resources=_decode(Resources, manifest["allocated_resources"]),
             **{name: _decode(hints[name], value) for name, value in plugged.items()},
         )
 

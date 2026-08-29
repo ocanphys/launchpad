@@ -316,6 +316,76 @@ next. Runnability — a job whose dependencies are satisfied — is the launcher
 question, answered by walking the declared manifests under a run, and it is
 where leasing and preflight belong.
 
+## 8. Launching
+
+```
+declared_artifact(artifact_path) -> (Artifact, status)   -- inside a container, volume mounted
+
+attempt_launch(artifact_path):
+    active?                             -> refuse
+    declared_artifact(artifact_path)    -> not declared, or blocked -> refuse
+    call = run_job.spawn(artifact_path)
+    leases.put(artifact_path, grant)
+
+run_job(artifact_path):
+    lease.confirm("boot")
+    job = producer_for(load(artifact_path))     # registry, looked up only here
+    job.run(root)
+    lease.confirm("commit")
+    volume.commit()
+```
+
+A lease is granted per `artifact_path`, not per run — the key is identity
+itself, so two artifacts in one run's DAG (a dataset and a sibling
+tokenizer) contend for nothing and run concurrently. This is the Extensions
+section's "Leasing" entry; it now exists, scoped narrower than first sketched
+there (per artifact, not per run).
+
+The job is never looked up before `run_job` needs it. `attempt_launch` only
+ever asks the same question `status` already answers — ready or blocked —
+which needs the artifact, not its producer. `producer_for` (the registry) is
+called exactly once, inside the container that's about to run it.
+
+`declared_artifact` runs the manifest read and status check inside an actual
+container, deliberately: `Path(STORAGE)` is only a real mount inside one, and
+`volume.reload()` refuses to run anywhere else. `attempt_launch` itself has no
+fixed home — called from a web request (already inside a container) or a
+local CLI entrypoint (never inside one) — so the one part that needs a mount
+is pulled into its own function and called with `.remote()` either way,
+rather than assumed to already have one.
+
+A launch races on a read-then-write of the lease, not a compare-and-swap.
+Two near-simultaneous launches can both pass the check and both spawn. This
+is bounded, not prevented: each call confirms the lease at boot and again
+before its final commit, and confirm re-reads the grant fresh each time — so
+whichever call's write didn't win the race raises `LeaseLost` and discards
+its own output instead of landing it. The cost is wasted compute, not a
+corrupted artifact — but it can be paid in full: nothing here re-checks the
+lease *during* a run, so a job that loses the race at boot still runs to
+completion before its final confirm discovers it lost, however long that
+took. Cheap for today's jobs; a real training loop should confirm between
+steps, not just at the two ends.
+
+## 9. Reading
+
+```
+declared_under(run_id, root) -> [Artifact, ...]
+```
+
+The dashboard's own book: walk the manifests actually written under
+`runs/{run_id}`, plus every dependency reachable from them (which may live
+under a shared root), deduplicated by identity. Not a `resolve()` from one
+requested artifact — a run's declared state is however many manifests exist,
+not one tree computed top-down.
+
+Per artifact this discovers, status and readiness are the same `inspect`/
+`blocked_by` `attempt_launch` uses to decide whether to launch — the
+dashboard and the launcher never disagree about what's runnable, because
+they ask the same question of the same disk state. Lease and heartbeat are
+read per artifact too, from the one `leases`/`beats` snapshot taken for the
+whole request: a lease's key is an artifact_path, so that's the granularity
+at which "is this active" means anything now.
+
 ---
 
 ## Limitations
@@ -433,6 +503,37 @@ pruning and no memoization across requests. This is what makes it deterministic,
 and it means the cost of asking about one artifact scales with the whole history
 behind it.
 
+**A lease outlives its job.** Nothing pops `leases[artifact_path]` on success
+— only staleness (a heartbeat that stops arriving) makes a grant stop reading
+as active. Harmless for correctness (a fresh launch overwrites it, and `done`
+outranks it in the dashboard's own read), but the Dict grows without bound,
+and a raw read of `leases` shows finished work as still "held."
+
+**"Failed" is two different problems wearing one color.** The dashboard folds
+"a call held the lease and went stale before finishing" and "the manifest
+itself conflicts with what's declared" into the same status. Both mean a
+human should look, but not at the same thing.
+
+**A fresh launch can read as a stale one.** A grant is written the instant a
+job is spawned, before its first heartbeat lands — and a cold container can
+take several seconds to boot. In that window, an artifact with a real,
+healthy job starting up looks identical to one whose call already died: a
+`call_id` with no heartbeat yet.
+
+**One unreadable top-level manifest blacks out its whole run.** `declared_under`
+doesn't guard its own `Artifact.load` calls for the manifests it finds
+directly under `runs/{run_id}` — only *shared* dependencies pulled in
+transitively get `inspect`'s `_Unreadable`/`conflict` handling. A corrupt
+`runs/{id}/dataset/manifest.json` therefore hides every other artifact in
+that run too, not just itself.
+
+**Renamed fields don't migrate what's already written.** `leases`/`beats` are
+persistent, named, and outlive any one version of this code. An entry written
+under an older shape (a different key, a differently-named field) stays in
+whatever shape it was written in — silently ignored by lookups that expect
+the current shape, but still visible, and confusing, in a raw read of either
+Dict.
+
 ## Extensions
 
 Roughly in order of how soon each is likely to be wanted.
@@ -461,21 +562,9 @@ well as its type, so one type can arrive by several routes. The uniqueness check
 becomes mutual exclusion of predicates, which is not decidable in general and
 would have to be approximated or checked at plan time.
 
-**Leasing.** A claim for the duration of a job, so concurrent plans touching one
-graph do not duplicate or corrupt work. The existing protocol keys on `run_id`,
-which is already the right scope for a run's legs — they contend on the shared
-training state, and the key serializes them whatever the plan says. It leaves
-shared artifacts uncovered, since those carry no run id; their natural key is
-their path.
-
 **Execution records.** The manifest is already written beside the artifact; the
 execution parameters a run was given are not. They are excluded from identity by
 design, which is exactly why nothing currently records that they happened.
-
-**Runnability and the launcher.** Reading the declared manifests under a run,
-resolving them to jobs, and launching whatever has its dependencies satisfied.
-Status says what is on disk; this is what turns that into a queue, and it is
-where leasing and preflight attach.
 
 **A path index.** A record mapping rendered paths back to parameters, which
 restores readability of the tree and gives a place where collisions would be
@@ -509,7 +598,11 @@ reachable from a set of held manifests would give one.
   the artifact.
 - A manifest is never modified once written; declaration only adds.
 - An artifact declares only files it is certain to write.
-- Declaring needs no lease, and no network.
+- Declaring needs no lease, and no network. Running needs both: a lease keyed
+  by artifact_path, and a container to hold it in.
+- `allocated_resources` (what a job should be given to run) is never
+  identity, never a parameter, and never defaulted from anything but Modal's
+  own platform default -- same reasoning as `commit`, same mechanism.
 - A shared artifact never depends on a run-scoped one.
 - Distinct parameters render to distinct paths.
 
@@ -518,12 +611,19 @@ reachable from a set of held manifests would give one.
 - when we create artifacts, save them to a temp path and only when they are finished we actually move them to the path we want.
 - the readable half of the path encoding, per artifact type
 - dispatching on parameters, and more than one producer per artifact
-- leasing, so two jobs cannot work on one artifact concurrently
 - parameter validation
 - failure, partial output, retry
 - `Declaration.check` doesn't verify that an artifact and everything in its
   manifest tree share one run id -- a plan that mixes runs reconciles as clean
   (see Limitations, "Run scope is not checked")
 - `Declaration.write` doesn't check for a live lease -- writing a manifest
-  while a job is already running against that run id's folder is a race.
-  Guard `write`, not just running, against a run id with jobs in flight
+  while a job is already running against that artifact_path is a race. Guard
+  `write`, not just running, against an artifact with a job in flight
+- leasing exists now (see section 8) but only confirms at boot and before the
+  final commit -- a job that loses the launch race still runs to completion
+  before finding out. Real per-step confirmation is what closes this, and is
+  worth adding once a job is long enough for it to matter (see Limitations,
+  "A lease outlives its job" and "A launch races on a read-then-write" in
+  section 8)
+- nothing pops a lease on success or garbage-collects `leases`/`beats` --
+  see Limitations, "A lease outlives its job"

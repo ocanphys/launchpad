@@ -3,11 +3,12 @@ import time
 import modal
 from config import APP_NAME, VOLUME_NAME
 
-# Two Dicts, not one shared store with prefixed keys: a run_id is already a
-# unique key in `leases`, a call_id is already a unique key in `beats`, and they
-# never need to tell each other's keys apart because they are never in the same
-# Dict. Every key any of this ever touches is a top-level key -- no blob, no
-# read-modify-write, no chance of one write clobbering an unrelated entry.
+# Two Dicts, not one shared store with prefixed keys: an artifact_path is
+# already a unique key in `leases`, a call_id is already a unique key in
+# `beats`, and they never need to tell each other's keys apart because they
+# are never in the same Dict. Every key any of this ever touches is a
+# top-level key -- no blob, no read-modify-write, no chance of one write
+# clobbering an unrelated entry.
 leases = modal.Dict.from_name(f"{APP_NAME}-leases", create_if_missing=True)
 beats = modal.Dict.from_name(f"{APP_NAME}-beats", create_if_missing=True)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -19,7 +20,7 @@ MATCH, MISMATCH, UNKNOWN = "match", "mismatch", "unknown"
 
 
 class LeaseLost(Exception):
-    """We can no longer prove we own this run, so we must stop writing.
+    """We can no longer prove we own this artifact, so we must stop writing.
 
     Raised rather than returned: the check sits inside a context manager the job's
     loop enters, so raising unwinds that loop without the job knowing a lease
@@ -27,23 +28,23 @@ class LeaseLost(Exception):
     """
 
 
-def new_grant(call_id: str, job_type: str) -> dict:
+def new_grant(call_id: str, artifact_type: str) -> dict:
     """
-    create the value stored under leases[run_id].
+    create the value stored under leases[artifact_path].
     """
     return {
         "call_id": call_id,
         "granted_ts": time.time(),
         "attempt": 1,
-        "job_type": job_type,
+        "artifact_type": artifact_type,
     }
 
 
-def fence(run_id: str, my_call_id: str) -> tuple[str, dict | None]:
-    """Do we own this run? One fresh read, three answers -- never two.
+def fence(artifact_path: str, my_call_id: str) -> tuple[str, dict | None]:
+    """Do we own this artifact? One fresh read, three answers -- never two.
 
     The grant comes back with the verdict: the read already fetched it, and callers
-    want to name *who* holds the run, not just whether we do.
+    want to name *who* holds the artifact, not just whether we do.
 
     - MATCH / MISMATCH are real answers. Someone else's id means stop at once;
       asking again is just hoping it changes.
@@ -56,7 +57,7 @@ def fence(run_id: str, my_call_id: str) -> tuple[str, dict | None]:
     container or the local entrypoint, both of which have a real Dict to reach.
     """
     try:
-        grant = leases.get(run_id)
+        grant = leases.get(artifact_path)
     except Exception:
         return UNKNOWN, None
     if grant is None:
@@ -67,19 +68,20 @@ def fence(run_id: str, my_call_id: str) -> tuple[str, dict | None]:
 class Lease:
     """
     this is a worker's handle of a lease.
-    worker will ask the lease manager for the owner of the lease for run_id
-    and check if its own call_id matches what is in the global record.
+    worker will ask the lease manager for the owner of the lease for
+    artifact_path and check if its own call_id matches what is in the global
+    record.
     """
 
     def __init__(
         self,
-        run_id: str,
+        artifact_path: str,
         call_id: str,
         logger,
         tries: int = LEASE_RETRIES,
         backoff: float = LEASE_BACKOFF,
     ):
-        self.run_id = run_id
+        self.artifact_path = artifact_path
         self.call_id = call_id
         self.logger = logger
         self.tries = tries
@@ -89,7 +91,7 @@ class Lease:
         """check if the grant still names us, or raise LeaseLost.
 
         Someone else's id raises at once; only UNKNOWN (see `fence`) is worth
-        waiting out, and only briefly. Waiting cannot cost us the run -- the
+        waiting out, and only briefly. Waiting cannot cost us the artifact -- the
         launcher checks Modal for liveness before reassigning, and a worker that
         merely lost the Dict still looks alive there.
 
@@ -97,18 +99,18 @@ class Lease:
         committed from one that was merely allowed to.
         """
         for i in range(1, self.tries + 1):
-            verdict, grant = fence(self.run_id, self.call_id)
+            verdict, grant = fence(self.artifact_path, self.call_id)
             if verdict == MATCH:
                 self.logger.info(
                     f"{label}: lease held (attempt {grant['attempt']}, try {i}/{self.tries})"
                 )
                 return
             if verdict == MISMATCH:
-                # Which kind of holder matters to whoever reads this log: an etl
-                # means the run's data is being rebuilt under us, a worker means we
-                # were superseded.
+                # Which kind of holder matters to whoever reads this log: a
+                # different artifact_type means someone else is now producing
+                # this artifact under us, i.e. we were superseded.
                 raise LeaseLost(
-                    f"{label}: another {grant['job_type']} holds this run ({grant['call_id']})"
+                    f"{label}: another {grant['artifact_type']} holds this artifact ({grant['call_id']})"
                 )
             if i == self.tries:
                 raise LeaseLost(

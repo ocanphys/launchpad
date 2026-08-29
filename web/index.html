@@ -8,7 +8,7 @@
   :root { color-scheme: light dark; }
   body {
     font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    margin: 0 auto; padding: 2rem 1.5rem; max-width: 48rem;
+    margin: 0 auto; padding: 2rem 1.5rem; max-width: 64rem;
   }
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .4rem; }
   h1 { font-size: 1rem; font-weight: 600; margin: 0; }
@@ -17,33 +17,50 @@
   .bad { color: #cf222e; border-color: #cf222e; }
   #meta { opacity: .55; font-size: 11px; margin-bottom: 1rem; min-height: 1.2em; }
 
-  table { border-collapse: collapse; width: 100%; }
-  th, td { padding: .4rem .7rem; text-align: left; border-top: 1px solid rgba(128,128,128,.18); }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+  th, td { padding: .2rem .7rem; text-align: left; border-top: 1px solid rgba(128,128,128,.18); }
   th { opacity: .55; font-weight: 600; font-size: 11px; border-top: none; }
   td.run { word-break: break-all; }
   td.call { word-break: break-all; opacity: .8; }
   .dim { opacity: .45; }
 
-  .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 999px; vertical-align: middle; }
-  .dot.active { background: #1a7f37; }
-  .dot.stale  { background: #cf222e; }
-  .dot.none   { background: rgba(128,128,128,.4); }
+  /* One dot per artifact row -- see dot() in render.js for what puts an
+     artifact into each bucket.
+       done     : finished.
+       running  : an active call is working on it right now.
+       runnable : nothing blocking it, no call in progress -- can launch.
+       blocked  : not done, not runnable (waiting on a dependency).
+       failed   : a call held the lease and went stale before finishing, or
+                  the manifest itself conflicts with what's declared. */
+  .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 999px; vertical-align: middle; margin-right: .4rem; }
+  .dot.done     { background: #1a7f37; }
+  .dot.running  { background: #0969da; }
+  .dot.runnable { background: #bf8700; }
+  .dot.blocked  { background: rgba(128,128,128,.4); }
+  .dot.failed   { background: #cf222e; }
 
-  /* Square blocks, one per job_uid, stacked horizontally in a run's row. */
-  .job-buttons { display: flex; gap: .3rem; flex-wrap: wrap; }
-  .job-btn {
-    width: 1.9rem; height: 1.9rem; padding: 0;
-    display: flex; align-items: center; justify-content: center;
-    font: 9px/1 inherit; overflow: hidden;
+  /* A run is a plain grouping label now -- everything that used to be on
+     its own summary row (lease, call, heartbeat) is per-artifact, on the
+     rows underneath. No bottom border of its own; the top border it does
+     have separates it from the *previous* run's last artifact row. */
+  tr.run-header td { font-weight: 600; opacity: .8; padding-top: .5rem; }
+  tr.artifact-row td { padding-left: 1.4rem; }
+
+  .artifact-type { font-size: 11px; }
+  td.artifact-path { word-break: break-all; opacity: .7; font-size: 11px; }
+
+  .launch-btn {
+    width: 2.4rem; padding: .15rem 0;
+    font: 9px/1 inherit; text-align: center;
     border: 1px solid #1a7f37; border-radius: 3px;
     background: transparent; color: #1a7f37;
     cursor: pointer;
   }
-  .job-btn:hover:not(:disabled) { background: rgba(26,127,55,.15); }
-  /* Not ready (or the run is already active): pale and frozen -- no color,
-     no hover, no pointer. The button still shows up so its slot in the row
-     doesn't shift once it does become launchable. */
-  .job-btn:disabled {
+  .launch-btn:hover:not(:disabled) { background: rgba(26,127,55,.15); }
+  /* Not ready, already running, or mid-launch: pale and frozen -- no color,
+     no hover, no pointer. Still shown so its slot in the row doesn't shift
+     once it does become launchable. */
+  .launch-btn:disabled {
     border-color: rgba(128,128,128,.3); color: rgba(128,128,128,.5);
     cursor: default;
   }
@@ -57,18 +74,53 @@
   details#problems table { margin-top: .6rem; table-layout: fixed; }
   details#problems td.run { width: 30%; }
   td.error { word-break: break-word; white-space: pre-wrap; opacity: .85; font-size: 11px; }
+
+  a.run-link, a.artifact-link { color: inherit; text-decoration: none; }
+  a.run-link:hover, a.artifact-link:hover { text-decoration: underline; }
+
+  /* --- log view -------------------------------------------------------- */
+  #logView { font-size: 12px; }
+  .log-back a { color: inherit; opacity: .6; text-decoration: none; }
+  .log-back a:hover { opacity: 1; text-decoration: underline; }
+  .log-artifacts { opacity: .7; font-size: 11px; margin: .3rem 0 1rem; word-break: break-all; }
+  .log-artifacts a { color: inherit; }
+  .log-error { color: #cf222e; font-size: 11px; }
+
+  table.log-table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+  table.log-table td { padding: .15rem .6rem; vertical-align: top; border-top: 1px solid rgba(128,128,128,.12); }
+  td.log-ts { width: 6.5rem; opacity: .5; white-space: nowrap; }
+  td.log-call { width: 6rem; }
+  td.log-artifact { width: 14rem; opacity: .6; word-break: break-all; font-size: 11px; }
+  td.log-msg { white-space: pre-wrap; word-break: break-word; }
+
+  .call-badge {
+    display: inline-block; padding: 0 .35rem; border-radius: 3px;
+    background: rgba(128,128,128,.15); font-size: 11px;
+  }
+
+  tr.log-row.warn td.log-msg { color: #9a6700; }
+  tr.log-row.err td.log-msg { color: #cf222e; }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>runs</h1>
+  <h1 id="title">runs</h1>
   <span id="conn" class="bad">loading</span>
 </header>
 <div id="meta"></div>
+
+<div id="dashboard">
 <table>
+  <colgroup>
+    <col style="width: 10.5rem">
+    <col>
+    <col style="width: 7.5rem">
+    <col style="width: 7rem">
+    <col style="width: 4rem">
+  </colgroup>
   <thead>
-    <tr><th></th><th>run</th><th>job type</th><th>call</th><th>last heartbeat</th><th>jobs</th></tr>
+    <tr><th>artifact</th><th>path</th><th>call</th><th>last heartbeat</th><th></th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -87,6 +139,12 @@
     <tbody id="problemRows"></tbody>
   </table>
 </details>
+</div>
+
+<!-- The log viewer, routed to by #/run/<id> and #/artifact/<path> -- see
+     app.js's route() and logview.js's renderLogView. Hidden and empty until
+     a route into it fires; #dashboard above is hidden in exchange. -->
+<div id="logView" hidden></div>
 
 <!-- One entry point. type="module" gives us import/export with no bundler.
      Note: ES modules only load over http(s), not file:// — serve the folder

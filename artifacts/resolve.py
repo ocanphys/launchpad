@@ -118,6 +118,33 @@ def status(artifact: Artifact, root: Path) -> Status:
     return inspect(artifact, root)[0]
 
 
+def declared_under(run_id: str, root: Path) -> list[Artifact]:
+    """Every artifact declared for `run_id`: its own manifests under
+    root/runs/run_id, plus every dependency reachable from them (which may
+    live under a shared root, e.g. tokenizers/ or sources/), deduplicated by
+    identity (artifact_path).
+
+    Unlike `resolve()`, this doesn't start from one requested artifact and
+    walk down a registry-derived plan -- it starts from whatever manifests
+    actually exist and reads their embedded dependency trees back out. A
+    run's declared state is however many manifests were written, not one
+    tree top-down.
+    """
+    seen: dict[Path, Artifact] = {}
+
+    def visit(artifact: Artifact) -> None:
+        if artifact.artifact_path in seen:
+            return  # also what keeps this cycle-safe: a repeat is just skipped
+        seen[artifact.artifact_path] = artifact
+        for dep in artifact.deps():
+            visit(dep)
+
+    manifests = sorted((root / "runs" / run_id).rglob(MANIFEST))
+    for path in manifests:
+        visit(Artifact.load(path))
+    return list(seen.values())
+
+
 @dataclass(frozen=True)
 class Row:
     artifact: Artifact
