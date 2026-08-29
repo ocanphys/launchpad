@@ -14,7 +14,7 @@ import time
 import modal
 
 from config import APP_NAME, VOLUME_NAME
-from jobs import ETL, artifact_name
+from jobs_LEGACY import ETL, artifact_name
 from run_config import JobEntry, ResourcesSpec, RunConfig
 
 app = modal.App(f"{APP_NAME}-push-config")

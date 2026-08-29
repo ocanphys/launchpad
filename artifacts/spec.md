@@ -437,6 +437,12 @@ behind it.
 
 Roughly in order of how soon each is likely to be wanted.
 
+**Conflict diffs.** `check()` labels a mismatched artifact `conflict` but says
+nothing about what disagrees -- the row carries a status, not the two
+manifests it compared. Diffing the recorded manifest against the requested one,
+field by field, would turn "something's wrong here" into "here's what
+changed," without opening both `manifest.json` files by hand.
+
 **Verification alongside existence.** A sidecar recording size and digest turns
 `check_status()` from "a file is there" into "the right file is there", and makes
 partial output detectable. The manifest is already beside the file; what is
@@ -515,3 +521,9 @@ reachable from a set of held manifests would give one.
 - leasing, so two jobs cannot work on one artifact concurrently
 - parameter validation
 - failure, partial output, retry
+- `Declaration.check` doesn't verify that an artifact and everything in its
+  manifest tree share one run id -- a plan that mixes runs reconciles as clean
+  (see Limitations, "Run scope is not checked")
+- `Declaration.write` doesn't check for a live lease -- writing a manifest
+  while a job is already running against that run id's folder is a race.
+  Guard `write`, not just running, against a run id with jobs in flight

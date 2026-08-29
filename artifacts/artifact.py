@@ -324,9 +324,15 @@ class DataSet(Artifact):
 
 
 @dataclass(frozen=True)
-class PretrainingConfig:
+class ModelParameters:
     hidden_size: int = 64
     num_layers: int = 2
+
+
+@dataclass(frozen=True)
+class PretrainingConfig:
+    total_steps: int
+    batch_size: int
     lr: float = 1e-3
     seed: int = 0
     checkpoint_every: int = 100
@@ -334,35 +340,27 @@ class PretrainingConfig:
 
 @dataclass(frozen=True)
 class Pretraining(Artifact):
-    """One leg of a run's pretraining: training carried up to `step`, from
-    `model` if given, or from scratch if not -- initializing a fresh model is
-    the job's business, not a separate artifact of its own.
+    """One pretraining run, trained from scratch to `config.total_steps`.
 
-    A run is a chain of legs, each continuing the model the one before it
-    produced. The chain exists because a container doesn't live forever, not
-    because the result depends on where it's cut -- with seeds carried
-    deterministically, 0->2000 and 0->1000->2000 land on the same weights.
-    Where you cut is operational; that it was cut there is history, and the
-    manifest records it.
-
-    Two different legs may take the same `model` as their starting point --
-    that's a fork, and it costs nothing beyond constructing both.
+    Single-leg for now -- no mid-run resumption. Legs come back once an
+    artifact can nest a prior leg of itself as a parameter, the same way a
+    checkpoint nests the dataset and tokenizer it was trained from; nothing
+    here forecloses that.
     """
 
     run_id: str
     dataset: DataSet
     tokenizer: Tokenizer
+    model_parameters: ModelParameters
     config: PretrainingConfig
-    step: int  # train up to (and checkpoint at) this step
-    model: Pretraining | None = None  # the leg this one continues; None = fresh
 
     @property
     def uid(self) -> str:
-        return f"{self.run_id}-pretraining-{self.step}"
+        return f"{self.run_id}-pretraining"
 
     @property
     def artifact_path(self) -> Path:
-        return Path("runs") / self.run_id / "pretraining" / f"step-{self.step}"
+        return Path("runs") / self.run_id / "pretraining"
 
     @property
     def files(self) -> dict[str, str]:

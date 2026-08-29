@@ -163,7 +163,6 @@ class PretrainJob(Job):
         super().__init__(artifact)
         self.dataset = artifact.dataset
         self.tokenizer = artifact.tokenizer
-        self.model = artifact.model
 
     def run(self, root: Path) -> None:
         train_ids = [
@@ -174,25 +173,15 @@ class PretrainJob(Job):
             json.loads(self.tokenizer.paths(root)["tokenizer"].read_text())["vocab"]
         )
 
-        # Where to pick up. No `model` means the loop initializes its own
-        # weights -- not a separate artifact, just the job's starting state.
-        # Given one, the real thing reads the run's recovery checkpoint first
-        # and falls back to `model`'s own checkpoint when that cache is cold,
-        # which is always true at a leg boundary; the mock only models the
-        # fallback.
-        if self.model:
-            handoff = json.loads(self.model.paths(root)["checkpoint"].read_text())
-            loss, done = handoff["loss"], handoff["step"]
-        else:
-            loss, done = 10.0, 0
-
+        model_parameters = self.artifact.model_parameters
         config = self.artifact.config
         folder = root / self.artifact.artifact_path
         every = config.checkpoint_every
-        steps = list(range(done + every, self.artifact.step + 1, every))
-        if not steps or steps[-1] != self.artifact.step:
-            steps.append(self.artifact.step)
+        steps = list(range(every, config.total_steps + 1, every))
+        if not steps or steps[-1] != config.total_steps:
+            steps.append(config.total_steps)
 
+        loss, done = 10.0, 0
         for step in steps:
             for _ in range(step - done):
                 loss *= 0.99  # mock decay, not a real training loop
@@ -200,16 +189,18 @@ class PretrainJob(Job):
             body = json.dumps(
                 {
                     "step": step,
+                    "model_parameters": {
+                        "hidden_size": model_parameters.hidden_size,
+                        "num_layers": model_parameters.num_layers,
+                    },
                     "config": {
-                        "hidden_size": config.hidden_size,
-                        "num_layers": config.num_layers,
+                        "batch_size": config.batch_size,
                         "lr": config.lr,
                         "seed": config.seed,
                     },
                     "vocab_size": vocab_size,
                     "trained_on": self.dataset.uid,
                     "num_train_tokens": len(train_ids),
-                    "continues": self.model.uid if self.model else None,
                     "loss": loss,
                 },
                 indent=2,
@@ -217,10 +208,10 @@ class PretrainJob(Job):
             # only the final step is declared; intermediates are undeclared --
             # written into the folder, absent from `files`, so nothing waits
             # on one that recovery skipped past
-            if step == self.artifact.step:
+            if step == config.total_steps:
                 self.artifact.paths(root)["checkpoint"].write_text(body)
             else:
                 (folder / f"checkpoint_{step}.txt").write_text(body)
         self.artifact.paths(root)["progress"].write_text(
-            json.dumps({"step": self.artifact.step, "complete": True}, indent=2)
+            json.dumps({"step": config.total_steps, "complete": True}, indent=2)
         )  # last, so `done` can't be observed before the checkpoint is durable

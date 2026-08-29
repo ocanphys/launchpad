@@ -101,9 +101,9 @@ class RunConfig(BaseModel):
 
     @model_validator(mode="after")
     def _job_uids_must_resolve(self) -> "RunConfig":
-        import jobs  # deferred: jobs.py imports this module, at the top level
+        import jobs_LEGACY  # deferred: jobs.py imports this module, at the top level
 
         for job_uid in self.jobs:
-            if jobs.get_job_class(job_uid) is None:
+            if jobs_LEGACY.get_job_class(job_uid) is None:
                 raise ValueError(f"{job_uid!r} does not name a Job class in jobs.py")
         return self

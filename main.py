@@ -4,7 +4,7 @@ from pathlib import Path
 
 import modal
 
-import jobs
+import jobs_LEGACY
 from config import (
     APP_NAME,
     VOLUME_NAME,
@@ -125,7 +125,7 @@ def read_state() -> dict:
     problem_runs = {}
     for run_id in run_ids:
         try:
-            job_states = jobs.preflight_check(run_id)  # local mount
+            job_states = jobs_LEGACY.preflight_check(run_id)  # local mount
         except Exception as exc:
             problem_runs[run_id] = {"error": str(exc)}
             continue
@@ -209,9 +209,9 @@ def run_job(run_id: str, job_uid: str) -> None:
     this is a re-check against jobs.py as currently deployed, not a first
     one.
     """
-    job_cls = jobs.get_job_class(job_uid)
+    job_cls = jobs_LEGACY.get_job_class(job_uid)
     if job_cls is None:
-        raise jobs.JobError(f"{job_uid}: no such class in jobs.py")
+        raise jobs_LEGACY.JobError(f"{job_uid}: no such class in jobs.py")
     with initialize_worker(run_id, job_type=job_uid, volume=volume) as worker:
         worker.confirm_lease()
         job = job_cls(run_id, worker.log, worker)
@@ -296,7 +296,7 @@ def attempt_launch(
             None,
         )
 
-    state = jobs.preflight_check(run_id, volume=volume).get(job)
+    state = jobs_LEGACY.preflight_check(run_id, volume=volume).get(job)
     if state is None:
         return (
             False,

@@ -1,0 +1,500 @@
+<title>Launchpad Topology</title>
+<style>
+  :root {
+    --bg: #E9ECEE;
+    --surface: #FBFCFB;
+    --inset: #E1E5E7;
+    --ink: #182029;
+    --ink-soft: #4C5763;
+    --ink-faint: #7C8791;
+    --line: #6B7680;
+    --line-soft: #C3CACF;
+    --accent: #A84E1C;
+    --accent-soft: #EADBCB;
+    --accent-wash: rgba(168,78,28,0.07);
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --font-sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12161B;
+      --surface: #1A2029;
+      --inset: #10151B;
+      --ink: #E7EAEC;
+      --ink-soft: #9BA7B0;
+      --ink-faint: #6C7981;
+      --line: #58646E;
+      --line-soft: #2A323A;
+      --accent: #E0863F;
+      --accent-soft: #3A2A1C;
+      --accent-wash: rgba(224,134,63,0.09);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161B;
+    --surface: #1A2029;
+    --inset: #10151B;
+    --ink: #E7EAEC;
+    --ink-soft: #9BA7B0;
+    --ink-faint: #6C7981;
+    --line: #58646E;
+    --line-soft: #2A323A;
+    --accent: #E0863F;
+    --accent-soft: #3A2A1C;
+    --accent-wash: rgba(224,134,63,0.09);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background:
+      repeating-linear-gradient(0deg, var(--line-soft) 0 1px, transparent 1px 28px),
+      repeating-linear-gradient(90deg, var(--line-soft) 0 1px, transparent 1px 28px),
+      var(--bg);
+    background-attachment: fixed;
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .sheet {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 40px 32px 64px;
+  }
+
+  .titleblock {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 24px;
+    flex-wrap: wrap;
+    border-bottom: 2.5px solid var(--ink);
+    padding-bottom: 14px;
+    margin-bottom: 8px;
+  }
+  .tb-project {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+  .titleblock h1 {
+    margin: 0;
+    font-size: clamp(28px, 4vw, 38px);
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .tb-meta {
+    display: flex;
+    gap: 28px;
+    margin: 0;
+    flex-wrap: wrap;
+  }
+  .tb-meta > div { text-align: left; }
+  .tb-meta dt {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    color: var(--ink-faint);
+    margin-bottom: 3px;
+  }
+  .tb-meta dd {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    white-space: nowrap;
+  }
+
+  .intro {
+    max-width: 66ch;
+    font-size: 15.5px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    margin: 22px 0 30px;
+  }
+  .intro code { color: var(--ink); }
+
+  code, .mono { font-family: var(--font-mono); }
+
+  figure.diagram { margin: 0 0 10px; }
+  .diagram-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--line-soft);
+    background: var(--surface);
+    padding: 6px;
+  }
+  .diagram-scroll svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    min-width: 980px;
+  }
+  figcaption {
+    margin-top: 10px;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-faint);
+    max-width: 78ch;
+  }
+  figcaption code { color: var(--ink-soft); }
+
+  /* ---- svg content styling ---- */
+  .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.6; }
+  .box-inset { fill: var(--inset); stroke: var(--line); stroke-width: 1.4; }
+  .box-dim { fill: var(--surface); stroke: var(--line-soft); stroke-width: 1.3; opacity: 0.62; }
+  .box-ghost { fill: var(--inset); stroke: var(--line-soft); stroke-width: 1.1; opacity: 0.5; }
+  .group-boundary { fill: none; stroke: var(--ink-faint); stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .lease-boundary { fill: var(--accent-wash); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 4; }
+
+  .box-title { font-family: var(--font-mono); font-weight: 700; font-size: 13.5px; fill: var(--ink); }
+  .box-title-dim { font-family: var(--font-mono); font-weight: 700; font-size: 12.5px; fill: var(--ink-faint); }
+  .box-tag { font-family: var(--font-sans); font-size: 9.5px; fill: var(--ink-faint); }
+  .box-row { font-family: var(--font-mono); font-size: 10px; fill: var(--ink-soft); }
+  .box-row-dim { font-family: var(--font-sans); font-size: 9.5px; fill: var(--ink-faint); font-style: italic; }
+
+  .group-label { font-family: var(--font-sans); font-weight: 700; font-size: 11px; letter-spacing: 0.14em; fill: var(--ink-faint); }
+  .lease-tag { font-family: var(--font-sans); font-weight: 800; font-size: 10px; letter-spacing: 0.1em; fill: var(--accent); }
+
+  .flow { fill: none; stroke: var(--line); stroke-width: 1.7; marker-end: url(#arrow); }
+  .flow-dashed { fill: none; stroke: var(--line); stroke-width: 1.7; stroke-dasharray: 6 5; marker-end: url(#arrow); }
+  .flow-copper { fill: none; stroke: var(--accent); stroke-width: 2; marker-end: url(#arrow); }
+  .flow-label { font-family: var(--font-sans); font-size: 10.3px; fill: var(--ink-soft); }
+  .flow-label-copper { font-family: var(--font-sans); font-weight: 700; font-size: 10.3px; fill: var(--accent); }
+
+  /* ---- legend ---- */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 22px;
+    padding: 14px 16px;
+    margin-bottom: 44px;
+    border: 1px solid var(--line-soft);
+    background: var(--surface);
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+  .legend-item { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+  .swatch { display: inline-block; width: 30px; height: 0; border-top: 2px solid var(--line); }
+  .swatch.dashed { border-top-style: dashed; }
+  .swatch.copper { border-top-color: var(--accent); }
+  .swatch-box { display: inline-block; width: 16px; height: 12px; border: 2px dashed var(--accent); background: var(--accent-wash); }
+
+  /* ---- assumptions ---- */
+  .assumptions h2 {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    margin: 0 0 16px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .assumption-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--line-soft);
+    border: 1px solid var(--line-soft);
+  }
+  .assumption {
+    background: var(--surface);
+    padding: 20px 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .assumption .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    color: var(--accent);
+  }
+  .assumption h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.3;
+    text-wrap: balance;
+  }
+  .assumption p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.62;
+    color: var(--ink-soft);
+  }
+  .assumption code { color: var(--ink); font-size: 0.94em; }
+
+  @media (max-width: 860px) {
+    .assumption-grid { grid-template-columns: 1fr; }
+    .tb-meta { display: none; }
+  }
+</style>
+
+<div class="sheet">
+
+  <header class="titleblock">
+    <div>
+      <span class="tb-project">LAUNCHPAD</span>
+      <h1>System Topology</h1>
+    </div>
+    <dl class="tb-meta">
+      <div>
+        <dt>Scope</dt>
+        <dd>CLI &middot; web dashboard &middot; 3 Modal functions &middot; 1 volume &middot; 2 dicts</dd>
+      </div>
+      <div>
+        <dt>Source</dt>
+        <dd>main.py &middot; jobs.py &middot; runtime.py &middot; lease_protocol.py</dd>
+      </div>
+    </dl>
+  </header>
+
+  <p class="intro">
+    Two ways in &mdash; a local CLI and the <code>leasebook</code> web dashboard &mdash;
+    both resolving to the same three Modal containers, all of which treat one
+    Volume as the only durable truth. The map below traces who talks to whom,
+    and exactly where each container is allowed to write.
+  </p>
+
+  <figure class="diagram">
+    <div class="diagram-scroll">
+      <svg viewBox="0 0 1240 840" role="img" aria-label="Launchpad system topology: a local CLI and a browser both reach leasebook, run_job, and etl containers inside Modal Cloud; those containers coordinate through two Dicts (leases, beats) and read and write one Volume, whose /runs/{run_id} folders are each confined by one run's lease, while /data sits alongside as a shared, unconfined folder.">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- ============ CLIENTS ============ -->
+        <g>
+          <rect class="box" x="60" y="20" width="340" height="100"/>
+          <text class="box-title" x="76" y="44">BROWSER</text>
+          <text class="box-tag" x="76" y="60">dashboard client</text>
+          <text class="box-row" x="76" y="82">loads leasebook&#8217;s static UI</text>
+          <text class="box-row" x="76" y="96">polls /state &middot; posts /launch</text>
+        </g>
+
+        <g>
+          <rect class="box" x="840" y="20" width="340" height="100"/>
+          <text class="box-title" x="856" y="44">LOCAL CLI</text>
+          <text class="box-tag" x="856" y="60">operator&#8217;s machine &middot; no volume mount</text>
+          <text class="box-row" x="856" y="82">launch &#8594; etl &middot; launch_job &#8594; run_job</text>
+          <text class="box-row" x="856" y="96">push_config &#8594; writes config.json</text>
+        </g>
+
+        <!-- ============ MODAL CLOUD BOUNDARY ============ -->
+        <rect class="group-boundary" x="20" y="150" width="1200" height="655"/>
+        <text class="group-label" x="40" y="173">MODAL CLOUD</text>
+
+        <!-- ---- compute row ---- -->
+        <g>
+          <rect class="box" x="50" y="195" width="330" height="140"/>
+          <text class="box-title" x="66" y="220">leasebook</text>
+          <text class="box-tag" x="66" y="236">always on &middot; max_containers=1</text>
+          <text class="box-row" x="66" y="258">GET /  &#8594; dashboard (static)</text>
+          <text class="box-row" x="66" y="273">GET /state &#8594; dashboard JSON</text>
+          <text class="box-row" x="66" y="288">POST /launch/&#123;run_id&#125;/&#123;job&#125;</text>
+        </g>
+
+        <g>
+          <rect class="box" x="450" y="195" width="330" height="140"/>
+          <text class="box-title" x="466" y="220">run_job(run_id, job_uid)</text>
+          <text class="box-tag" x="466" y="236">ephemeral &middot; one container per launch</text>
+          <text class="box-row" x="466" y="258">JOBS[job_uid] &#8594; jobs.py class</text>
+          <text class="box-row" x="466" y="273">resources via with_options()</text>
+          <text class="box-row" x="466" y="288">image: worker_image</text>
+        </g>
+
+        <g>
+          <rect class="box" x="850" y="195" width="330" height="140"/>
+          <text class="box-title" x="866" y="220">etl(run_id, cores)</text>
+          <text class="box-tag" x="866" y="236">ephemeral &middot; CLI-launched only</text>
+          <text class="box-row" x="866" y="258">snakemake pipeline</text>
+          <text class="box-row" x="866" y="273">writes into /data (shared)</text>
+          <text class="box-row" x="866" y="288">image: etl_image</text>
+        </g>
+
+        <!-- ---- storage / coordination row ---- -->
+        <g>
+          <rect class="box" x="50" y="380" width="780" height="375"/>
+          <text class="group-label" x="66" y="404">VOLUME &middot; trainvols &mdash; mounted at /storage</text>
+
+          <rect class="box-inset" x="75" y="425" width="490" height="310"/>
+          <text class="box-tag" x="87" y="446">/runs/ &mdash; one folder per run_id</text>
+
+          <!-- folder A: highlighted lease boundary -->
+          <rect class="lease-boundary" x="93" y="468" width="219" height="254"/>
+          <text class="lease-tag" x="99" y="463">LEASE BOUNDARY</text>
+          <rect class="box" x="95" y="470" width="215" height="250"/>
+          <text class="box-title" x="109" y="494" font-size="12">/runs/&#123;run_id&#125;/</text>
+          <text class="box-row" x="109" y="518">config.json</text>
+          <text class="box-row" x="109" y="534">&#123;job_uid&#125;_artifact.txt</text>
+          <text class="box-row" x="109" y="550">logs/&#123;call_id&#125;/</text>
+          <text class="box-row" x="109" y="564">&#160;&#160;&#123;job_type&#125;.log</text>
+          <line x1="109" y1="580" x2="298" y2="580" stroke="var(--line-soft)" stroke-width="1"/>
+          <text class="box-row-dim" x="109" y="600">parameters, dependencies &amp;</text>
+          <text class="box-row-dim" x="109" y="614">resources all read from</text>
+          <text class="box-row-dim" x="109" y="628">config.json above</text>
+
+          <!-- folder B: ghosted, "more like this" -->
+          <rect class="box-ghost" x="336" y="476" width="215" height="250"/>
+          <rect class="box-dim" x="330" y="470" width="215" height="250"/>
+          <text class="box-title-dim" x="344" y="494" font-size="12">/runs/&#123;&#8230;&#125;/</text>
+          <text class="box-row-dim" x="344" y="516">same shape &mdash;</text>
+          <text class="box-row-dim" x="344" y="530">its own lease,</text>
+          <text class="box-row-dim" x="344" y="544">its own boundary</text>
+
+          <rect class="box-inset" x="580" y="425" width="225" height="310"/>
+          <rect class="box" x="596" y="470" width="193" height="220"/>
+          <text class="box-title" x="610" y="496" font-size="12.5">/data/</text>
+          <text class="box-row" x="610" y="520">ETL output +</text>
+          <text class="box-row" x="610" y="534">downloaded source data</text>
+          <line x1="610" y1="550" x2="775" y2="550" stroke="var(--line-soft)" stroke-width="1"/>
+          <text class="box-row-dim" x="610" y="570">shared across every run &mdash;</text>
+          <text class="box-row-dim" x="610" y="584">not nested under any run_id,</text>
+          <text class="box-row-dim" x="610" y="598">not confined by a lease</text>
+        </g>
+
+        <g>
+          <text class="group-label" x="880" y="404">COORDINATION &middot; Modal Dicts</text>
+
+          <rect class="box" x="870" y="425" width="310" height="145"/>
+          <text class="box-title" x="886" y="450">leases</text>
+          <text class="box-tag" x="886" y="466">run_id &#8594; current holder</text>
+          <text class="box-row" x="886" y="488">&#123;call_id, job_type,</text>
+          <text class="box-row" x="886" y="502">&#160;granted_ts, attempt&#125;</text>
+          <text class="box-row-dim" x="886" y="522">one entry per run_id</text>
+
+          <rect class="box" x="870" y="605" width="310" height="145"/>
+          <text class="box-title" x="886" y="630">beats</text>
+          <text class="box-tag" x="886" y="646">call_id &#8594; liveness</text>
+          <text class="box-row" x="886" y="668">&#123;run_id, last_beat_ts&#125;</text>
+          <text class="box-row-dim" x="886" y="688">one entry per call_id,</text>
+          <text class="box-row-dim" x="886" y="702">refreshed every &#126;1s</text>
+        </g>
+
+        <!-- ============ ARROWS ============ -->
+
+        <!-- Browser -> leasebook -->
+        <line class="flow" x1="225" y1="120" x2="215" y2="195"/>
+        <text class="flow-label" x="240" y="142">HTTP &mdash; GET / &middot; GET /state</text>
+        <text class="flow-label" x="240" y="156">POST /launch/&#123;run_id&#125;/&#123;job&#125;</text>
+
+        <!-- CLI -> etl -->
+        <line class="flow" x1="1000" y1="120" x2="1015" y2="195"/>
+        <text class="flow-label" x="1005" y="150">spawn()</text>
+        <text class="flow-label" x="1005" y="164">via &#96;launch&#96;</text>
+
+        <!-- CLI -> run_job -->
+        <path class="flow" d="M880,120 L760,195"/>
+        <text class="flow-label" x="795" y="150">spawn() &mdash; attempt_launch</text>
+        <text class="flow-label" x="795" y="164">via &#96;launch_job&#96;</text>
+
+        <!-- CLI -> Dicts -->
+        <path class="flow-dashed" d="M1080,120 L1195,120 L1195,415 L1150,415 L1150,425"/>
+        <text class="flow-label" x="1000" y="137">Dict API &mdash; pop/put grant</text>
+
+        <!-- CLI -> Volume -->
+        <path class="flow-dashed" d="M1160,120 L1215,120 L1215,780 L440,780 L440,755"/>
+        <text class="flow-label" x="620" y="793">Volume API &mdash; read_file / listdir / batch_upload &middot; no mount</text>
+
+        <!-- leasebook -> run_job -->
+        <line class="flow" x1="380" y1="255" x2="450" y2="255"/>
+        <text class="flow-label" x="385" y="246">spawn() via web route</text>
+
+        <!-- leasebook -> Volume -->
+        <line class="flow" x1="215" y1="335" x2="215" y2="380"/>
+        <text class="flow-label" x="228" y="362">mounted: reload()</text>
+        <text class="flow-label" x="228" y="374">+ local read</text>
+
+        <!-- leasebook -> Dicts -->
+        <path class="flow" d="M350,335 L350,357 L1025,357 L1025,425"/>
+        <text class="flow-label" x="560" y="350">GET leases + beats (batch) &mdash; every /state poll</text>
+
+        <!-- run_job -> /runs -->
+        <path class="flow" d="M505,335 L505,363 L320,363 L320,425"/>
+        <text class="flow-label" x="330" y="356">mounted: reload &#8594; write &#8594; commit()</text>
+
+        <!-- run_job -> Dicts (copper) -->
+        <path class="flow-copper" d="M735,335 L735,371 L955,371 L955,425"/>
+        <text class="flow-label-copper" x="740" y="391">confirm() fence &middot; heartbeat/1s</text>
+
+        <!-- etl -> /data -->
+        <path class="flow" d="M955,335 L955,379 L692,379 L692,425"/>
+        <text class="flow-label" x="700" y="372">mounted: reload &#8594; write &#8594; commit()</text>
+
+        <!-- etl -> Dicts (copper) -->
+        <line class="flow-copper" x1="1015" y1="335" x2="1015" y2="425"/>
+        <text class="flow-label-copper" x="1025" y="385">confirm() fence</text>
+        <text class="flow-label-copper" x="1025" y="399">heartbeat/1s</text>
+
+      </svg>
+    </div>
+    <figcaption>
+      Every arrow is a real call in the code &mdash; a <code>spawn()</code>, an HTTP
+      request, a mounted local read/write, or a Dict get/put. Dashed lines cross
+      the network without a volume mount; copper marks the lease mechanism
+      specifically: the fence check a container makes before it will write, and
+      the one folder that check actually protects.
+    </figcaption>
+  </figure>
+
+  <div class="legend">
+    <span class="legend-item"><span class="swatch"></span> direct call &mdash; spawn(), HTTP, or a mounted read/write</span>
+    <span class="legend-item"><span class="swatch dashed"></span> Volume API call, no mount (read_file / listdir / batch_upload)</span>
+    <span class="legend-item"><span class="swatch copper"></span> lease confirm() &mdash; the fence check against <code>leases</code></span>
+    <span class="legend-item"><span class="swatch-box"></span> the folder one run&#8217;s lease actually confines writes to</span>
+  </div>
+
+  <section class="assumptions">
+    <h2>Scope &amp; assumptions</h2>
+    <div class="assumption-grid">
+      <article class="assumption">
+        <span class="eyebrow">SCOPE</span>
+        <h3>A lease confines writes to one run&#8217;s own folder</h3>
+        <p>
+          A grant in <code>leases</code> is keyed by <code>run_id</code> alone.
+          Whatever a container does under that grant &mdash; its log, its
+          artifact, every read of <code>config.json</code> &mdash; stays inside
+          <code>/runs/&#123;run_id&#125;/</code>. The lease has no reach past that
+          one folder, which is what makes two different run_ids fully
+          independent: nothing about one run&#8217;s lease, retry, or failure can
+          touch another&#8217;s.
+        </p>
+      </article>
+      <article class="assumption">
+        <span class="eyebrow">STORAGE</span>
+        <h3>/data is shared, and sits outside every lease</h3>
+        <p>
+          <code>/data</code> holds whatever the ETL pipeline downloads and
+          produces. It&#8217;s a sibling of <code>/runs/</code>, not a child of
+          any one run&#8217;s folder &mdash; every <code>etl</code> container reads
+          and writes the same <code>/data</code>, regardless of which run_id its
+          own lease happens to be keyed to.
+        </p>
+      </article>
+      <article class="assumption">
+        <span class="eyebrow">RETRIES</span>
+        <h3>Every job and ETL step is assumed idempotent</h3>
+        <p>
+          That assumption is what makes an abandoned attempt safe to simply
+          throw away. A superseded container&#8217;s writes sit uncommitted on
+          local disk and vanish with it; a retried one reproduces the same
+          result. Losing work in flight costs time &mdash; never correctness.
+        </p>
+      </article>
+    </div>
+  </section>
+
+</div>

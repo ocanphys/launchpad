@@ -10,13 +10,14 @@ from the artifact's type, and the commit in the manifest pins the code it is.
 Manifests are declared ahead of the work, for the whole graph, and are immutable
 once written. So a manifest on disk that disagrees with the one being requested
 is never a re-declaration; it means the history recorded there was edited, and
-`check` refuses. Changing parameters means a new run, and `write` only ever adds.
+`Declaration.check` refuses. Changing parameters means a new run, and
+`Declaration.write` only ever adds.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -128,16 +129,37 @@ class Row:
         return f"{self.status:11}{self.artifact.artifact_path}{mark}"
 
 
-@dataclass(frozen=True, repr=False)  # repr=False: the report reads better, and
-class Declaration:  # a generated one would dump the whole plan into a notebook
-    """What a request looks like against a particular root, and the means to
-    write down whatever of it isn't there yet."""
+def _run_id_of(artifact: Artifact) -> str | None:
+    """The run an artifact belongs to, or None if it's shared across runs --
+    read off the fields, so nothing declares its own scope."""
+    return getattr(artifact, "run_id", None)
 
-    plan: dict
-    rows: tuple[Row, ...]  # dependency order -- the order work would happen in
+
+@dataclass(repr=False)  # repr=False: the report reads better, and a generated
+class Declaration:  # one would dump the whole plan into a notebook
+    """A request against a particular root -- what `check()` and `write()` act on.
+
+    check()   resolve `artifact` and reconcile the whole plan against `root`;
+              show what's consistent and what isn't. Touches disk, writes
+              nothing, safe to call again any time disk state may have changed.
+    write()   check(), then declare every `new` artifact, dependencies first.
+              Refuses outright if anything is inconsistent -- a partial
+              declaration over a disputed tree is worse than none.
+
+    strict_commit turns commit drift from a note into a refusal. Off by
+    default: a tree built by more than one version of the code is normal, and
+    usually fine.
+    """
+
+    artifact: Artifact
     root: Path
-    run_id: str | None
-    strict_commit: bool
+    strict_commit: bool = False
+    plan: dict | None = field(init=False, default=None, repr=False)
+    rows: tuple[Row, ...] = field(init=False, default=(), repr=False)
+
+    @property
+    def run_id(self) -> str | None:
+        return _run_id_of(self.artifact)
 
     @property
     def problems(self) -> list[Row]:
@@ -151,10 +173,14 @@ class Declaration:  # a generated one would dump the whole plan into a notebook
     def ok(self) -> bool:
         return not self.problems
 
+    def check(self) -> Declaration:
+        self.plan = resolve(self.artifact)
+        artifacts = [job.artifact for job in job_list(self.plan)]  # deduped
+        self.rows = tuple(Row(a, *inspect(a, self.root)) for a in artifacts)
+        return self
+
     def write(self) -> list[Path]:
-        """Declare every `new` artifact, dependencies first, and return the
-        manifests written. Refuses outright if anything is inconsistent -- a
-        partial declaration over a disputed tree is worse than none."""
+        self.check()
         if not self.ok:
             raise ValueError(
                 "refusing to declare over an inconsistent tree:\n"
@@ -183,6 +209,8 @@ class Declaration:  # a generated one would dump the whole plan into a notebook
     def __str__(self) -> str:
         """The report: every artifact the request needs, in the order work would
         happen, with what the disk says about each."""
+        if self.plan is None:
+            return f"run {self.run_id or '-'} under {self.root} (not checked)"
         counts: dict[str, int] = {}
         for row in self.rows:
             counts[row.status] = counts.get(row.status, 0) + 1
@@ -206,70 +234,4 @@ class Declaration:  # a generated one would dump the whole plan into a notebook
             ]
         )
 
-    __repr__ = __str__  # so a cell ending in check(...) shows the report
-
-
-def _run_id_of(artifact: Artifact) -> str | None:
-    """The run an artifact belongs to, or None if it's shared across runs --
-    read off the fields, so nothing declares its own scope."""
-    return getattr(artifact, "run_id", None)
-
-
-def check(
-    artifact: Artifact,
-    root: Path,
-    strict_commit: bool = False,
-) -> Declaration:
-    """Resolve `artifact` and reconcile the whole plan against `root`.
-
-    Reports every artifact the request needs and what the disk says about each.
-    Nothing is written; the returned Declaration does that, and only if nothing
-    is inconsistent.
-
-    strict_commit turns commit drift from a note into a refusal. Off by default:
-    a tree built by more than one version of the code is normal, and usually
-    fine.
-    """
-    plan = resolve(artifact)
-    artifacts = [job.artifact for job in job_list(plan)]  # deduped, dependency order
-
-    rows = []
-    for a in artifacts:
-        state, drift = inspect(a, root)
-        rows.append(Row(artifact=a, status=state, drift=drift))
-
-    return Declaration(
-        plan=plan,
-        rows=tuple(rows),
-        root=root,
-        run_id=_run_id_of(artifact),
-        strict_commit=strict_commit,
-    )
-
-
-def declare(
-    artifact: Artifact,
-    root: Path,
-    strict_commit: bool = False,
-) -> Declaration:
-    """check, then write. The Declaration comes back either way -- print it to
-    see what was already there."""
-    declaration = check(artifact, root, strict_commit=strict_commit)
-    declaration.write()
-    return declaration
-
-
-def run_all(artifact: Artifact, root: Path) -> Declaration:
-    """Declare the graph, then run everything in it that isn't done. The local
-    executor: the real one reads manifests off disk and launches jobs whose
-    dependencies are satisfied, but it decides what to run the same way."""
-    declaration = declare(artifact, root)
-    for job in job_list(declaration.plan):
-        state = status(job.artifact, root)
-        if state == "done":
-            print(f"skip  {job.artifact.artifact_path}  (already done)")
-            continue
-        job.run(root)
-        note = "  (was partial -- redone)" if state == "partial" else ""
-        print(f"run   {job.artifact.artifact_path}{note}")
-    return declaration
+    __repr__ = __str__  # so a cell ending in .check() shows the report
