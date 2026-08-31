@@ -1,20 +1,19 @@
 import sys
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 import modal
 
 from config import (
     APP_NAME,
-    VOLUME_NAME,
-    STORAGE,
     CONTAINER_LIFETIME,
-    HEARTBEAT_SECONDS,
     FLATLINE,
+    HEARTBEAT_SECONDS,
+    STORAGE,
+    VOLUME_NAME,
 )
 from lease_protocol import beats, leases, new_grant
-from logs import read_call_logs
+from logs import LOG_FILENAME, read_call_logs, read_log
 from runtime import initialize_worker
 
 # artifact.py/job.py/resolve.py use bare sibling imports (`from artifact
@@ -201,20 +200,44 @@ def read_state() -> dict:
     }
 
 
-def artifact_log_entries(artifact_path: str, root: Path) -> list[dict]:
-    """One artifact's whole log history -- every call that has ever held its
-    lease, merged into one timeline and tagged with the artifact_path it
-    came from.
+def artifact_job_name(artifact_path: str, root: Path) -> str | None:
+    """The class name of the job that produces the artifact at
+    `artifact_path` (e.g. "SourceJob"), or None if there's no manifest to
+    resolve it from yet -- a call's log directory can exist before (or
+    outlive) the manifest that names its job, so this is best-effort, not
+    load-bearing for anything but display.
 
-    `read_call_logs` already merges across call_ids; tagging with
-    artifact_path is added here, not there, because that module has no
-    notion of an artifact -- it only knows call_ids and log files (see
-    logs.py).
+    Same lookup `run_job` already does to find a job to run -- load the
+    manifest, resolve its producer -- just read for its class name instead
+    of run.
     """
-    entries = read_call_logs(root / artifact_path / "logs")
+    manifest_path = root / artifact_path / MANIFEST
+    if not manifest_path.exists():
+        return None
+    try:
+        artifact = Artifact.load(manifest_path)
+        return type(artifacts_resolve.producer_for(artifact)).__name__
+    except Exception:
+        return None
+
+
+def _stamp(entries: list[dict], artifact_path: str, job_name: str | None) -> list[dict]:
+    """Tag every entry with the artifact_path and job name it belongs to --
+    `read_call_logs`/`read_log` have no notion of either, they only know
+    call_ids and log files (see logs.py)."""
     for entry in entries:
         entry["artifact_path"] = artifact_path
+        entry["job"] = job_name
     return entries
+
+
+def artifact_log_entries(artifact_path: str, root: Path) -> list[dict]:
+    """One artifact's whole log history -- every call that has ever held its
+    lease, merged into one timeline and tagged with the artifact_path and
+    job that produced it.
+    """
+    entries = read_call_logs(root / artifact_path / "logs")
+    return _stamp(entries, artifact_path, artifact_job_name(artifact_path, root))
 
 
 def run_log_entries(run_id: str, root: Path) -> list[dict]:
@@ -261,12 +284,26 @@ def leasebook():
         launched, message, _call = attempt_launch(artifact_path)
         return {"launched": launched, "message": message}
 
+    # call_id is a query param, not a path segment: "logs of this one call"
+    # is a narrowing of the artifact-scoped view, not a route of its own --
+    # the dashboard links to it as #/artifact/<path>?call=<call_id>.
     @api.get("/logs/artifact/{artifact_path:path}")
-    def artifact_logs_endpoint(artifact_path: str) -> dict:
+    def artifact_logs_endpoint(artifact_path: str, call_id: str | None = None) -> dict:
         if not safe_relpath(artifact_path):
             return {"artifact_path": artifact_path, "entries": [], "error": "invalid artifact_path"}
+        if call_id is not None and not safe_relpath(call_id):
+            return {"artifact_path": artifact_path, "call_id": call_id, "entries": [], "error": "invalid call_id"}
+
         volume.reload()
-        return {"artifact_path": artifact_path, "entries": artifact_log_entries(artifact_path, Path(STORAGE))}
+        root = Path(STORAGE)
+
+        if call_id is not None:
+            log_path = root / artifact_path / "logs" / call_id / LOG_FILENAME
+            entries = read_log(log_path, call_id) if log_path.exists() else []
+            entries = _stamp(entries, artifact_path, artifact_job_name(artifact_path, root))
+            return {"artifact_path": artifact_path, "call_id": call_id, "entries": entries}
+
+        return {"artifact_path": artifact_path, "entries": artifact_log_entries(artifact_path, root)}
 
     # :path even though a run_id has no /s of its own -- kept consistent
     # with the artifact route above rather than a plain segment, on the same
@@ -324,7 +361,7 @@ def run_job(artifact_path: str) -> None:
         worker.confirm_lease("pre run")
         artifact = Artifact.load(Path(STORAGE) / artifact_path / MANIFEST)
         job = artifacts_resolve.producer_for(artifact)
-        job.run(Path(STORAGE))
+        job.run(Path(STORAGE), worker)
         worker.confirm_lease("pre vol commit")
 
 

@@ -1,6 +1,7 @@
 import time
 
 import modal
+
 from config import APP_NAME, VOLUME_NAME
 
 # Two Dicts, not one shared store with prefixed keys: an artifact_path is
@@ -105,7 +106,7 @@ class Lease:
         for i in range(1, self.tries + 1):
             verdict, grant = fence(self.artifact_path, self.call_id)
             if verdict == MATCH:
-                self.logger.info(
+                self.logger.debug(
                     f"{label}: lease held (attempt {grant['attempt']}, try {i}/{self.tries})"
                 )
                 return
@@ -120,5 +121,5 @@ class Lease:
                 raise LeaseLost(
                     f"{label}: indeterminate after {self.tries} tries -- ownership never confirmed"
                 )
-            self.logger.info(f"{label}: indeterminate, retry {i}/{self.tries}")
+            self.logger.debug(f"{label}: indeterminate, retry {i}/{self.tries}")
             time.sleep(self.backoff)

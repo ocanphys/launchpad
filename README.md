@@ -8,7 +8,11 @@ Dicts and one web container.
 - **Volume (`trainvols`)**: one folder per run, `runs/{run_id}/`. Holds
   `config.json` (which job_uids this run declares, their parameters,
   dependencies, and resources), each job's `{job_uid}_artifact.txt` (its
-  completion marker), and `logs/{call_id}/{job_type}.log`.
+  completion marker), and each artifact's own `logs/{call_id}/job.log` --
+  nested under that artifact's own folder rather than the run's, since a
+  lease (and so a log) is granted per artifact, not per run (see
+  `runtime.initialize_worker`). Level and category conventions for what
+  goes in these files are in [LOGGING.md](LOGGING.md).
 - **Dict `launchpad-leases`**: one entry per run_id, naming the call_id
   currently holding that run (there can be only one at a time -- a run's
   lease).

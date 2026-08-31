@@ -78,12 +78,26 @@ const ctx = { isPending, onLaunch: launchJob };
 
 // --- draw -------------------------------------------------------------------
 
+// Drop any pending mark once a poll shows that artifact active -- the spawn
+// it was guarding against a duplicate click for has now been confirmed, so
+// there's no need to wait out the rest of PENDING_MS.
+function reconcilePending(runs) {
+  if (pending.size === 0) return;
+  for (const run of Object.values(runs)) {
+    for (const [path, state] of Object.entries(run.artifacts || {})) {
+      if (pending.has(path) && state.active) pending.delete(path);
+    }
+  }
+}
+
 // Pure function of the last payload. Full rebuild each time is correct and
 // cheap at this scale; don't add reconciliation until something focusable
 // needs to survive a poll.
 function draw(payload) {
   const runs = payload.runs || {};
   const ids = Object.keys(runs).sort();
+
+  reconcilePending(runs);
 
   metaEl.textContent =
     ids.length + (ids.length === 1 ? " run" : " runs") +
@@ -129,16 +143,40 @@ async function pollDashboard() {
 
 // --- log view poll -----------------------------------------------------------
 
+// The log view's own state: the last payload/opts it rendered (so a filter
+// toggle can redraw instantly, without waiting on the next poll), and which
+// levels are currently unchecked. logview.js stays a pure render function --
+// this is the app-state half of that split, same as `pending` is for the
+// dashboard's launch buttons.
+let lastLogPayload = null;
+let lastLogOpts = null;
+const hiddenLevels = new Set();
+let lastLogScope = null; // for detecting a genuine scope/id change vs. just a call filter
+let lastLogId = null;
+
+function toggleLevel(level) {
+  if (hiddenLevels.has(level)) hiddenLevels.delete(level);
+  else hiddenLevels.add(level);
+  redrawLogView();
+}
+
+function redrawLogView() {
+  if (lastLogPayload) renderLogView(logViewEl, lastLogPayload, lastLogOpts);
+}
+
 // One fetcher, parameterized by scope, rather than two near-duplicates --
 // "run" and "artifact" differ only in which URL and which id renderLogView
-// gets, never in how the fetch/error/render sequence goes.
-async function pollLogView(scope, id) {
+// gets, never in how the fetch/error/render sequence goes. callId narrows an
+// "artifact" fetch server-side to just that one call's log.
+async function pollLogView(scope, id, callId) {
   try {
-    const url = scope === "run" ? `logs/run/${id}` : `logs/artifact/${id}`;
+    let url = scope === "run" ? `logs/run/${id}` : `logs/artifact/${id}`;
+    if (scope === "artifact" && callId) url += `?call_id=${encodeURIComponent(callId)}`;
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const payload = await res.json();
-    renderLogView(logViewEl, payload, { scope, id });
+    lastLogPayload = await res.json();
+    lastLogOpts = { scope, id, callId: callId || null, hiddenLevels, onToggleLevel: toggleLevel };
+    renderLogView(logViewEl, lastLogPayload, lastLogOpts);
     setConn("live", "ok");
   } catch (err) {
     setConn(String(err.message || err), "bad");
@@ -148,14 +186,26 @@ async function pollLogView(scope, id) {
 // --- routing ------------------------------------------------------------------
 
 // Three routes, all client-side: "" (the dashboard), "run/<id>", and
-// "artifact/<path>". No encodeURIComponent when building or reading these --
-// an artifact_path's /s are meant to stay literal, the same convention
-// launchJob already follows for the POST /launch route.
+// "artifact/<path>" (optionally "?call=<call_id>", parsed off the hash's own
+// query string to narrow it to one call). No encodeURIComponent on id/path
+// when building or reading these -- an artifact_path's /s are meant to stay
+// literal, the same convention launchJob already follows for the POST
+// /launch route; callId, arriving as a query value rather than a path
+// segment, is encoded like any other query value.
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, "");
-  if (hash.startsWith("run/")) return { view: "run", id: hash.slice(4) };
-  if (hash.startsWith("artifact/")) return { view: "artifact", id: hash.slice(9) };
-  return { view: "dashboard" };
+  if (hash.startsWith("run/")) return { view: "run", id: hash.slice(4), callId: null };
+  if (hash.startsWith("artifact/")) {
+    const rest = hash.slice(9);
+    const q = rest.indexOf("?");
+    if (q === -1) return { view: "artifact", id: rest, callId: null };
+    return {
+      view: "artifact",
+      id: rest.slice(0, q),
+      callId: new URLSearchParams(rest.slice(q + 1)).get("call"),
+    };
+  }
+  return { view: "dashboard", id: null, callId: null };
 }
 
 let pollTimer = null;
@@ -172,15 +222,30 @@ function route() {
     titleEl.textContent = "runs";
     dashboardEl.hidden = false;
     logViewEl.hidden = true;
+    lastLogScope = null;
+    lastLogId = null;
     pollDashboard();
     pollTimer = setInterval(pollDashboard, EVERY_MS);
     return;
   }
 
+  // Reset the level filter on a genuine scope/id change, but not when only
+  // the call filter changed -- narrowing the same artifact's log to one call
+  // shouldn't silently un-hide levels already hidden. DEBUG starts hidden
+  // by default (LOGGING.md) -- it's protocol chatter, not what you open a
+  // log for -- but its checkbox still renders whenever DEBUG entries are
+  // present, so turning it back on is one click.
+  if (r.view !== lastLogScope || r.id !== lastLogId) {
+    hiddenLevels.clear();
+    hiddenLevels.add("DEBUG");
+    lastLogScope = r.view;
+    lastLogId = r.id;
+  }
+
   titleEl.textContent = r.view === "run" ? "run " + r.id : r.id;
   dashboardEl.hidden = true;
   logViewEl.hidden = false;
-  const tick = () => pollLogView(r.view, r.id);
+  const tick = () => pollLogView(r.view, r.id, r.callId);
   tick();
   pollTimer = setInterval(tick, EVERY_MS);
 }

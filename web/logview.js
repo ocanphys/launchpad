@@ -5,12 +5,22 @@
 // Same shape as render.js: a pure function of a payload -> DOM. No network,
 // no app state — app.js fetches and calls renderLogView(container, payload,
 // opts), which replaces the container's children with what comes back.
+// Level-filter selection is UI state, not data, so it lives in app.js too
+// (same ctx-injection pattern render.js uses for isPending/onLaunch) and
+// arrives here read-only, via opts.
 //
-//   opts = { scope: "run" | "artifact", id: string }   // id is the run_id or artifact_path
+//   opts = {
+//     scope: "run" | "artifact",     // id is the run_id or artifact_path
+//     id: string,
+//     callId: string | null,         // set only for a call_id-filtered artifact view
+//     hiddenLevels: Set<string>,     // levels currently unchecked in the filter bar
+//     onToggleLevel: (level: string) => void,
+//   }
 
 import { el } from "./el.js";
 
-const LEVEL_CLASS = { WARNING: "warn", ERROR: "err", CRITICAL: "err" };
+const LEVEL_CLASS = { DEBUG: "debug", INFO: "info", WARNING: "warn", ERROR: "err", CRITICAL: "err" };
+const LEVEL_ORDER = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
 
 // Call ids are long and only their tail varies day to day -- same
 // abbreviation render.js uses for the dashboard's own call column.
@@ -18,29 +28,97 @@ function shortId(id) {
   return id.length > 8 ? id.slice(-8) : id;
 }
 
-// "2026-08-28T12:00:00.000Z" -> "12:00:00.000" -- the date repeats across
-// every row in one view, so dropping it keeps the column dense; the full
-// stamp is still one hover away.
+// entry.ts is UTC ("2026-08-28T12:00:00.000Z"); every row shows the
+// viewer's own local time instead, ISO-shaped but without milliseconds --
+// "2026-08-28T05:00:00" -- since a stamp dense enough for a debugging
+// session is too dense for a quick scan. Milliseconds (and the date, since
+// it repeats down a column) are still one hover away, in the title.
+function pad(n, len = 2) {
+  return String(n).padStart(len, "0");
+}
+
+function localIso(date, withMs) {
+  const stamp =
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return withMs ? stamp + "." + pad(date.getMilliseconds(), 3) : stamp;
+}
+
 function timeCell(entry) {
-  const stamp = entry.ts;
-  const t = stamp.includes("T") ? stamp.slice(stamp.indexOf("T") + 1, -1) : stamp;
-  return el("span", { title: stamp, text: t });
+  const date = new Date(entry.ts);
+  return el("span", { title: localIso(date, true), text: localIso(date, false) });
 }
 
-function callBadge(entry) {
-  return el("span", { class: "call-badge", title: entry.call_id, text: shortId(entry.call_id) });
+// Links into this same view, narrowed to just this one call -- entry.
+// artifact_path, not opts.id, since a run-scoped view mixes entries from
+// several artifacts and each call badge has to point at its own.
+function callLink(entry) {
+  const href = "#/artifact/" + entry.artifact_path + "?call=" + encodeURIComponent(entry.call_id);
+  return el("a", { class: "call-badge", href, title: entry.call_id, text: shortId(entry.call_id) });
 }
 
-// One log line. The artifact column only exists in a run-scoped view --
-// that's the whole point of tagging entries with artifact_path: attribution
-// only needs showing where the scope could have mixed more than one source.
-function logRow(entry, opts) {
-  const cls = "log-row" + (LEVEL_CLASS[entry.level] ? " " + LEVEL_CLASS[entry.level] : "");
-  return el("tr", { class: cls },
-    el("td", { class: "log-ts" }, timeCell(entry)),
-    el("td", { class: "log-call" }, callBadge(entry)),
-    opts.scope === "run" ? el("td", { class: "log-artifact", text: entry.artifact_path }) : null,
-    el("td", { class: "log-msg", text: entry.message }),
+// "jobname@call_id" -- job name hovers to reveal the artifact_path it was
+// resolved from (main.py's artifact_job_name), call_id links to that one
+// call's log only. Falls back to a bare label when a manifest couldn't be
+// resolved (job is None) rather than leaving the cell blank next to a real
+// call id.
+function jobCell(entry) {
+  return el("span", {},
+    el("span", { class: "log-jobname", title: entry.artifact_path || "", text: entry.job || "job" }),
+    "@",
+    callLink(entry),
+  );
+}
+
+function levelCell(entry) {
+  const cls = LEVEL_CLASS[entry.level];
+  return el("div", { class: "log-level" + (cls ? " " + cls : ""), text: entry.level });
+}
+
+// One log line: time, job@call (hover/link), level, message. Plain divs, not
+// <tr>/<td> -- the row is `display: contents` (see index.html's CSS) so its
+// four cells drop straight into the log-table grid, which is what lets ts/
+// job/level size to `max-content` (as tight as their own text, never
+// wrapping) while msg's `1fr` column absorbs whatever's left. A <table>
+// can't do that: table-layout: fixed takes widths from the first row only,
+// and auto takes them from every row's msg text too, ballooning the whole
+// table -- neither gives "tight unless it needs more, rest to msg" for free.
+function logRow(entry) {
+  return el("div", { class: "log-row" },
+    el("div", { class: "log-ts" }, timeCell(entry)),
+    el("div", { class: "log-job" }, jobCell(entry)),
+    levelCell(entry),
+    el("div", { class: "log-msg", text: entry.message }),
+  );
+}
+
+// Distinct levels actually present, in a fixed severity order (anything
+// outside that order, if it ever shows up, falls in behind in first-seen
+// order). Computed off the *unfiltered* entries so hiding a level doesn't
+// make its own checkbox disappear.
+function presentLevels(entries) {
+  const seen = [];
+  for (const entry of entries) {
+    if (!seen.includes(entry.level)) seen.push(entry.level);
+  }
+  return LEVEL_ORDER.filter((l) => seen.includes(l)).concat(seen.filter((l) => !LEVEL_ORDER.includes(l)));
+}
+
+// One checkbox per level present in this view.
+function levelFilterBar(entries, opts) {
+  const levels = presentLevels(entries);
+  if (levels.length < 1) return null;
+  return el("p", { class: "log-filter" },
+    ...levels.map((level) =>
+      el("label", { class: "log-filter-item" },
+        el("input", {
+          type: "checkbox",
+          checked: !opts.hiddenLevels.has(level),
+          onchange: () => opts.onToggleLevel(level),
+        }),
+        " " + level,
+      ),
+    ),
   );
 }
 
@@ -70,7 +148,11 @@ export function renderLogView(container, payload, opts) {
     nodes.push(el("p", { class: "log-error", text: payload.error }));
   }
 
-  if (opts.scope === "run") {
+  if (opts.scope === "artifact" && opts.callId) {
+    nodes.push(el("p", { class: "log-artifacts" },
+      el("a", { href: "#/artifact/" + opts.id, text: "↳ clear call filter, show all of " + opts.id }),
+    ));
+  } else if (opts.scope === "run") {
     const artifacts = contributingArtifacts(entries);
     if (artifacts.length) {
       nodes.push(el("p", { class: "log-artifacts" },
@@ -90,14 +172,17 @@ export function renderLogView(container, payload, opts) {
     }
   }
 
+  const filterBar = levelFilterBar(entries, opts);
+  if (filterBar) nodes.push(filterBar);
+
+  const visible = entries.filter((entry) => !opts.hiddenLevels.has(entry.level));
+
   if (!entries.length) {
     if (!payload.error) nodes.push(el("p", { class: "empty", text: "no log entries yet." }));
+  } else if (!visible.length) {
+    nodes.push(el("p", { class: "empty", text: "no entries at the selected levels." }));
   } else {
-    nodes.push(
-      el("table", { class: "log-table" },
-        el("tbody", {}, ...entries.map((entry) => logRow(entry, opts))),
-      ),
-    );
+    nodes.push(el("div", { class: "log-table" }, ...visible.map(logRow)));
   }
 
   container.replaceChildren(...nodes);

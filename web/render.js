@@ -94,13 +94,20 @@ function launchButton(path, state, ctx) {
     ? "launching…"
     : "launch";
 
-  return el("button", {
+  const button = el("button", {
     class: "launch-btn",
     text: "run",
     title,
     disabled: frozen,
     onclick: frozen ? undefined : () => ctx.onLaunch(path),
   });
+
+  if (!pending) return button;
+
+  return el("span", { class: "launch-wrap" },
+    button,
+    el("span", { class: "launch-spinner" }),
+  );
 }
 
 // One <tr> per declared artifact: status dot + type, path, call/heartbeat,

@@ -65,6 +65,22 @@
     cursor: default;
   }
 
+  /* Spinner shown over the launch button while a launch is pending -- spins
+     until the next poll shows the artifact active (or it times out/fails,
+     see PENDING_MS in app.js). */
+  .launch-wrap { position: relative; display: inline-block; }
+  .launch-spinner {
+    position: absolute; top: 50%; left: 50%;
+    width: 1.1rem; height: 1.1rem;
+    margin: -.55rem 0 0 -.55rem;
+    border: 2px solid rgba(9,105,218,.25);
+    border-top-color: #0969da;
+    border-radius: 999px;
+    animation: spin .7s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   .empty { opacity: .55; padding: 1rem 0; }
 
   details#problems { margin-top: 1.5rem; }
@@ -86,20 +102,51 @@
   .log-artifacts a { color: inherit; }
   .log-error { color: #cf222e; font-size: 11px; }
 
-  table.log-table { border-collapse: collapse; width: 100%; table-layout: fixed; }
-  table.log-table td { padding: .15rem .6rem; vertical-align: top; border-top: 1px solid rgba(128,128,128,.12); }
-  td.log-ts { width: 6.5rem; opacity: .5; white-space: nowrap; }
-  td.log-call { width: 6rem; }
-  td.log-artifact { width: 14rem; opacity: .6; word-break: break-all; font-size: 11px; }
-  td.log-msg { white-space: pre-wrap; word-break: break-word; }
+  /* A CSS grid, not a <table> -- ts/job/level need to size to their own
+     content (as tight as possible, never wrapping) while msg soaks up
+     whatever's left, and no table-layout mode does both at once: `fixed`
+     needs widths stated up front (what overlapped before), `auto` sizes
+     every column off its widest cell including msg, which would balloon
+     the whole table around one long message. `max-content` columns give
+     the first three exactly the width their own (nowrap) text needs;
+     `minmax(0, 1fr)` gives msg the rest and lets it wrap without stretching
+     the grid to fit an unbroken long word.
+     Each row is `display: contents` in logview.js -- it renders no box of
+     its own, so its four cells drop straight into this grid instead of
+     nesting a row inside a column. */
+  .log-table { display: grid; grid-template-columns: max-content max-content max-content minmax(0, 1fr); align-items: baseline; }
+  .log-row { display: contents; }
+  .log-row > * { padding: .15rem .6rem; border-top: 1px solid rgba(128,128,128,.12); }
+  .log-ts { opacity: .5; white-space: nowrap; }
+  .log-job { white-space: nowrap; }
+  .log-level { font-size: 11px; white-space: nowrap; }
+  .log-msg { white-space: pre-wrap; word-break: break-word; }
 
-  .call-badge {
+  /* Dotted underline signals "hover me" -- the tooltip is the artifact_path
+     that produced this job's log line (see logview.js's jobCell). Default
+     cursor, not `help` -- a plain "?" pointer read as broken/unhelpful. */
+  .log-jobname { border-bottom: 1px dotted currentColor; opacity: .85; }
+
+  .call-badge, a.call-badge {
     display: inline-block; padding: 0 .35rem; border-radius: 3px;
     background: rgba(128,128,128,.15); font-size: 11px;
+    color: inherit; text-decoration: none;
   }
+  a.call-badge:hover { text-decoration: underline; background: rgba(128,128,128,.25); }
 
-  tr.log-row.warn td.log-msg { color: #9a6700; }
-  tr.log-row.err td.log-msg { color: #cf222e; }
+  /* Color codes the level word only -- the message stays the page's normal
+     text color regardless of level. */
+  .log-level.debug { color: rgba(128,128,128,.6); }
+  .log-level.info  { color: currentColor; }
+  .log-level.warn  { color: #e3b341; }
+  .log-level.err   { color: #cf222e; }
+
+  /* One checkbox per level actually present in the current view -- see
+     logview.js's levelFilterBar. Styled like details#problems' summary
+     above: small, monospace, opacity-dimmed, nothing heavier needed. */
+  .log-filter { opacity: .8; font-size: 11px; margin: .3rem 0 1rem; display: flex; gap: .9rem; flex-wrap: wrap; }
+  .log-filter-item { cursor: pointer; user-select: none; }
+  .log-filter-item input { vertical-align: middle; margin-right: .25rem; }
 </style>
 </head>
 <body>
@@ -116,7 +163,7 @@
     <col style="width: 10.5rem">
     <col>
     <col style="width: 7.5rem">
-    <col style="width: 7rem">
+    <col style="width: 9rem">
     <col style="width: 4rem">
   </colgroup>
   <thead>

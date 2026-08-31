@@ -64,7 +64,7 @@ def logger_name(call_id: str | None) -> str:
 
 
 class CallFormatter(logging.Formatter):
-    """`<iso-timestamp> <message>`, in UTC.
+    """`<iso-timestamp> <level> <message>`, in UTC.
 
     The first column is a contract, not a style choice: the dashboard merges every
     log in a run's folder by sorting on it, and that only works because the
@@ -75,21 +75,18 @@ class CallFormatter(logging.Formatter):
     through this class or the logging module at all. That is a convention the two
     halves agree on, deliberately not a dependency between them.
 
-    INFO lines stay bare, since by construction everything in this file is the
-    call's own voice. Anything louder is worth marking, so it carries its level.
+    Every line carries its level explicitly, INFO included -- the dashboard
+    shows level as its own column, and a reader shouldn't have to know
+    "absent means INFO" to fill it in.
     """
 
     converter = time.gmtime
 
     def __init__(self):
         super().__init__(
-            fmt="%(asctime)s.%(msecs)03dZ %(prefix)s%(message)s",
+            fmt="%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S",
         )
-
-    def format(self, record):
-        record.prefix = "" if record.levelno == logging.INFO else f"{record.levelname} "
-        return super().format(record)
 
 
 def call_logger(call_id: str | None, logfile: Path) -> logging.Logger:
@@ -126,7 +123,7 @@ def call_logger(call_id: str | None, logfile: Path) -> logging.Logger:
     # The only level that matters. A record's fate is decided by the level of the
     # logger it came from, never by the root logger's -- so nothing global is
     # touched here, and the handlers stay at NOTSET to take whatever arrives.
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     return logger
 
 
@@ -156,7 +153,7 @@ def release_call_logger() -> None:
 # it undoes.
 
 _LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) (.*)$")
-_LEVELS = ("DEBUG", "WARNING", "ERROR", "CRITICAL")  # INFO is the bare, unmarked case
+_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 def parse_log_line(line: str) -> tuple[str, str, str] | None:
@@ -164,6 +161,12 @@ def parse_log_line(line: str) -> tuple[str, str, str] | None:
     for a continuation line -- a traceback frame, printed after `logger.
     exception` with no timestamp of its own.
 
+    The fallback (no recognized level word) is what keeps a file written
+    before CallFormatter always included one still parsing correctly -- an
+    old bare-INFO line has no level word to strip, so it falls through and
+    defaults to INFO, same as it always read.
+
+    parse_log_line("2026-08-28T12:00:00.000Z INFO boot") -> ("2026-08-28T12:00:00.000Z", "INFO", "boot")
     parse_log_line("2026-08-28T12:00:00.000Z boot") -> ("2026-08-28T12:00:00.000Z", "INFO", "boot")
     parse_log_line("2026-08-28T12:00:00.000Z WARNING low disk") -> ("2026-08-28T12:00:00.000Z", "WARNING", "low disk")
     """

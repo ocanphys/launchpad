@@ -23,9 +23,9 @@ and only after a final `confirm` -- so a container that lost the run mid-job
 cannot land its writes, no matter how far it got before anyone noticed.
 """
 
-import time
-import threading
 import logging
+import threading
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,7 +33,7 @@ from pathlib import Path
 
 import modal
 
-from config import STORAGE, HEARTBEAT_SECONDS
+from config import HEARTBEAT_SECONDS, STORAGE
 from lease_protocol import Lease, LeaseLost, beats
 from logs import LOG_FILENAME, call_logger, release_call_logger
 
@@ -111,7 +111,6 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
             time.sleep(HEARTBEAT_SECONDS)
             try:
                 beats.put(call_id, {"artifact_path": artifact_path, "last_beat_ts": time.time()})
-                logger.debug("heartbeat!")
             except Exception as exc:
                 logger.warning(f"heartbeat: not recorded ({exc})")
 
@@ -126,7 +125,7 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
         yield worker
         lease.confirm("commit")
     except LeaseLost as exc:
-        logger.warning(f"{exc} -- discarding this call's writes")
+        logger.error(f"{exc} -- discarding this call's writes")
         release_call_logger()
         raise
     except BaseException:
