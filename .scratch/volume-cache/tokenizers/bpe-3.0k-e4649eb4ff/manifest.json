@@ -1,0 +1,48 @@
+{
+  "artifact": "Tokenizer",
+  "commit": "feb768b0e7c8b4161d98518b31fab4ece0c68d02-dirty",
+  "allocated_resources": {
+    "cpu": null,
+    "gpu_count": null,
+    "gpu_type": null
+  },
+  "parameters": {
+    "special_tokens": [
+      "<pad>",
+      "<unk>"
+    ],
+    "vocab_size": 3000
+  },
+  "dependencies": {
+    "sources": [
+      {
+        "artifact": "Source",
+        "commit": "feb768b0e7c8b4161d98518b31fab4ece0c68d02-dirty",
+        "allocated_resources": {
+          "cpu": null,
+          "gpu_count": null,
+          "gpu_type": null
+        },
+        "parameters": {
+          "name": "odyssey",
+          "url": "https://www.gutenberg.org/cache/epub/1727/pg1727.txt"
+        },
+        "dependencies": {}
+      },
+      {
+        "artifact": "Source",
+        "commit": "feb768b0e7c8b4161d98518b31fab4ece0c68d02-dirty",
+        "allocated_resources": {
+          "cpu": null,
+          "gpu_count": null,
+          "gpu_type": null
+        },
+        "parameters": {
+          "name": "mobydick",
+          "url": "https://www.gutenberg.org/cache/epub/2701/pg2701.txt"
+        },
+        "dependencies": {}
+      }
+    ]
+  }
+}

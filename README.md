@@ -19,6 +19,40 @@ Dicts and one web container.
 - **Dict `launchpad-beats`**: one entry per call_id, the timestamp of its
   last heartbeat -- how a reader tells a live call from a dead one.
 
+## The lab
+
+`jupyter` is a JupyterLab container with the volume mounted, linked from the
+dashboard's header. It exists because a notebook on your laptop can only
+reach the volume through `declare.remote(...)` -- `Path(STORAGE)` isn't a
+mount out there and `volume.reload()` refuses to run off a container -- so
+loading an artifact, binding it, or inspecting one meant pulling a copy down
+by hand. In the lab, `lab.ROOT` *is* the volume:
+
+```python
+import lab
+lab.ls("tokenizers")                              # what's declared
+lab.load("tokenizers/bpe-3.0k-e4649eb4ff")        # by path, bound if built
+BPETokenizer(vocab_size=3000, ...).bind(lab.ROOT) # by parameters, same object
+lab.check(pretraining); lab.declare(pretraining)  # local, not a round trip
+```
+
+The file browser is rooted at the volume, so `runs/`, `sources/` and
+`tokenizers/` are all there to point at. Notebooks live in
+`/storage/notebooks`, seeded from `notebooks/lab/` on first start and never
+overwritten after; a background thread commits every `LAB_COMMIT_SECONDS`, so
+what you save survives the container scaling down. Reads are *not* automatic
+-- call `lab.refresh()` to pick up what other containers have committed.
+
+One-time setup before the first deploy:
+
+```
+modal secret create launchpad-lab JUPYTER_TOKEN=$(python -c "import secrets;print(secrets.token_urlsafe(24))")
+```
+
+Both `jupyter` and `leasebook` mount that secret: the lab authenticates with
+it, and the dashboard's `/lab` route appends it to the redirect so the link
+lands you straight in.
+
 ## Read/write traffic
 
 - **`leasebook`** (the web app) is pinned to a single container

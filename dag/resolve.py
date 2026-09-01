@@ -21,8 +21,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from artifact import MANIFEST, Artifact
-from job import REGISTRY, Job
+from dag.artifact import MANIFEST, Artifact
+from dag.job import REGISTRY, Job
+from datasets import job as _datasets_job  # noqa: F401
+from models.mock import job as _mock_job  # noqa: F401
+
+# Importing every concrete family below is what populates REGISTRY/ARTIFACTS
+# (via Artifact.__init_subclass__/Job.__init_subclass__) -- this module is
+# the one thing everything else (main.py, visualizer.py, notebooks) already
+# imports to get a plan, so it's the natural place for that side effect
+# rather than requiring every caller to import each family module by hand.
+from sources import job as _sources_job  # noqa: F401
+from tokenizers import bpe as _tokenizers_bpe  # noqa: F401
 
 Status = Literal["new", "declared", "partial", "done", "conflict", "undeclared"]
 

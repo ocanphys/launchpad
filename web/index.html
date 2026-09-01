@@ -13,6 +13,8 @@
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .4rem; }
   h1 { font-size: 1rem; font-weight: 600; margin: 0; }
   #conn { font-size: 11px; padding: .1rem .55rem; border: 1px solid; border-radius: 999px; white-space: nowrap; }
+  #labLink { font-size: 11px; color: inherit; opacity: .55; text-decoration: none; white-space: nowrap; }
+  #labLink:hover { opacity: 1; text-decoration: underline; }
   .ok  { color: #1a7f37; border-color: #1a7f37; }
   .bad { color: #cf222e; border-color: #cf222e; }
   #meta { opacity: .55; font-size: 11px; margin-bottom: 1rem; min-height: 1.2em; }
@@ -151,8 +153,15 @@
 </head>
 <body>
 
+<!-- The lab link is a plain relative href, same convention app.js's
+     fetch("state") follows: /lab is a route on this very app, which redirects
+     to the Jupyter container's own URL with its token attached (see
+     main.leasebook's lab_redirect). New tab, so the dashboard behind it keeps
+     polling. It sits outside everything route() touches -- route() only
+     rewrites #title -- so it survives every navigation. -->
 <header>
   <h1 id="title">runs</h1>
+  <a id="labLink" href="lab" target="_blank" rel="noopener">lab ↗</a>
   <span id="conn" class="bad">loading</span>
 </header>
 <div id="meta"></div>

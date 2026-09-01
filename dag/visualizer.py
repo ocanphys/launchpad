@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from artifact import Artifact
-from job import Job
-from resolve import Status, status
+from dag.artifact import Artifact
+from dag.job import Job
+from dag.resolve import Status, status
 
 _ARTIFACT_COLORS = {
     "Source": "#cfe3ff",

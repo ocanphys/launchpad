@@ -1,0 +1,59 @@
+{
+  "artifact": "TokenizedSource",
+  "commit": "feb768b0e7c8b4161d98518b31fab4ece0c68d02-dirty",
+  "allocated_resources": {
+    "cpu": null,
+    "gpu_count": null,
+    "gpu_type": null
+  },
+  "parameters": {},
+  "dependencies": {
+    "source": {
+      "artifact": "Source",
+      "commit": "feb768b0e7c8b4161d98518b31fab4ece0c68d02-dirty",
+      "allocated_resources": {
+        "cpu": null,
+        "gpu_count": null,
+        "gpu_type": null
+      },
+      "parameters": {
+        "name": "romeojuliet",
+        "url": "https://www.gutenberg.org/cache/epub/1513/pg1513.txt"
+      },
+      "dependencies": {}
+    },
+    "tokenizer": {
+      "artifact": "Tokenizer",
+      "commit": "feb768b0e7c8b4161d98518b31fab4ece0c68d02-dirty",
+      "allocated_resources": {
+        "cpu": null,
+        "gpu_count": null,
+        "gpu_type": null
+      },
+      "parameters": {
+        "special_tokens": [
+          "<|endoftext|>"
+        ],
+        "vocab_size": 1000
+      },
+      "dependencies": {
+        "sources": [
+          {
+            "artifact": "Source",
+            "commit": "feb768b0e7c8b4161d98518b31fab4ece0c68d02-dirty",
+            "allocated_resources": {
+              "cpu": null,
+              "gpu_count": null,
+              "gpu_type": null
+            },
+            "parameters": {
+              "name": "romeojuliet",
+              "url": "https://www.gutenberg.org/cache/epub/1513/pg1513.txt"
+            },
+            "dependencies": {}
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,35 +1,35 @@
-import sys
+import os
+import shutil
+import subprocess
+import threading
 import time
 from pathlib import Path
 
 import modal
 
+import dag.resolve as dag_resolve
 from config import (
     APP_NAME,
     CONTAINER_LIFETIME,
     FLATLINE,
     HEARTBEAT_SECONDS,
+    LAB_COMMIT_SECONDS,
+    LAB_IDLE_SECONDS,
+    LAB_NOTEBOOKS,
+    LAB_PORT,
+    LAB_SECRET,
     STORAGE,
     VOLUME_NAME,
 )
+from dag.artifact import MANIFEST, Artifact, Resources
 from lease_protocol import beats, leases, new_grant
 from logs import LOG_FILENAME, read_call_logs, read_log
 from runtime import initialize_worker
 
-# artifact.py/job.py/resolve.py use bare sibling imports (`from artifact
-# import ...`) that only resolve with artifacts/ itself on sys.path -- true
-# today only because the notebooks that use them run with cwd=artifacts/.
-# This puts main.py in the same position, the mirror image of the trick
-# artifact.py already plays (it appends the repo root to sys.path so it can
-# `from config import get_git_commit`).
-sys.path.append(str(Path(__file__).resolve().parent / "artifacts"))
-import resolve as artifacts_resolve
-from artifact import MANIFEST, Artifact, Resources
-
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
-base_image = modal.Image.debian_slim(python_version="3.12")
+base_image = modal.Image.debian_slim(python_version="3.12").pip_install("regex", "tqdm")
 
 # The modules every call needs whatever it runs: config, its logger, its
 # lease, the scope that wires those two together. No third-party
@@ -37,6 +37,14 @@ base_image = modal.Image.debian_slim(python_version="3.12")
 # files into an image, it doesn't install what they import, and none of
 # them import anything outside the stdlib.
 CALL_SOURCE = ("config", "logs", "lease_protocol", "runtime")
+
+# The artifact/job model, one package per family (see dag/spec.md): "dag"
+# is the framework (Artifact, Job, resolve, visualizer), the rest are its
+# concrete artifact+job pairs. Each is its own top-level package rather than
+# nested under one "artifacts" package, so a family can import another
+# (e.g. datasets importing sources.artifact) without a shared parent import
+# pulling in every family at once.
+DAG_SOURCE = ("dag", "sources", "tokenizers", "datasets", "models")
 
 
 def safe_relpath(path: str) -> bool:
@@ -74,10 +82,11 @@ def is_active(grant: dict | None, beat: dict | None, now: float) -> bool:
 # them. Trimming an image to only what its own function reads gets a crash
 # loop, not a smaller image (see git history if that stops being obvious).
 #
-# Both also carry "artifacts" alongside CALL_SOURCE, not folded into it: it's
-# a package (artifacts/__init__.py), not a single module -- add_local_python_
-# source stages it as a sibling of main.py either way, which is what keeps
-# the artifacts/ sys.path shim above valid remotely.
+# Both also carry DAG_SOURCE alongside CALL_SOURCE, not folded into it: each
+# entry there is its own package (dag/__init__.py, sources/__init__.py, ...),
+# not a single module -- add_local_python_source stages each as a sibling of
+# main.py, which is what keeps `import dag...`/`import sources...`/etc valid
+# remotely, the same as they are locally.
 WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
 
 web_image = (
@@ -85,15 +94,42 @@ web_image = (
     # The page is HTML/JS, so it stays HTML/JS -- mounted like a data file,
     # not pasted into this module as strings.
     .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
-    .add_local_python_source(*CALL_SOURCE, "artifacts")
+    .add_local_python_source(*CALL_SOURCE, *DAG_SOURCE)
+)
+
+LAB_SEED_DIR = Path("/opt/lab-seed")  # starter notebooks baked into lab_image
+
+# The lab: a Jupyter server with the volume mounted, so a notebook can hold a
+# real artifact rather than a copy of one pulled down by hand.
+#
+# jupyterlab is the only thing installed on top of base_image, because
+# base_image's regex+tqdm is already the whole third-party surface of
+# CALL_SOURCE+DAG_SOURCE (tokenizers/bpe.py's, specifically) -- a notebook that
+# can import the package needs nothing else. models/transformer would need
+# torch, and it isn't in dag/resolve.py's registry imports anyway.
+#
+# "lab" is the one source entry the other two images don't carry: it's the
+# notebook-facing API (lab.load/check/declare, see lab.py), useless to a worker
+# and to the dashboard, and it imports nothing they don't already have.
+#
+# notebooks/lab/ is mounted as data, not staged as source -- .ipynb files, not
+# importable modules -- and is only a seed: the copies that get edited live on
+# the volume (see `jupyter` below).
+lab_image = (
+    base_image.pip_install("jupyterlab")
+    .add_local_dir(local_path="notebooks/lab", remote_path=LAB_SEED_DIR.as_posix())
+    .add_local_python_source(*CALL_SOURCE, *DAG_SOURCE, "lab")
 )
 
 # What `declare` and `run_job` run under: no fastapi, no volume-unrelated
-# deps -- artifacts/*.py is stdlib-only (plus config.get_git_commit, which
-# neither function calls: every artifact either arrives fully constructed
-# from a client that already stamped its commit, or is loaded straight off
-# a manifest that already has one).
-worker_image = base_image.add_local_python_source(*CALL_SOURCE, "artifacts")
+# deps -- dag/sources/datasets/*.py are stdlib-only (plus config.get_git_commit,
+# which neither function calls: every artifact either arrives fully
+# constructed from a client that already stamped its commit, or is loaded
+# straight off a manifest that already has one). tokenizers/bpe.py
+# needs regex+tqdm, hence base_image's pip_install above. models/mock is
+# stdlib-only too; a real model family under models/ would need its own
+# torch-installing image, not this one.
+worker_image = base_image.add_local_python_source(*CALL_SOURCE, *DAG_SOURCE)
 
 
 def artifact_state(artifact: Artifact, root: Path) -> dict:
@@ -102,12 +138,12 @@ def artifact_state(artifact: Artifact, root: Path) -> dict:
     `done`/`ready` are both derived from `status`, not stored -- there's
     only ever one on-disk answer to agree with.
     """
-    status, drift = artifacts_resolve.inspect(artifact, root)
+    status, drift = dag_resolve.inspect(artifact, root)
     depends_on = artifact.deps()
     blocked_by = [
         dep.artifact_path.as_posix()
         for dep in depends_on
-        if artifacts_resolve.status(dep, root) != "done"
+        if dag_resolve.status(dep, root) != "done"
     ]
     done = status == "done"
     return {
@@ -140,7 +176,7 @@ def read_state() -> dict:
     `attempt_launch`), so that agreement is checked per artifact below, not
     per run.
 
-    A run's artifacts come from `artifacts_resolve.declared_under`, which
+    A run's artifacts come from `dag_resolve.declared_under`, which
     can raise on a bad manifest -- "broken", not "not ready". This is the
     one place that decides what a raise means for a whole run: not `runs`,
     but `problem_runs`, keyed the same way, holding the error instead of an
@@ -166,7 +202,7 @@ def read_state() -> dict:
     problem_runs = {}
     for run_id in run_ids:
         try:
-            declared = artifacts_resolve.declared_under(run_id, storage_root)
+            declared = dag_resolve.declared_under(run_id, storage_root)
             artifacts_state = {}
             for a in declared:
                 path = a.artifact_path.as_posix()
@@ -216,7 +252,7 @@ def artifact_job_name(artifact_path: str, root: Path) -> str | None:
         return None
     try:
         artifact = Artifact.load(manifest_path)
-        return type(artifacts_resolve.producer_for(artifact)).__name__
+        return type(dag_resolve.producer_for(artifact)).__name__
     except Exception:
         return None
 
@@ -250,7 +286,7 @@ def run_log_entries(run_id: str, root: Path) -> list[dict]:
     reachable from them), so "what happened in this run" never disagrees
     with "what this run's dashboard rows are".
     """
-    declared = artifacts_resolve.declared_under(run_id, root)
+    declared = dag_resolve.declared_under(run_id, root)
     entries: list[dict] = []
     for artifact in declared:
         entries.extend(artifact_log_entries(artifact.artifact_path.as_posix(), root))
@@ -258,7 +294,14 @@ def run_log_entries(run_id: str, root: Path) -> list[dict]:
     return entries
 
 
-@app.function(image=web_image, volumes={STORAGE: volume}, max_containers=1)
+@app.function(
+    image=web_image,
+    volumes={STORAGE: volume},
+    max_containers=1,
+    # Only for the lab's token, so `/lab` can hand it straight to Jupyter --
+    # nothing else in here reads a secret.
+    secrets=[modal.Secret.from_name(LAB_SECRET)],
+)
 @modal.asgi_app()
 def leasebook():
     """The page and the data it polls, under one URL.
@@ -269,6 +312,7 @@ def leasebook():
     Served together, `state` is just a relative path, and no CORS question arises.
     """
     from fastapi import FastAPI
+    from fastapi.responses import RedirectResponse
     from fastapi.staticfiles import StaticFiles
 
     api = FastAPI()
@@ -276,6 +320,17 @@ def leasebook():
     @api.get("/state")
     def state() -> dict:
         return read_state()
+
+    # The header's "lab" link. A redirect rather than a URL the page fetches:
+    # the lab lives on its own subdomain, and the token that gets it past the
+    # login screen is this container's to hold, not something to hand to the
+    # browser as data and then hope it isn't logged. app.js never learns either
+    # -- the anchor in index.html is a plain relative href.
+    @api.get("/lab")
+    def lab_redirect() -> RedirectResponse:
+        url = jupyter.get_web_url()
+        token = os.environ.get("JUPYTER_TOKEN")
+        return RedirectResponse(f"{url}/lab?token={token}" if token else url)
 
     # :path, not a plain path segment -- an artifact_path contains its own
     # /s (runs/my-run/pretraining), which a plain segment can't match.
@@ -338,7 +393,7 @@ def declare(artifact: Artifact, *, write: bool = False, strict_commit: bool = Fa
     human-readable report either way.
     """
     volume.reload()
-    declaration = artifacts_resolve.Declaration(artifact, Path(STORAGE), strict_commit)
+    declaration = dag_resolve.Declaration(artifact, Path(STORAGE), strict_commit)
     if write:
         declaration.write()
         volume.commit()
@@ -360,7 +415,7 @@ def run_job(artifact_path: str) -> None:
     with initialize_worker(artifact_path, volume) as worker:
         worker.confirm_lease("pre run")
         artifact = Artifact.load(Path(STORAGE) / artifact_path / MANIFEST)
-        job = artifacts_resolve.producer_for(artifact)
+        job = dag_resolve.producer_for(artifact)
         job.run(Path(STORAGE), worker)
         worker.confirm_lease("pre vol commit")
 
@@ -384,6 +439,101 @@ def declared_artifact(artifact_path: str) -> tuple[Artifact, dict] | None:
         return None
     artifact = Artifact.load(manifest_path)
     return artifact, artifact_state(artifact, Path(STORAGE))
+
+
+def seed_notebooks() -> None:
+    """Copy the starter notebooks out of the image and onto the volume, once.
+
+    Never over an existing file: the copy on the volume is the one that gets
+    edited, and a redeploy shipping a newer seed must not be able to eat that.
+    Renaming or deleting a seeded notebook in the lab brings the seed back on
+    the next cold start, which is the behaviour worth having -- there's no
+    third state where the volume remembers that you deleted it.
+    """
+    destination = Path(STORAGE) / LAB_NOTEBOOKS
+    destination.mkdir(parents=True, exist_ok=True)
+    for seed in sorted(LAB_SEED_DIR.glob("*.ipynb")):
+        target = destination / seed.name
+        if not target.exists():
+            shutil.copy(seed, target)
+    volume.commit()
+
+
+def commit_notebooks() -> None:
+    """Publish whatever the lab has written, forever, on its own clock.
+
+    A job commits once, at a point it chooses (`runtime.initialize_worker`); a
+    notebook has no such point -- the container just goes away when it scales
+    down -- so this is what makes a notebook saved in the lab survive. Same
+    shape as `initialize_worker`'s heartbeat thread: a daemon, a fixed sleep,
+    and never a raise that could take the server down with it.
+
+    The lab writes under `notebooks/`; a job writes under the artifact folder
+    it holds the lease for. A volume commit publishes the files this container
+    changed, so two commits landing at once touch disjoint paths and there's
+    nothing here to serialize against the lease protocol.
+    """
+    while True:
+        time.sleep(LAB_COMMIT_SECONDS)
+        try:
+            volume.commit()
+        except Exception as exc:
+            print(f"lab: commit skipped ({exc})")
+
+
+@app.function(
+    image=lab_image,
+    volumes={STORAGE: volume},
+    secrets=[modal.Secret.from_name(LAB_SECRET)],
+    # One lab, so one filesystem view: two containers would each hold their own
+    # uncommitted copy of the same notebook and the later commit would win.
+    max_containers=1,
+    timeout=CONTAINER_LIFETIME,
+    scaledown_window=LAB_IDLE_SECONDS,
+)
+# A notebook UI is a browser holding a websocket open and firing many requests
+# in parallel -- without this, each one is a separate input and max_containers=1
+# serializes the whole session into a queue.
+@modal.concurrent(max_inputs=100)
+@modal.web_server(LAB_PORT, startup_timeout=120)
+def jupyter():
+    """JupyterLab, rooted at the volume.
+
+    Named `jupyter`, not `lab`: `lab` is the module a notebook imports (lab.py)
+    and `/lab` is the dashboard route that redirects here, and a Modal function
+    object called `lab` in this module's namespace would shadow the first and
+    read as the second.
+
+    `root_dir` is the volume itself, not the notebooks folder -- pointing at an
+    artifact path is the whole point, and the file browser is where you find
+    out what the paths are (`runs/`, `sources/`, `tokenizers/`). `default_url`
+    still lands you in `notebooks/` so the first thing on screen is something
+    to run.
+
+    No `--IdentityProvider.token`: jupyter_server reads JUPYTER_TOKEN out of
+    the environment, which LAB_SECRET puts there, and keeping it out of the
+    command line keeps it out of every `ps` and traceback.
+    """
+    seed_notebooks()
+    threading.Thread(target=commit_notebooks, daemon=True).start()
+
+    subprocess.Popen(
+        [
+            "jupyter",
+            "lab",
+            "--ip=0.0.0.0",
+            f"--port={LAB_PORT}",
+            "--no-browser",
+            "--allow-root",
+            f"--ServerApp.root_dir={STORAGE}",
+            f"--ServerApp.default_url=/lab/tree/{LAB_NOTEBOOKS}",
+            # Modal terminates TLS and forwards to this container under a
+            # different host than the browser typed, which jupyter_server reads
+            # as a remote/cross-origin access and blocks by default.
+            "--ServerApp.allow_remote_access=True",
+            "--ServerApp.allow_origin=*",
+        ]
+    )
 
 
 def resource_options(resources: Resources) -> dict:

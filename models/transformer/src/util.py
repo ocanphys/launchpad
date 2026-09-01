@@ -12,7 +12,7 @@ import numpy as np
 import requests
 from itertools import islice
 from tqdm import tqdm
-from models.transformer.src.tokenizer import Tokenizer, TokenizerData, train_bpe
+from tokenizers.bpe import Tokenizer
 
 
 logger = logging.getLogger(__name__)
@@ -89,43 +89,18 @@ def download_and_concat(urls: list[str], output_path: str, volume: Path, separat
     logger.info("wrote %s (%s bytes)", out, f"{out.stat().st_size:,}")
 
 
-def prepare_tokenizer(
-    tokenizer_uid: str,
-    vocab_size: int,
-    special_tokens: list[str],
-    raw_text_path: str,
-    volume: Path,
-) -> Path:
-    """Train a BPE tokenizer and write tokenizers/{tokenizer_uid}/tokenizer.json
-    (vocab, merges, special_tokens, vocab_size) and config.json (special_tokens,
-    vocab_size, raw_text_path), loadable back via Tokenizer.from_files(tokenizer_uid, volume).
-
-    raw_text_path is relative to volume (e.g. "data/train.txt"), same as everything
-    else volume-scoped -- so the same call reproduces identically regardless of
-    which volume (local or the Modal Volume mount) it's run against.
-
-    Always retrains and overwrites -- no check for an existing tokenizer_uid.
-    """
-    vocab, merges = train_bpe(str(volume / raw_text_path), vocab_size, special_tokens)
-
-    tokenizer_dir = volume / "tokenizers" / tokenizer_uid
-    tokenizer_dir.mkdir(parents=True, exist_ok=True)
-    TokenizerData(vocab, merges, special_tokens, vocab_size).save(tokenizer_dir / "tokenizer.json")
-
-    tokenizer_config = {
-        "special_tokens": special_tokens,
-        "vocab_size": vocab_size,
-        "raw_text_path": str(raw_text_path),
-    }
-    (tokenizer_dir / "config.json").write_text(json.dumps(tokenizer_config, indent=2))
-    # return tokenizer_dir
-
-
-def textfile_to_tokens_as_binary(source_text, binary_target, tokenizer: Tokenizer, volume: Path, binary_file_mode="wb"):
+def textfile_to_tokens_as_binary(
+    source_text, binary_target, tokenizer: Tokenizer, volume: Path, binary_file_mode="wb"
+):
     """
     converts a text file into a raw binary file that can be used as memmap
     for training - we are using uint16 which supports vocab size 2^16 max
     all filepaths are relative to volume/
+
+    `tokenizer` is a bound Tokenizer artifact -- i.e. `Tokenizer(...).bind(root)`.
+    Training one is no longer this module's business: that's TokenizerJob
+    (tokenizers/bpe.py), which is what the old prepare_tokenizer here did
+    by hand.
     source = "data/combined.txt"
     target = "data/train.bin"
     textfile_to_tokens_as_binary(source_text=source, binary_target=target)

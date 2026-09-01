@@ -11,7 +11,7 @@ from pathlib import Path
 
 from dag.artifact import Artifact
 from datasets.artifact import DataSet
-from tokenizers.bpe import Tokenizer
+from tokenizers.artifact import Tokenizer
 
 
 @dataclass(frozen=True)

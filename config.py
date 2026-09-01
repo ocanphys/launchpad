@@ -5,6 +5,14 @@ CONTAINER_LIFETIME = 3600  # no container lives beyond this many seconds.
 HEARTBEAT_SECONDS = 1
 FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
 
+# The lab: one Jupyter container with the volume mounted, reachable from the
+# dashboard's header (see main.jupyter and lab.py).
+LAB_PORT = 8888
+LAB_SECRET = "launchpad-lab"  # supplies JUPYTER_TOKEN to both the lab and the dashboard
+LAB_NOTEBOOKS = "notebooks"  # where a lab notebook lives, relative to STORAGE
+LAB_IDLE_SECONDS = 900  # scale the lab container down after this much idle
+LAB_COMMIT_SECONDS = 30  # how often the lab publishes its writes to the volume
+
 import subprocess
 from pathlib import Path
 
