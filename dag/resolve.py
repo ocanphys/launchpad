@@ -24,6 +24,7 @@ from typing import Literal
 from dag.artifact import MANIFEST, Artifact
 from dag.job import REGISTRY, Job
 from datasets import job as _datasets_job  # noqa: F401
+from mappeddatasets import job as _mappeddatasets_job  # noqa: F401
 from models.mock import job as _mock_job  # noqa: F401
 
 # Importing every concrete family below is what populates REGISTRY/ARTIFACTS
@@ -101,7 +102,12 @@ def recorded(artifact: Artifact, root: Path) -> Artifact | _Unreadable | None:
         return _UNREADABLE
 
 
-def inspect(artifact: Artifact, root: Path) -> tuple[Status, bool]:
+InspectCache = dict[Path, tuple[Status, bool]]
+
+
+def inspect(
+    artifact: Artifact, root: Path, cache: InspectCache | None = None
+) -> tuple[Status, bool]:
     """What the disk says about one artifact, and whether what's declared there
     was declared under a different commit than the one being asked for.
 
@@ -111,21 +117,71 @@ def inspect(artifact: Artifact, root: Path) -> tuple[Status, bool]:
     done        manifest agrees, every output present
     conflict    a manifest is there and describes something else
     undeclared  outputs are there with no manifest saying who asked for them
+
+    "outputs" before a manifest exists means this artifact's *own* files --
+    that check is "did something write into my folder before I was asked
+    for", which only makes sense about a folder that's actually mine. Once a
+    manifest agrees, done/partial switches to `completion_paths(root)`,
+    which for almost every type is the same files -- except a virtual
+    artifact like MappedDataSet, whose completion is its dependencies'
+    files. Checking those pre-manifest too would make a fresh MappedDataSet
+    over already-tokenized sources read `undeclared` the instant it's
+    constructed, which is exactly the reuse case it exists for, not an
+    anomaly.
+
+    `cache`, when given, remembers each artifact_path's result for the
+    caller's whole traversal rather than just this one call. A shared
+    dependency (one tokenizer behind a dozen datasets, one source behind a
+    dozen tokenizers) gets asked about once per *occurrence* as someone's
+    dependency, not once per distinct artifact -- without a cache, every
+    one of those repeats re-reads and re-parses that artifact's
+    manifest.json (which, being a full nested tree per `Artifact.manifest`,
+    can itself be sizeable) from scratch. Keyed by artifact_path rather
+    than the Artifact object: two instances describing the same on-disk
+    thing already compare equal, but keying on the object would still hash
+    and __eq__ down through the whole nested tree on every lookup, which is
+    exactly the redundant work being avoided. Absent (the default) for
+    call sites that only ever inspect each artifact once, like
+    `Declaration.check`.
     """
+    if cache is not None and artifact.artifact_path in cache:
+        return cache[artifact.artifact_path]
+
     on_disk = recorded(artifact, root)
-    present = [path for path in artifact.paths(root).values() if path.exists()]
+    own_present = [path for path in artifact.paths(root).values() if path.exists()]
     if on_disk is None:
-        return ("undeclared" if present else "new"), False
-    if isinstance(on_disk, _Unreadable) or on_disk != artifact:
-        return "conflict", False  # == ignores commit: a parameter disagreement
-    drift = on_disk.commit != artifact.commit
-    if len(present) == len(artifact.files):
-        return "done", drift
-    return ("partial" if present else "declared"), drift
+        result = ("undeclared" if own_present else "new"), False
+    elif isinstance(on_disk, _Unreadable) or on_disk != artifact:
+        result = "conflict", False  # == ignores commit: a parameter disagreement
+    else:
+        drift = on_disk.commit != artifact.commit
+        complete = artifact.completion_paths(root)
+        present = [path for path in complete if path.exists()]
+        done_or_partial = "done" if len(present) == len(complete) else ("partial" if present else "declared")
+        result = done_or_partial, drift
+
+    if cache is not None:
+        cache[artifact.artifact_path] = result
+    return result
 
 
-def status(artifact: Artifact, root: Path) -> Status:
-    return inspect(artifact, root)[0]
+def status(artifact: Artifact, root: Path, cache: InspectCache | None = None) -> Status:
+    return inspect(artifact, root, cache)[0]
+
+
+def _walk_deps(artifacts: list[Artifact], seen: dict[Path, Artifact]) -> None:
+    """Depth-first through every dependency reachable from `artifacts`,
+    adding each newly-seen one to `seen` (keyed by artifact_path) and
+    recursing into it. `seen` starting non-empty is what lets a caller
+    decide whether the roots themselves count as "seen" -- `declared_under`
+    pre-seeds it with its own manifests, `dependency_closure` doesn't.
+    """
+    for artifact in artifacts:
+        for dep in artifact.deps():
+            if dep.artifact_path in seen:
+                continue  # also what keeps this cycle-safe: a repeat is just skipped
+            seen[dep.artifact_path] = dep
+            _walk_deps([dep], seen)
 
 
 def declared_under(run_id: str, root: Path) -> list[Artifact]:
@@ -140,19 +196,47 @@ def declared_under(run_id: str, root: Path) -> list[Artifact]:
     run's declared state is however many manifests were written, not one
     tree top-down.
     """
-    seen: dict[Path, Artifact] = {}
-
-    def visit(artifact: Artifact) -> None:
-        if artifact.artifact_path in seen:
-            return  # also what keeps this cycle-safe: a repeat is just skipped
-        seen[artifact.artifact_path] = artifact
-        for dep in artifact.deps():
-            visit(dep)
-
     manifests = sorted((root / "runs" / run_id).rglob(MANIFEST))
-    for path in manifests:
-        visit(Artifact.load(path))
+    roots = [Artifact.load(path) for path in manifests]
+    seen: dict[Path, Artifact] = {a.artifact_path: a for a in roots}
+    _walk_deps(roots, seen)
     return list(seen.values())
+
+
+def dependency_closure(artifact: Artifact) -> list[Artifact]:
+    """Every artifact `artifact` depends on, directly or transitively,
+    deduplicated by artifact_path -- the same walk `declared_under` does
+    starting from a run's manifests, but starting from one already-loaded
+    artifact instead, and not including `artifact` itself (unlike
+    `declared_under`, whose roots are part of what it returns).
+
+    Needs no `root` -- `deps()` reads straight off each artifact's own
+    fields (nested manifests already loaded, for anything reached via
+    `Artifact.load`), never the filesystem.
+    """
+    seen: dict[Path, Artifact] = {}
+    _walk_deps([artifact], seen)
+    return list(seen.values())
+
+
+def declared_of_kind(folder: str, root: Path) -> list[Artifact]:
+    """Every artifact declared directly under `root/folder` -- e.g.
+    root/sources or root/datasets -- one level deep, straight off each
+    manifest.json there.
+
+    The shared-folder counterpart to `declared_under`: a run's folder holds
+    only that run's own top nodes and needs a dependency walk to find the
+    rest of what it uses, but a shared kind's folder (sources/, datasets/,
+    mappeddatasets/, tokenizers/) already *is* the complete membership list
+    for that kind -- every instance that has ever been declared gets a
+    subfolder here, attached to a run or not. No recursion into
+    dependencies, and no dedup-by-walk needed either: one subfolder is one
+    artifact, by construction.
+    """
+    folder_root = root / folder
+    if not folder_root.exists():
+        return []
+    return [Artifact.load(path) for path in sorted(folder_root.glob(f"*/{MANIFEST}"))]
 
 
 @dataclass(frozen=True)

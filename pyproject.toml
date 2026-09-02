@@ -9,6 +9,7 @@ dependencies = [
     "ipykernel>=7.3.0",
     "joblib>=1.6.0",
     "modal>=1.5.4",
+    "numpy>=2.4.0",
     "pydantic>=2.13.4",
     "regex>=2026.8.31",
     "ruff>=0.16.3",

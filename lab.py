@@ -1,13 +1,17 @@
-"""What a notebook running inside the lab container imports.
+"""What a notebook with the volume actually mounted imports.
 
-Everything here exists because the lab has the volume actually mounted. A
-notebook on your laptop can only reach the volume through
-`modal.Function.from_name(APP_NAME, "declare").remote(...)` -- one function,
-returning one string, and nothing else about the volume is reachable at all:
-`Path(STORAGE)` is not a mount out there, and `volume.reload()` refuses to run
-off a container (see `main.declared_artifact`'s docstring). In the lab, `ROOT`
-*is* the volume, so the two ways of getting hold of an artifact both work
-directly:
+The Jupyter container that served these notebooks is removed for now (it was
+`main.jupyter`), so nothing currently deploys this module -- it is kept
+because it is the whole notebook-facing API, and bringing the lab back is
+re-adding the image and the web_server function, not rewriting this.
+
+Everything here needs the volume mounted. A notebook on your laptop can only
+reach it through `modal.Function.from_name(APP_NAME, "declare").remote(...)`
+-- one function, returning one string, and nothing else about the volume is
+reachable at all: `Path(STORAGE)` is not a mount out there, and
+`volume.reload()` refuses to run off a container (see
+`main.declared_artifact`'s docstring). Where `ROOT` *is* the volume, the two
+ways of getting hold of an artifact both work directly:
 
     lab.load("tokenizers/bpe-3.0k-e4649eb4ff")     # by path
     BPETokenizer(vocab_size=3000, ...).bind(lab.ROOT)   # by parameters
@@ -43,8 +47,7 @@ def _volume():
     """The volume handle, built on demand rather than at import.
 
     Module scope would mean a network call the moment anything imports `lab`
-    -- including Modal itself, which imports this module locally to find its
-    source when it builds `lab_image`.
+    -- including Modal itself, whenever an image stages this module as source.
     """
     import modal
 
@@ -54,10 +57,10 @@ def _volume():
 def refresh() -> None:
     """Pull in whatever other containers have committed since this one booted.
 
-    Not automatic. The lab's file browser is rooted at the volume, so Jupyter
-    routinely holds files open under it, and reload can't run while it does --
-    better an explicit call in a cell than a background thread that fails half
-    the time and yanks the filesystem the other half.
+    Not automatic. A notebook server rooted at the volume routinely holds
+    files open under it, and reload can't run while it does -- better an
+    explicit call in a cell than a background thread that fails half the time
+    and yanks the filesystem the other half.
     """
     _volume().reload()
 

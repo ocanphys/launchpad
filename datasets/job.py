@@ -1,3 +1,4 @@
+from array import array
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,11 +23,13 @@ class DataSetJob(Job):
             ("training", paths["training set"], self.train_set),
             ("validation", paths["validation set"], self.valid_set),
         ):
-            worker.log.info(f"building {name} set from {len(tokenized_sources)} source(s)")
-            path.write_text(
-                " ".join(
-                    tokenized_source.paths(root)["tokens"].read_text()
-                    for tokenized_source in tokenized_sources
-                )
-            )  # mock: concat the id strings, same encoding as TokenizeSourceJob
+            worker.log.info(
+                f"building {name} set from {len(tokenized_sources)} source(s)"
+            )
+            # each tokens.bin is already raw uint16 (TokenizeSourceJob), so
+            # merging is a byte concatenation in the order given -- no parsing
+            merged = array("H")
+            for tokenized_source in tokenized_sources:
+                merged.frombytes(tokenized_source.paths(root)["tokens"].read_bytes())
+            path.write_bytes(merged.tobytes())
         worker.log.info("done")

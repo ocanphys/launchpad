@@ -22,6 +22,7 @@ merge step), which is exactly the pair that must not drift apart.
 import heapq
 import json
 import os
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -145,16 +146,20 @@ class Tokenizer(Artifact):
     #
     # Held on the instance and deliberately not a field: it isn't what
     # identifies this tokenizer, so it stays out of ==, hash, and the manifest.
-    # object.__setattr__ because the dataclass is frozen, which is exactly the
-    # point -- binding state can't change which artifact this is.
+    # object.__setattr__ because the dataclass is frozen -- but by the time
+    # this runs, `self` is already the private copy Artifact.bind just made
+    # (see bind's own docstring), not the object bind() was called on. Nobody
+    # else holds a reference to this particular copy yet, so mutating it here
+    # is invisible to everyone but the caller about to receive it back.
 
     def _load(self, root: Path) -> None:
         """Artifact._load's hook: read this artifact's own tokenizer.json --
         the state encode()/decode() run on -- and check it against what this
         artifact declares. The inverse of TokenizerJob.save.
 
-        object.__setattr__ because the dataclass is frozen, which is exactly
-        the point: this state can change without changing which artifact it is.
+        object.__setattr__ because the dataclass is frozen -- see the comment
+        above this method for why that's safe: `self` here is bind's own
+        private copy, not the artifact anyone else is holding.
         """
         data = json.loads(self.paths(root)["tokenizer"].read_text())
         if tuple(data["special_tokens"]) != self.special_tokens:
@@ -546,8 +551,9 @@ class TokenizeSourceJob(Job):
         tokenizer = self.tokenizer.bind(root)  # reads the tokenizer.json its job wrote
         text = self.source.paths(root)["raw text"].read_text()
         token_ids = tokenizer.encode(text)
-        self.artifact.paths(root)["tokens"].write_text(
-            " ".join(map(str, token_ids))
-        )  # mock binary encoding as whitespace-joined ids
+        # uint16: every id this family produces is below vocab_size, and
+        # vocab_size is expected to stay under 2**16 -- two bytes, no header,
+        # so DataSetJob can concatenate several of these with a plain byte copy.
+        self.artifact.paths(root)["tokens"].write_bytes(array("H", token_ids).tobytes())
 
         worker.log.info(f"wrote {len(token_ids)} tokens for {self.source.name}")

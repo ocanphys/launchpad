@@ -16,22 +16,24 @@ in a notebook cell are interchangeable ways of naming the same artifact. That
 makes the file the source of truth -- everything else (which job produces it,
 whether it's done, whether its commit still matches) is derived on top.
 
-An artifact has three lives, and this class is all three:
+An artifact has three lives, and this class carries all three:
 
     recipe    Artifact(params)         parameters, a folder, a manifest
     job       Job(artifact).run(root)  writes the files into that folder
-    bound     artifact.bind(root)      the same artifact, its files loaded
+    bound     artifact.bind(root)      a copy, with its files loaded onto it
 
 `bind` is the seam between the first and the third. It checks the job's files
-are there, loads whatever the artifact's own methods need, and hands back the
-same object -- so a Tokenizer that has been bound is the artifact you declared
-*and* the thing you call encode() on. Binding never changes which artifact it
-is: the loaded state is not a parameter, so it stays out of ==, hash, and the
-manifest.
+are there, loads whatever the artifact's own methods need onto a *copy*, and
+returns that copy -- so a Tokenizer you bind is equal to the one you declared
+(same parameters, same `==`) and is the thing you call encode() on, but it is
+never the same object. The recipe you called `bind` on is left exactly as it
+was, unbound, forever -- binding is not a mutation anyone can observe on the
+value they already hold a reference to.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sys
@@ -110,11 +112,18 @@ def _decode(annotation: object, value: object) -> object:
     _decode(tuple[str, ...], ["<pad>", "<unk>"]) -> ("<pad>", "<unk>")
     """
     if get_origin(annotation) in (UnionType, Union):
-        # `X | None` -- an optional field. Anything richer is ambiguous: JSON
-        # can't say which arm.
         if value is None:
             return None
         arms = [arm for arm in get_args(annotation) if arm is not type(None)]
+        if all(isinstance(arm, type) and issubclass(arm, Artifact) for arm in arms):
+            # a field that accepts more than one artifact type (e.g.
+            # DataSet | MappedDataSet) isn't actually ambiguous: every
+            # manifest already names its own concrete type, so which arm
+            # applies is read off the value, not guessed from the
+            # annotation -- same call this makes for a single-artifact field.
+            return Artifact.from_manifest(value)
+        # anything else -- `X | None`, or a union of non-artifact types --
+        # is genuinely ambiguous: JSON can't say which arm on its own.
         if len(arms) != 1:
             raise TypeError(f"can't decode into {annotation}: more than one arm")
         return _decode(arms[0], value)
@@ -234,7 +243,8 @@ class Artifact(ABC):
         """The artifact whose folder is `path`, ready to use.
 
         The two ways to get hold of a built artifact are this and writing its
-        parameters out; they land on the same object:
+        parameters out then binding; they land on an equal artifact either
+        way, though never the same object:
 
             Artifact.at(root / "tokenizers/bpe-1000-feeeeefa90")
             Tokenizer(vocab_size=1000, ...).bind(root)
@@ -266,8 +276,10 @@ class Artifact(ABC):
         return artifact.bind(root) if artifact.exists(root) else artifact
 
     def bind(self, root: Path) -> Self:
-        """This artifact with whatever its files hold loaded onto it, ready to
-        be used rather than just named.
+        """A copy of this artifact with whatever its files hold loaded onto
+        it, ready to be used rather than just named. This object -- the one
+        `bind` was called on -- is left untouched; nothing about it changes,
+        and it never becomes usable just because something else bound it.
 
         Every artifact gets the same check here: an artifact whose files
         aren't all there yet -- declared, maybe, but not built -- has nothing
@@ -276,15 +288,21 @@ class Artifact(ABC):
         `_load` does nothing further. A subclass that stands for an object --
         tokenizers.bpe.Tokenizer, whose vocab and merges are what encode()
         runs on -- overrides `_load` to read its file and set up the state its
-        own bound methods need. Either way this returns self, so
-        `Tokenizer(...).bind(root).encode(text)` is one thought.
+        own bound methods need, on the copy `_load` receives as `self`, never
+        on the original. Either way this returns the copy, so
+        `Tokenizer(...).bind(root).encode(text)` is one thought -- and so is
+        `bound = tokenizer.bind(root)` followed by using `bound`, not
+        `tokenizer`, from then on.
         """
         root = Path(root)
-        missing = [str(path) for path in self.paths(root).values() if not path.exists()]
+        missing = [
+            str(path) for path in self.completion_paths(root) if not path.exists()
+        ]
         if missing:
             raise FileNotFoundError(f"{self.uid} is not built -- missing {missing}")
-        self._load(root)
-        return self
+        bound = copy.copy(self)
+        bound._load(root)
+        return bound
 
     def _load(self, root: Path) -> None:
         """Subclass hook: populate whatever in-memory state this artifact's
@@ -312,7 +330,22 @@ class Artifact(ABC):
             desc: root / self.artifact_path / name for desc, name in self.files.items()
         }
 
+    def completion_paths(self, root: Path) -> list[Path]:
+        """The paths whose presence means this artifact is done -- what
+        `bind`, `exists`, and `dag.resolve.inspect`'s done/partial check all
+        ask about. Defaults to this artifact's own files, which is right for
+        almost everything: an artifact is done when the files it declared
+        are there. A virtual artifact that owns no bytes of its own --
+        datasets.artifact.MappedDataSet, whose completeness is really "are
+        the things I depend on done" -- overrides this to point at its
+        dependencies' files instead. `paths()` itself is untouched by this:
+        a file only ever lives inside its own artifact's folder; this is a
+        separate question about what "done" means, not about where writing
+        is allowed to happen.
+        """
+        return list(self.paths(root).values())
+
     def exists(self, root: Path) -> bool:
         return all(
-            p.exists() for p in self.paths(root).values()
+            p.exists() for p in self.completion_paths(root)
         )  # a partial file set doesn't count as existing

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dag.artifact import Artifact
 from datasets.artifact import DataSet
+from mappeddatasets.artifact import MappedDataSet
 from tokenizers.bpe import Tokenizer
 
 
@@ -40,7 +41,7 @@ class Pretraining(Artifact):
     """
 
     run_id: str
-    dataset: DataSet
+    dataset: DataSet | MappedDataSet
     tokenizer: Tokenizer
     model_parameters: ModelParameters
     config: PretrainingConfig

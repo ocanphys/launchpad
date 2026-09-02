@@ -20,8 +20,9 @@ To use it:
 4. Add `from tokenizers import <yourname> as _tokenizers_<yourname>  # noqa: F401`
    to dag/resolve.py's imports, which is what puts the family in the registries.
 5. Downstream artifacts name their tokenizer type concretely
-   (datasets.artifact.DataSet, models/*/artifact.py), so widen those annotations
-   to accept the new family before declaring a run that uses it.
+   (datasets.artifact.DataSet, mappeddatasets.artifact.MappedDataSet,
+   models/*/artifact.py), so widen those annotations to accept the new
+   family before declaring a run that uses it.
 
 Two things that will bite if changed:
 
@@ -90,8 +91,10 @@ class TemplateTokenizer(Artifact):
         something in memory; `Artifact.at(folder)` and `bind(root)` call it
         for you.
 
-        object.__setattr__ because the dataclass is frozen, which is the
-        point: this state can change without changing which artifact it is.
+        object.__setattr__ because the dataclass is frozen -- but by the time
+        this runs, `self` is bind's own private copy (see Artifact.bind),
+        never the object bind() was called on, so mutating it here is
+        invisible to whoever is still holding the unbound original.
         """
         data = json.loads(self.paths(root)["tokenizer"].read_text())
         if tuple(data["special_tokens"]) != self.special_tokens:

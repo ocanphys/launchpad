@@ -37,18 +37,28 @@ Artifact(parameters, commit)
   manifest()        this artifact as JSON, recursively
   from_manifest()   the inverse
 
-  bind(root)        load what the files hold; the same artifact, usable
+  bind(root)        a copy, with what the files hold loaded onto it
 ```
 
 An artifact is a value: a set of parameters and a location derived from them.
-It has three lives, and it is the same object in all three: the recipe above;
-the job that writes its files; and the bound artifact, which `bind(root)`
-returns once every declared file is there. Binding is not a second object —
-a bound tokenizer is the artifact you declared *and* the thing you call
-`encode` on. What it loads is per type, and for most types nothing at all:
-where the files are the whole content, binding is only the check that they
-exist. The loaded state is never a parameter, so it stays out of identity,
-equality and the manifest.
+It has three lives: the recipe above; the job that writes its files; and the
+bound artifact, which `bind(root)` returns once every declared file is
+there — as a distinct copy, never the object `bind` was called on. A bound
+tokenizer is equal to the one you declared (same parameters, same `==`) and
+is the thing you call `encode` on, but the recipe you called `bind` on stays
+exactly as unbound as it was; nothing about binding is observable on a
+reference someone else already holds. What it loads is per type, and for
+most types nothing at all: where the files are the whole content, binding is
+only the check that they exist. The loaded state is never a parameter, so it
+stays out of identity, equality and the manifest.
+
+"Done" is normally "are my own declared files there" — `completion_paths(root)`,
+which `bind`, `exists`, and resolution's status check all ask, defaults to
+exactly that. A virtual artifact that owns no bytes of its own overrides it to
+point at what it depends on instead, so it's done exactly when they are, with
+no job output of its own to wait on. It still gets a folder and a manifest —
+that's what every other mechanism (`Artifact.at`, declaration, `bind` itself)
+keys on — the folder just never holds anything a job wrote.
 
 Parameters are the complete definition. They are recursive — a parameter may
 itself be an artifact — because state nests. A supervised-finetuning checkpoint
@@ -135,12 +145,12 @@ run_id absent          ->  data_root / relpath()
 ```
 
 ```
-Tokenizer(corpus, vocab_size)                   shared
-TokenizedSource(source, tokenizer)              shared
-Split(tokenized, scheme, seed, role)            shared
-PretrainCkpt(run_id, split, arch, schedule)     run
-SFTCkpt(run_id, base, dataset, schedule)        run
-RLCkpt(run_id, base, reward, schedule)          run
+Source(name, url)                               shared
+Tokenizer(vocab_size, special_tokens, sources)  shared
+TokenizedSource(tokenizer, source)              shared
+DataSet(train_set, valid_set)                   shared
+MappedDataSet(train_set, valid_set)             shared
+Pretraining(run_id, dataset, tokenizer, ...)    run
 ```
 
 There are two roots: one for artifacts shared across runs, one for artifacts
@@ -150,7 +160,12 @@ parameters include a run identifier — nothing is declared, so nothing can drif
 A run identifier is identifying but not content-determining. It changes where
 bytes live, not what they are. That is what buys run isolation, and it means
 types whose contents cannot vary between runs — tokenizers, tokenized sources,
-splits — must not carry one, or every run redoes work it could have shared.
+datasets — must not carry one, or every run redoes work it could have shared.
+`DataSet` learned this the direct way: it used to take a `run_id` and live
+under `runs/{run_id}/dataset`, and every run retrained an identical copy of a
+tokenizer's own sources. Its bytes never depended on the run at all, so the
+`run_id` came out and its folder moved to a shared root, the same as
+`MappedDataSet` beside it.
 
 The membrane is one-way: a run-scoped artifact may depend on a shared one, never
 the reverse. A shared artifact whose contents depended on a run would collide
@@ -168,61 +183,53 @@ metadata.
 ```
 Job
 
-  produces          [ ArtifactType, ... ]     declared
-  discriminator     parameter name | none     for sibling output sets
+  artifact          Artifact               the one thing it produces
+  run(root, worker)                        does the work
 
-  for_output(artifact) -> Job
-  outputs           [ Artifact, ... ]         full set, incl. the requested one
-  inputs            union of refs() over outputs
-  run(execution)
-
-  identity          the set of its outputs
+  identity          artifact.artifact_path
 ```
 
-A job is where the wiring lives.
+A job is where the wiring lives, and it produces exactly one artifact — never
+a set. The `artifact:` class annotation on a subclass both declares that type
+and registers the job as its producer (see Registry, below); there is no
+separate `produces` list and no way for one job to stand for several sibling
+outputs.
 
-It declares the artifact types it produces. Its inputs are derived, not
-declared: they are the artifact-valued parameters of its outputs. Because
-artifacts describe state completely, this derivation is usually the whole story,
-and a job that needs to override it is worth a second look — it is claiming a
-dependency its outputs do not record.
+Its inputs are derived, not declared: they are `artifact.deps()`, the
+artifact-valued parameters of the one thing it produces. Because artifacts
+describe state completely, this derivation is the whole story — a job with
+dependencies binds them in `__init__` under the same names the artifact gives
+them (`self.tokenizer`, `self.source`, ...), so what it reads is declared once
+and `run()` just uses those names, never reaching for something its own
+artifact doesn't already name as a parameter.
 
-A job is completely determined by its outputs. Given one artifact to produce,
-everything else follows: the rest of the output set, the inputs, the work.
-
-Most jobs produce one artifact. The honest multi-output case is a set of
-siblings that differ only by a discriminating parameter and come from one
-indivisible operation — the train, validation and test parts of a single
-partitioning. Reconstructing the job from any one of them means dropping the
-discriminator and expanding it across its domain, which is symmetric by
-construction. An output set that is not of this shape is more likely a modelling
-error than a case to generalize for.
-
-Execution parameters configure the run, never the result. They are excluded from
-identity and from the plan, and they arrive only when something is scheduled.
+Execution parameters — resources to run under, in particular — configure the
+call, never the result. They are excluded from identity and from the
+manifest, and they arrive only when something is scheduled.
 
 ## 5. Registry
 
 ```
 defining a Job subclass:
-    for each type in produces:
-        register(type, subclass)      collision -> error, here and now
+    register(artifact_type, subclass)      collision -> error, here and now
 
 producer_for(artifact) -> Job
     subclass = lookup(type(artifact))
-    subclass.for_output(artifact)
+    subclass(artifact)
 ```
 
 The mapping from artifact to producing job cannot live on the artifact, so it
-lives on the job — and is collected automatically. Defining a job subclass
-registers it as the producer of the artifact types it declares. Two subclasses
-claiming one artifact type is an error where the second is defined, not where a
-plan is built.
+lives on the job — and is collected automatically. A job subclass declares
+what it produces with one class annotation (`artifact: Tokenizer`), and
+defining the subclass registers it as that type's producer right then, at
+import time. Two subclasses claiming one artifact type is an error where the
+second is defined, not where a plan is built.
 
-Lookup takes an artifact and returns the job that would produce it. This is the
-one seam that will move: today it matches on artifact type alone, and the
-extension to dispatching on parameters as well changes this function and nothing
-on either side of it.
+Lookup takes an artifact and returns the job that would produce it, by
+constructing the registered class with that artifact. This is the one seam
+that will move: today it matches on artifact type alone, and the extension to
+dispatching on parameters as well changes this function and nothing on either
+side of it.
 
 ## 6. Resolution
 
@@ -232,21 +239,20 @@ resolve(artifact, stack):
     job = producer_for(artifact)
     plan {
         artifact
-        job      { type }
-        outputs  [ artifact, ... ]
-        inputs   [ resolve(a, stack + [artifact]) for a in job.inputs ]
+        job
+        dependencies  [ resolve(d, stack + [artifact]) for d in artifact.deps() ]
     }
 ```
 
 ```
 job_list(plan):
-    walk inputs depth first
-    collect jobs, deduplicated by output set
+    walk dependencies depth first
+    collect jobs, deduplicated by artifact_path
     sort topologically
 ```
 
 Requesting an artifact yields a plan: the artifact, the job that produces it,
-that job's full output set, and a plan for each input, recursively to leaf jobs.
+and a plan for each dependency, recursively to leaf jobs.
 
 A plan is the manifest with the jobs attached, and it is the layer that may be
 thrown away. It is never written; what lands in each folder is the artifact's
@@ -267,8 +273,10 @@ one is a tree written down, the other a tree in memory, and resolution takes
 either.
 
 Flattening a plan into an ordered job list is separate: walk it, collect jobs
-deduplicated by their output set, sort topologically. An artifact reappearing on
-the recursion stack is a cycle and an error.
+deduplicated by `artifact_path` — the same folder-is-identity check as
+everywhere else, and exact since a job has exactly one artifact — sort
+topologically. An artifact reappearing on the recursion stack is a cycle and
+an error.
 
 ## 7. Declaration
 
@@ -421,12 +429,15 @@ undone only by deleting the file, outside the system and unrecorded. This is the
 deliberate price of immutability, but it means the recovery path for the most
 likely mistake is the one operation nothing checks.
 
-**Run scope is not checked.** A run-scoped artifact can be handed as a
-dependency to a request from a different run — a `toy2` `Pretraining` built on
-`toy`'s `DataSet`, say — and `check` will not object: the mismatched artifact
-already reconciles against disk on its own path, which is all `check` looks at.
-The invariant that a run-scoped job's run-scoped inputs share one run
-identifier is therefore a modeling discipline, not something enforced in code.
+**Run scope is not checked.** Nothing stops a run-scoped artifact from being
+handed as a dependency to a request declared under a different run_id —
+`check` would not object, because a mismatched artifact still reconciles
+cleanly against disk on its own path, which is all `check` looks at. There is
+no concrete case of this today (`Pretraining` is the only run-scoped type, and
+nothing currently depends on one), but the moment a second run-scoped type
+exists downstream of it — a future fine-tuning checkpoint built from a
+`Pretraining`, say — the invariant that they share one run_id is a modeling
+discipline, not something enforced in code.
 
 **A change at a leaf renames everything below it.** Because ancestry is carried
 in parameters and parameters determine the path, retokenizing with a different
@@ -438,24 +449,6 @@ escape hatch for a change that did not really matter, and no way to say so.
 the parameters that made it. A directory listing shows what kind of thing is
 where, not what it was made from. The manifest in each folder answers that, but
 only for folders that have one — a path alone still says nothing.
-
-**Leg decomposition is identifying.** A run is a chain of legs, each continuing
-the one named by `base`, and where it is cut is operational — a container does
-not live forever — not scientific: with seeds carried deterministically, one leg
-to 2000 and two legs through 1000 produce the same weights. But they are
-different artifacts at one path, so declaring one and later wanting the other is
-a conflict. Re-cutting a run's legs means a new run, even though the science is
-unchanged. The alternative — making `base` non-identifying — would remove the
-ordering from the manifest, which is worse.
-
-**The recovery checkpoint is invisible, and that is correct.** A leg resumes from
-mutable training state that appears in no manifest. It stays out because its
-contents are determined by parameters that *are* declared — seed, step, config,
-the base chain — so it is a cache, and deleting it costs recomputation rather
-than correctness. That reasoning holds only as long as the training loop derives
-its RNG stream and data order from the seed. A loop that carried genuinely
-unreproducible state would silently make every leg boundary an undeclared input,
-and nothing here would detect it.
 
 **Manifests repeat themselves.** The tree is written as a tree, so an artifact
 reached by several routes — a tokenizer under each of its tokenized sources —
@@ -534,7 +527,7 @@ healthy job starting up looks identical to one whose call already died: a
 doesn't guard its own `Artifact.load` calls for the manifests it finds
 directly under `runs/{run_id}` — only *shared* dependencies pulled in
 transitively get `inspect`'s `_Unreadable`/`conflict` handling. A corrupt
-`runs/{id}/dataset/manifest.json` therefore hides every other artifact in
+`runs/{id}/pretraining/manifest.json` therefore hides every other artifact in
 that run too, not just itself.
 
 **Renamed fields don't migrate what's already written.** `leases`/`beats` are
@@ -591,6 +584,32 @@ share a prefix share its artifacts automatically — and the shared/run split
 largely dissolves. It costs human-chosen run names, which would have to survive
 as metadata and a name index, and it changes identity, so it is a migration
 rather than a swap.
+
+**Multi-output jobs.** Today a job produces exactly one artifact, and its
+inputs are exactly that artifact's own artifact-valued parameters — no
+concrete job needs anything richer yet. The honest multi-output case, if one
+shows up, is a set of siblings that differ only by a discriminating parameter
+and come from one indivisible operation — the train, validation and test
+parts of a single partitioning. Reconstructing the job from any one sibling
+would mean dropping the discriminator and expanding it across its domain,
+symmetric by construction; an output set that isn't of this shape is more
+likely a modelling error than a case worth generalizing for.
+
+**Multi-leg runs.** `Pretraining` is single-leg today — no mid-run
+resumption (see its own docstring). The design this would need: a run as a
+chain of legs, each continuing the one named by a `base` parameter, cut
+wherever is operational rather than scientific, since a container doesn't
+live forever. Legs would be different artifacts at one path even when the
+underlying science is identical (one leg to 2000 steps and two legs through
+1000 produce the same weights with seeds carried deterministically), so
+re-cutting a run's legs would mean a new run. The recovery checkpoint a leg
+resumes from would stay out of the manifest entirely — its contents are
+fully determined by parameters that already are declared (seed, step,
+config, the base chain), so it's a cache, and losing it costs recomputation
+rather than correctness. That reasoning would only hold as long as the
+training loop derives its RNG stream and data order from the seed; a loop
+carrying genuinely unreproducible state would silently make every leg
+boundary an undeclared input, with nothing here to detect it.
 
 **Garbage collection.** Nothing currently removes anything. A rule for what is
 reachable from a set of held manifests would give one.

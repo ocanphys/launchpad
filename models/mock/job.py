@@ -1,4 +1,5 @@
 import json
+from array import array
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,10 +19,8 @@ class PretrainJob(Job):
         self.tokenizer = artifact.tokenizer
 
     def run(self, root: Path, worker: "Worker") -> None:
-        train_ids = [
-            int(token)
-            for token in self.dataset.paths(root)["training set"].read_text().split()
-        ]
+        train_ids = array("H")
+        train_ids.frombytes(self.dataset.paths(root)["training set"].read_bytes())
         vocab_size = len(
             json.loads(self.tokenizer.paths(root)["tokenizer"].read_text())["vocab"]
         )
