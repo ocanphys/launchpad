@@ -1,7 +1,3 @@
-import os
-import shutil
-import subprocess
-import threading
 import time
 from pathlib import Path
 
@@ -13,11 +9,6 @@ from config import (
     CONTAINER_LIFETIME,
     FLATLINE,
     HEARTBEAT_SECONDS,
-    LAB_COMMIT_SECONDS,
-    LAB_IDLE_SECONDS,
-    LAB_NOTEBOOKS,
-    LAB_PORT,
-    LAB_SECRET,
     STORAGE,
     VOLUME_NAME,
 )
@@ -95,30 +86,6 @@ web_image = (
     # not pasted into this module as strings.
     .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
     .add_local_python_source(*CALL_SOURCE, *DAG_SOURCE)
-)
-
-LAB_SEED_DIR = Path("/opt/lab-seed")  # starter notebooks baked into lab_image
-
-# The lab: a Jupyter server with the volume mounted, so a notebook can hold a
-# real artifact rather than a copy of one pulled down by hand.
-#
-# jupyterlab is the only thing installed on top of base_image, because
-# base_image's regex+tqdm is already the whole third-party surface of
-# CALL_SOURCE+DAG_SOURCE (tokenizers/bpe.py's, specifically) -- a notebook that
-# can import the package needs nothing else. models/transformer would need
-# torch, and it isn't in dag/resolve.py's registry imports anyway.
-#
-# "lab" is the one source entry the other two images don't carry: it's the
-# notebook-facing API (lab.load/check/declare, see lab.py), useless to a worker
-# and to the dashboard, and it imports nothing they don't already have.
-#
-# notebooks/lab/ is mounted as data, not staged as source -- .ipynb files, not
-# importable modules -- and is only a seed: the copies that get edited live on
-# the volume (see `jupyter` below).
-lab_image = (
-    base_image.pip_install("jupyterlab")
-    .add_local_dir(local_path="notebooks/lab", remote_path=LAB_SEED_DIR.as_posix())
-    .add_local_python_source(*CALL_SOURCE, *DAG_SOURCE, "lab")
 )
 
 # What `declare` and `run_job` run under: no fastapi, no volume-unrelated
@@ -298,9 +265,6 @@ def run_log_entries(run_id: str, root: Path) -> list[dict]:
     image=web_image,
     volumes={STORAGE: volume},
     max_containers=1,
-    # Only for the lab's token, so `/lab` can hand it straight to Jupyter --
-    # nothing else in here reads a secret.
-    secrets=[modal.Secret.from_name(LAB_SECRET)],
 )
 @modal.asgi_app()
 def leasebook():
@@ -312,7 +276,6 @@ def leasebook():
     Served together, `state` is just a relative path, and no CORS question arises.
     """
     from fastapi import FastAPI
-    from fastapi.responses import RedirectResponse
     from fastapi.staticfiles import StaticFiles
 
     api = FastAPI()
@@ -320,17 +283,6 @@ def leasebook():
     @api.get("/state")
     def state() -> dict:
         return read_state()
-
-    # The header's "lab" link. A redirect rather than a URL the page fetches:
-    # the lab lives on its own subdomain, and the token that gets it past the
-    # login screen is this container's to hold, not something to hand to the
-    # browser as data and then hope it isn't logged. app.js never learns either
-    # -- the anchor in index.html is a plain relative href.
-    @api.get("/lab")
-    def lab_redirect() -> RedirectResponse:
-        url = jupyter.get_web_url()
-        token = os.environ.get("JUPYTER_TOKEN")
-        return RedirectResponse(f"{url}/lab?token={token}" if token else url)
 
     # :path, not a plain path segment -- an artifact_path contains its own
     # /s (runs/my-run/pretraining), which a plain segment can't match.
@@ -439,101 +391,6 @@ def declared_artifact(artifact_path: str) -> tuple[Artifact, dict] | None:
         return None
     artifact = Artifact.load(manifest_path)
     return artifact, artifact_state(artifact, Path(STORAGE))
-
-
-def seed_notebooks() -> None:
-    """Copy the starter notebooks out of the image and onto the volume, once.
-
-    Never over an existing file: the copy on the volume is the one that gets
-    edited, and a redeploy shipping a newer seed must not be able to eat that.
-    Renaming or deleting a seeded notebook in the lab brings the seed back on
-    the next cold start, which is the behaviour worth having -- there's no
-    third state where the volume remembers that you deleted it.
-    """
-    destination = Path(STORAGE) / LAB_NOTEBOOKS
-    destination.mkdir(parents=True, exist_ok=True)
-    for seed in sorted(LAB_SEED_DIR.glob("*.ipynb")):
-        target = destination / seed.name
-        if not target.exists():
-            shutil.copy(seed, target)
-    volume.commit()
-
-
-def commit_notebooks() -> None:
-    """Publish whatever the lab has written, forever, on its own clock.
-
-    A job commits once, at a point it chooses (`runtime.initialize_worker`); a
-    notebook has no such point -- the container just goes away when it scales
-    down -- so this is what makes a notebook saved in the lab survive. Same
-    shape as `initialize_worker`'s heartbeat thread: a daemon, a fixed sleep,
-    and never a raise that could take the server down with it.
-
-    The lab writes under `notebooks/`; a job writes under the artifact folder
-    it holds the lease for. A volume commit publishes the files this container
-    changed, so two commits landing at once touch disjoint paths and there's
-    nothing here to serialize against the lease protocol.
-    """
-    while True:
-        time.sleep(LAB_COMMIT_SECONDS)
-        try:
-            volume.commit()
-        except Exception as exc:
-            print(f"lab: commit skipped ({exc})")
-
-
-@app.function(
-    image=lab_image,
-    volumes={STORAGE: volume},
-    secrets=[modal.Secret.from_name(LAB_SECRET)],
-    # One lab, so one filesystem view: two containers would each hold their own
-    # uncommitted copy of the same notebook and the later commit would win.
-    max_containers=1,
-    timeout=CONTAINER_LIFETIME,
-    scaledown_window=LAB_IDLE_SECONDS,
-)
-# A notebook UI is a browser holding a websocket open and firing many requests
-# in parallel -- without this, each one is a separate input and max_containers=1
-# serializes the whole session into a queue.
-@modal.concurrent(max_inputs=100)
-@modal.web_server(LAB_PORT, startup_timeout=120)
-def jupyter():
-    """JupyterLab, rooted at the volume.
-
-    Named `jupyter`, not `lab`: `lab` is the module a notebook imports (lab.py)
-    and `/lab` is the dashboard route that redirects here, and a Modal function
-    object called `lab` in this module's namespace would shadow the first and
-    read as the second.
-
-    `root_dir` is the volume itself, not the notebooks folder -- pointing at an
-    artifact path is the whole point, and the file browser is where you find
-    out what the paths are (`runs/`, `sources/`, `tokenizers/`). `default_url`
-    still lands you in `notebooks/` so the first thing on screen is something
-    to run.
-
-    No `--IdentityProvider.token`: jupyter_server reads JUPYTER_TOKEN out of
-    the environment, which LAB_SECRET puts there, and keeping it out of the
-    command line keeps it out of every `ps` and traceback.
-    """
-    seed_notebooks()
-    threading.Thread(target=commit_notebooks, daemon=True).start()
-
-    subprocess.Popen(
-        [
-            "jupyter",
-            "lab",
-            "--ip=0.0.0.0",
-            f"--port={LAB_PORT}",
-            "--no-browser",
-            "--allow-root",
-            f"--ServerApp.root_dir={STORAGE}",
-            f"--ServerApp.default_url=/lab/tree/{LAB_NOTEBOOKS}",
-            # Modal terminates TLS and forwards to this container under a
-            # different host than the browser typed, which jupyter_server reads
-            # as a remote/cross-origin access and blocks by default.
-            "--ServerApp.allow_remote_access=True",
-            "--ServerApp.allow_origin=*",
-        ]
-    )
 
 
 def resource_options(resources: Resources) -> dict:

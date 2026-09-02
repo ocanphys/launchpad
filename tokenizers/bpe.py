@@ -6,10 +6,11 @@ be written down, hashed and declared before anything has been trained.
 
 It is also the thing you tokenize text with. The vocab and merges a training
 run produces are not parameters -- they're what the job wrote into the folder
-this artifact owns -- so they arrive later, through `bind`: either read back
-out of that folder (`bind(root)`), or handed in directly by the job that just
-computed them (`bind(vocab=..., merges=...)`). Once bound, `encode`/`decode`
-work off that state. Unbound, they say so rather than returning nonsense.
+this artifact owns -- so they arrive later, through `bind(root)`, which reads
+them back out of that folder. Writing them there in the first place is
+`TokenizerJob.save`'s job, not this artifact's: an artifact only ever loads
+what's already built. Once bound, `encode`/`decode` work off that state.
+Unbound, they say so rather than returning nonsense.
 
 `TokenizerJob` is what fills that folder in, and `TokenizeSourceJob` runs a
 built tokenizer over one source. Both live here rather than in a module of
@@ -147,33 +148,25 @@ class Tokenizer(Artifact):
     # object.__setattr__ because the dataclass is frozen, which is exactly the
     # point -- binding state can't change which artifact this is.
 
-    def bind(
-        self,
-        root: Path | None = None,
-        *,
-        vocab: dict[int, bytes] | None = None,
-        merges: list[tuple[bytes, bytes]] | None = None,
-    ) -> "Tokenizer":
-        """Give this artifact the vocab and merges to tokenize with, either
-        from the file its job wrote or straight from parameters:
+    def _load(self, root: Path) -> None:
+        """Artifact._load's hook: read this artifact's own tokenizer.json --
+        the state encode()/decode() run on -- and check it against what this
+        artifact declares. The inverse of TokenizerJob.save.
 
-            tokenizer.bind(root)                     # read tokenizer.json
-            tokenizer.bind(vocab=..., merges=...)    # what the job just trained
-
-        Artifact.bind's job (check the files are there, hand back something
-        usable), plus the loading a tokenizer needs and most artifacts don't.
-        Returns self, so `Tokenizer(...).bind(root).encode(text)` is one
-        thought. Binding twice is fine; the second binding wins.
+        object.__setattr__ because the dataclass is frozen, which is exactly
+        the point: this state can change without changing which artifact it is.
         """
-        if root is not None:
-            if vocab is not None or merges is not None:
-                raise TypeError("bind reads the file or takes vocab/merges, not both")
-            vocab, merges = self._read(Path(root))
-        elif vocab is None or merges is None:
-            raise TypeError("bind needs a root to read from, or both vocab and merges")
-
-        vocab = dict(vocab)
-        merges = [tuple(merge) for merge in merges]
+        data = json.loads(self.paths(root)["tokenizer"].read_text())
+        if tuple(data["special_tokens"]) != self.special_tokens:
+            # The folder is keyed by a digest over special_tokens, so this file
+            # can only disagree if it was written by something other than this
+            # artifact's job. Better to say so than to encode with it.
+            raise ValueError(
+                f"{self.paths(root)['tokenizer']} has special tokens "
+                f"{tuple(data['special_tokens'])}, but {self.uid} declares "
+                f"{self.special_tokens}"
+            )
+        vocab, merges = _read_state(data)
         bytes_to_id = {token: idx for idx, token in vocab.items()}
         object.__setattr__(self, "_vocab", vocab)
         object.__setattr__(self, "_merges", merges)
@@ -189,45 +182,6 @@ class Tokenizer(Artifact):
             },
         )
         object.__setattr__(self, "_cache", {})  # pretoken:str -> list[int]
-        return self
-
-    def _read(self, root: Path) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-        """This artifact's own tokenizer.json, checked against what it declares."""
-        super().bind(root)  # the base check: the file is actually there
-        data = json.loads(self.paths(root)["tokenizer"].read_text())
-        state = _read_state(data)
-        if tuple(data["special_tokens"]) != self.special_tokens:
-            # The folder is keyed by a digest over special_tokens, so this file
-            # can only disagree if it was written by something other than this
-            # artifact's job. Better to say so than to encode with it.
-            raise ValueError(
-                f"{self.paths(root)['tokenizer']} has special tokens "
-                f"{tuple(data['special_tokens'])}, but {self.uid} declares "
-                f"{self.special_tokens}"
-            )
-        return state
-
-    def save(self, root: Path) -> None:
-        """Write the bound state into the folder this artifact owns -- the last
-        thing its training job does, and the inverse of `bind(root)`."""
-        self._require("saving")
-        self.paths(Path(root))["tokenizer"].write_text(
-            json.dumps(
-                {
-                    "vocab_size": len(self.vocab),
-                    "special_tokens": list(self.special_tokens),
-                    "vocab": {
-                        str(idx): token.decode("latin-1")
-                        for idx, token in self.vocab.items()
-                    },
-                    "merges": [
-                        [a.decode("latin-1"), b.decode("latin-1")]
-                        for a, b in self.merges
-                    ],
-                },
-                indent=2,
-            )
-        )
 
     @property
     def bound(self) -> bool:
@@ -237,8 +191,7 @@ class Tokenizer(Artifact):
         if not self.bound:
             raise RuntimeError(
                 f"{self.uid} has no vocab or merges yet -- bind(root) to read the "
-                f"tokenizer.json its job wrote, or bind(vocab=..., merges=...), "
-                f"before {doing}"
+                f"tokenizer.json its job wrote before {doing}"
             )
 
     @property
@@ -553,10 +506,30 @@ class TokenizerJob(Job):
         for index in range(len(self.special_tokens)):
             vocab[offset + index] = bytes(self.special_tokens[index].encode("utf-8"))
 
-        # hand the trained state to the artifact that declared this run, and
-        # let it write itself into the folder it owns
-        self.artifact.bind(vocab=vocab, merges=merges).save(root)
+        self.save(root, vocab, merges)
         worker.log.info(f"trained, vocab has {len(vocab)} entries")
+
+    def save(
+        self, root: Path, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]]
+    ) -> None:
+        """Write vocab/merges into the folder self.artifact owns -- the last
+        thing training does, and the inverse of Tokenizer._load."""
+        self.artifact.paths(root)["tokenizer"].write_text(
+            json.dumps(
+                {
+                    "vocab_size": len(vocab),
+                    "special_tokens": list(self.special_tokens),
+                    "vocab": {
+                        str(idx): token.decode("latin-1")
+                        for idx, token in vocab.items()
+                    },
+                    "merges": [
+                        [a.decode("latin-1"), b.decode("latin-1")] for a, b in merges
+                    ],
+                },
+                indent=2,
+            )
+        )
 
 
 class TokenizeSourceJob(Job):

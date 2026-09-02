@@ -15,6 +15,19 @@ and `load()` reads it back: a manifest.json on disk and the object spelled out
 in a notebook cell are interchangeable ways of naming the same artifact. That
 makes the file the source of truth -- everything else (which job produces it,
 whether it's done, whether its commit still matches) is derived on top.
+
+An artifact has three lives, and this class is all three:
+
+    recipe    Artifact(params)         parameters, a folder, a manifest
+    job       Job(artifact).run(root)  writes the files into that folder
+    bound     artifact.bind(root)      the same artifact, its files loaded
+
+`bind` is the seam between the first and the third. It checks the job's files
+are there, loads whatever the artifact's own methods need, and hands back the
+same object -- so a Tokenizer that has been bound is the artifact you declared
+*and* the thing you call encode() on. Binding never changes which artifact it
+is: the loaded state is not a parameter, so it stays out of ==, hash, and the
+manifest.
 """
 
 from __future__ import annotations
@@ -27,9 +40,11 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from functools import cache
 from pathlib import Path
 from types import UnionType
-from typing import Union, get_args, get_origin, get_type_hints
+from typing import Self, Union, get_args, get_origin, get_type_hints
 
-sys.path.append(str(Path(__file__).resolve().parents[1]))  # config.py is at the repo root
+sys.path.append(
+    str(Path(__file__).resolve().parents[1])
+)  # config.py is at the repo root
 from config import get_git_commit
 
 MANIFEST = "manifest.json"
@@ -127,9 +142,8 @@ class Resources:
     gpu_count: int | None = None
 
 
-@dataclass(
-    frozen=True
-)  # frozen: identity is its fields, so it must be hashable/immutable
+# frozen: identity is its fields, so it must be hashable/immutable
+@dataclass(frozen=True)
 class Artifact(ABC):
     # The code the producing job runs, not part of what this artifact is:
     # compare=False keeps it out of ==/hash, so an artifact rebuilt from an old
@@ -251,22 +265,31 @@ class Artifact(ABC):
         root = Path(*path.parts[: -len(relpath)])
         return artifact.bind(root) if artifact.exists(root) else artifact
 
-    def bind(self, root: Path) -> Artifact:
+    def bind(self, root: Path) -> Self:
         """This artifact with whatever its files hold loaded onto it, ready to
         be used rather than just named.
 
-        Here that is only a check that the files are there: for most artifacts
-        the files *are* the thing, and there's nothing to hold in memory. A
-        subclass that stands for an object -- tokenizers.bpe.Tokenizer, whose
-        vocab and merges are what encode() runs on -- overrides this to load
-        it, and returns self the same way.
+        Every artifact gets the same check here: an artifact whose files
+        aren't all there yet -- declared, maybe, but not built -- has nothing
+        to bind to. What happens once that check passes is per-subclass, via
+        `_load`: for most artifacts the files *are* the thing, so the default
+        `_load` does nothing further. A subclass that stands for an object --
+        tokenizers.bpe.Tokenizer, whose vocab and merges are what encode()
+        runs on -- overrides `_load` to read its file and set up the state its
+        own bound methods need. Either way this returns self, so
+        `Tokenizer(...).bind(root).encode(text)` is one thought.
         """
-        missing = [
-            str(path) for path in self.paths(Path(root)).values() if not path.exists()
-        ]
+        root = Path(root)
+        missing = [str(path) for path in self.paths(root).values() if not path.exists()]
         if missing:
             raise FileNotFoundError(f"{self.uid} is not built -- missing {missing}")
+        self._load(root)
         return self
+
+    def _load(self, root: Path) -> None:
+        """Subclass hook: populate whatever in-memory state this artifact's
+        own methods need, once `bind` has confirmed the files are there. The
+        default is a no-op -- most artifacts have nothing to load."""
 
     @property
     @abstractmethod

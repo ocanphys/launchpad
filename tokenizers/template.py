@@ -82,31 +82,17 @@ class TemplateTokenizer(Artifact):
 
     # -- the trained state -------------------------------------------------
 
-    def bind(
-        self, root: Path | None = None, *, vocab: dict[int, str] | None = None
-    ) -> "TemplateTokenizer":
-        """Give this artifact the state to tokenize with -- read from the file
-        its job wrote (`bind(root)`), or handed straight over by that job
-        (`bind(vocab=...)`). Returns self, so it chains.
+    def _load(self, root: Path) -> None:
+        """Artifact._load's hook: read this artifact's own tokenizer.json --
+        the state encode()/decode() run on -- and check it against what this
+        artifact declares. The inverse of TemplateTokenizerJob.save. Override
+        this in your own family whenever "using" the artifact means holding
+        something in memory; `Artifact.at(folder)` and `bind(root)` call it
+        for you.
 
-        This overrides Artifact.bind, which by itself only checks the files are
-        there; override it whenever "using" your artifact means holding
-        something in memory. `Artifact.at(folder)` calls it for you.
-
-        object.__setattr__ because the dataclass is frozen, which is the point:
-        binding state must not change which artifact this is.
+        object.__setattr__ because the dataclass is frozen, which is the
+        point: this state can change without changing which artifact it is.
         """
-        if root is not None:
-            if vocab is not None:
-                raise TypeError("bind reads the file or takes vocab, not both")
-            vocab = self._read(Path(root))
-        elif vocab is None:
-            raise TypeError("bind needs a root to read from, or a vocab")
-        object.__setattr__(self, "_vocab", dict(vocab))
-        object.__setattr__(self, "_ids", {tok: idx for idx, tok in vocab.items()})
-        return self
-
-    def _read(self, root: Path) -> dict[int, str]:
         data = json.loads(self.paths(root)["tokenizer"].read_text())
         if tuple(data["special_tokens"]) != self.special_tokens:
             # the folder is keyed by a digest over special_tokens, so a file
@@ -116,22 +102,9 @@ class TemplateTokenizer(Artifact):
                 f"{tuple(data['special_tokens'])}, but {self.uid} declares "
                 f"{self.special_tokens}"
             )
-        return {int(idx): token for idx, token in data["vocab"].items()}
-
-    def save(self, root: Path) -> None:
-        """Write the bound state into the folder this artifact owns -- the last
-        thing the training job does, and the inverse of `bind(root)`."""
-        self._require("saving")
-        self.paths(Path(root))["tokenizer"].write_text(
-            json.dumps(
-                {
-                    "vocab_size": len(self.vocab),
-                    "special_tokens": list(self.special_tokens),
-                    "vocab": {str(idx): tok for idx, tok in self.vocab.items()},
-                },
-                indent=2,
-            )
-        )
+        vocab = {int(idx): token for idx, token in data["vocab"].items()}
+        object.__setattr__(self, "_vocab", vocab)
+        object.__setattr__(self, "_ids", {tok: idx for idx, tok in vocab.items()})
 
     @property
     def bound(self) -> bool:
@@ -141,7 +114,7 @@ class TemplateTokenizer(Artifact):
         if not self.bound:
             raise RuntimeError(
                 f"{self.uid} has no vocab yet -- bind(root) to read the "
-                f"tokenizer.json its job wrote, or bind(vocab=...), before {doing}"
+                f"tokenizer.json its job wrote before {doing}"
             )
 
     @property
@@ -233,10 +206,22 @@ class TemplateTokenizerJob(Job):
         vocab = {idx: token for idx, token in enumerate(reserved + learned)}
         # --------------------------------------------------------------------
 
-        # hand the trained state to the artifact that declared this run, and
-        # let it write itself into the folder it owns
-        self.artifact.bind(vocab=vocab).save(root)
+        self.save(root, vocab)
         worker.log.info(f"trained, vocab has {len(vocab)} entries")
+
+    def save(self, root: Path, vocab: dict[int, str]) -> None:
+        """Write vocab into the folder self.artifact owns -- the last thing
+        training does, and the inverse of TemplateTokenizer._load."""
+        self.artifact.paths(root)["tokenizer"].write_text(
+            json.dumps(
+                {
+                    "vocab_size": len(vocab),
+                    "special_tokens": list(self.special_tokens),
+                    "vocab": {str(idx): tok for idx, tok in vocab.items()},
+                },
+                indent=2,
+            )
+        )
 
 
 class TemplateTokenizeSourceJob(Job):
