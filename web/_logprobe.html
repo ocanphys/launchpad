@@ -44,36 +44,10 @@
      rows underneath. No bottom border of its own; the top border it does
      have separates it from the *previous* run's last artifact row. */
   tr.run-header td { font-weight: 600; opacity: .8; padding-top: .5rem; }
-  /* Indent only the first (artifact/type) column -- padding-left on every
-     td in the row would shove the call/heartbeat/run columns out of step
-     with the header and with every other row's fixed column widths. The
-     first column is widened in the colgroup below to give this room
-     without wrapping; that width comes out of the flexible path column
-     next to it, not out of the other fixed-width columns. */
-  tr.artifact-row td:first-child {
-    padding-left: 1.4rem;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  tr.artifact-row.grouped td:first-child { padding-left: 2.8rem; }
+  tr.artifact-row td { padding-left: 1.4rem; }
 
-  /* A type-group's summary row -- same indent level as an ungrouped
-     artifact row, since it stands in for one. Not bold and not dimmed --
-     it's a stand-in for a normal row, not a heading. Whole row is the
-     click target (see groupHeaderRow in render.js), so it gets the
-     pointer cursor, not just the arrow glyph. */
-  tr.group-header td { padding-left: 1.4rem; cursor: pointer; user-select: none; }
-  tr.group-header:hover { background: rgba(128,128,128,.06); }
-  .group-arrow { display: inline-block; width: 1rem; opacity: .6; }
-
-  .artifact-type, .group-type { font-size: 11px; }
-  /* Long paths truncate with an ellipsis instead of wrapping to a second
-     line -- a wrapped row grows taller and throws off every row's
-     vertical rhythm. Full path is still one hover away via the link's
-     title attribute. */
-  td.artifact-path {
-    opacity: .7; font-size: 11px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+  .artifact-type { font-size: 11px; }
+  td.artifact-path { word-break: break-all; opacity: .7; font-size: 11px; }
 
   .launch-btn {
     width: 2.4rem; padding: .15rem 0;
@@ -127,22 +101,6 @@
   .log-artifacts { opacity: .7; font-size: 11px; margin: .3rem 0 1rem; word-break: break-all; }
   .log-artifacts a { color: inherit; }
   .log-error { color: #cf222e; font-size: 11px; }
-
-  /* The manifest summary at the top of an artifact's drill-down page (see
-     artifactSummary in logview.js): type, own parameters, and links one
-     level down to whatever it depends on. */
-  .artifact-summary {
-    border: 1px solid rgba(128,128,128,.18); border-radius: 6px;
-    padding: .6rem .9rem; margin: .3rem 0 1rem;
-  }
-  .summary-type { font-weight: 600; font-size: 12px; margin-bottom: .3rem; }
-  .summary-params { display: flex; flex-direction: column; gap: .1rem; }
-  .summary-param { display: flex; gap: .5rem; font-size: 11px; }
-  .summary-key { opacity: .55; min-width: 8rem; }
-  .summary-value { word-break: break-word; }
-  .summary-deps { font-size: 11px; opacity: .8; margin: .5rem 0 0; word-break: break-all; }
-  .summary-deps a { color: inherit; }
-  .summary-deps a:hover { text-decoration: underline; }
 
   /* A CSS grid, not a <table> -- ts/job/level need to size to their own
      content (as tight as possible, never wrapping) while msg soaks up
@@ -202,7 +160,7 @@
 <div id="dashboard">
 <table>
   <colgroup>
-    <col style="width: 13.5rem">
+    <col style="width: 10.5rem">
     <col>
     <col style="width: 7.5rem">
     <col style="width: 9rem">
@@ -239,6 +197,22 @@
      Note: ES modules only load over http(s), not file:// — serve the folder
      (which your orchestrator already does, since the page fetches /state). -->
 <script type="module" src="app.js"></script>
+
+
+<script type="module">
+import { renderLogView } from "./logview.js";
+const entries = [
+  {ts:"2026-09-01T12:00:00.100Z", call_id:"fc-01H8XABCDEF1", artifact_path:"runs/toy/dataset", job:"DataSetJob", level:"INFO", message:"building training set from 2 source(s)"},
+  {ts:"2026-09-01T12:00:01.250Z", call_id:"fc-01H8XABCDEF1", artifact_path:"runs/toy/dataset", job:"DataSetJob", level:"DEBUG", message:"wrote 65754 tokens"},
+  {ts:"2026-09-01T12:00:02.900Z", call_id:"fc-01H8XABCDEF2", artifact_path:"runs/toy/pretraining", job:"PretrainJob", level:"WARNING", message:"step 500/2000 loss=6.0512"},
+  {ts:"2026-09-01T12:00:03.000Z", call_id:"fc-01H8XABCDEF2", artifact_path:"runs/toy/pretraining", job:"PretrainJob", level:"ERROR", message:"a much longer message that should wrap across the msg column and keep the other three columns tight against their own text"},
+];
+const opts = {scope:"run", id:"toy", callId:null, hiddenLevels:new Set(), onToggleLevel:()=>{}};
+const view = document.getElementById("logView");
+view.hidden = false;
+document.getElementById("dashboard").hidden = true;
+renderLogView(view, {entries}, opts);
+</script>
 
 </body>
 </html>

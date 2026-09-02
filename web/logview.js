@@ -15,6 +15,9 @@
 //     callId: string | null,         // set only for a call_id-filtered artifact view
 //     hiddenLevels: Set<string>,     // levels currently unchecked in the filter bar
 //     onToggleLevel: (level: string) => void,
+//     manifest: object | null,       // scope "artifact" only -- see main.py's
+//                                     // manifest_endpoint: {type, parameters,
+//                                     // depends_on, error?}
 //   }
 
 import { el } from "./el.js";
@@ -140,9 +143,61 @@ function ownerRunId(artifactPath) {
   return parts[0] === "runs" && parts[1] ? parts[1] : null;
 }
 
+// A parameter's value as one line: primitives print plain, anything richer
+// (a list, a nested config) prints as compact JSON -- enough to show what's
+// there without a full nested tree view. Dependency values never reach here
+// -- manifest_endpoint's own parameters/dependencies split already keeps
+// those out of `parameters`.
+function paramValue(value) {
+  if (value === null || typeof value !== "object") return String(value);
+  return JSON.stringify(value);
+}
+
+// The artifact drill-down summary: type, own parameters, and one link per
+// direct dependency. main.py's artifact_manifest_summary already resolved
+// each dependency to its own artifact_path -- this links there rather than
+// inlining that dependency's manifest, so drilling further is a click away
+// instead of the whole tree being dumped on one page. Nothing to show when
+// the artifact hasn't been built yet (manifest.error is set) or opts.manifest
+// hasn't loaded (still null on the very first render).
+function artifactSummary(manifest) {
+  if (!manifest || manifest.error) return null;
+
+  const params = Object.entries(manifest.parameters || {});
+  const deps = manifest.depends_on || [];
+
+  return el("div", { class: "artifact-summary" },
+    el("div", { class: "summary-type", text: manifest.type }),
+    params.length
+      ? el("div", { class: "summary-params" },
+          ...params.map(([key, value]) =>
+            el("div", { class: "summary-param" },
+              el("span", { class: "summary-key", text: key }),
+              el("span", { class: "summary-value", text: paramValue(value) }),
+            ),
+          ),
+        )
+      : null,
+    deps.length
+      ? el("p", { class: "summary-deps" },
+          "depends on: ",
+          ...deps.flatMap((dep, i) => [
+            i > 0 ? ", " : null,
+            el("a", { href: "#/artifact/" + dep.artifact_path, title: dep.type, text: dep.artifact_path }),
+          ]),
+        )
+      : null,
+  );
+}
+
 export function renderLogView(container, payload, opts) {
   const entries = payload.entries || [];
   const nodes = [el("p", { class: "log-back" }, el("a", { href: "#/", text: "← dashboard" }))];
+
+  if (opts.scope === "artifact") {
+    const summary = artifactSummary(opts.manifest);
+    if (summary) nodes.push(summary);
+  }
 
   if (payload.error) {
     nodes.push(el("p", { class: "log-error", text: payload.error }));

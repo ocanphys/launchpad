@@ -42,6 +42,28 @@ function isPending(artifactPath) {
   return ts !== undefined && Date.now() - ts < PENDING_MS;
 }
 
+// Which per-run type-groups (see render.js's runRow) are expanded. draw()
+// does a full rebuild on every poll, so this has to live here rather than
+// as local state on a collapsible element -- otherwise a group would snap
+// shut every EVERY_MS. Keyed by run id + type (a job class name, so no
+// separator collision risk worth guarding against).
+const openGroups = new Set();
+
+function groupKey(runId, type) {
+  return runId + " " + type;
+}
+
+function isGroupOpen(runId, type) {
+  return openGroups.has(groupKey(runId, type));
+}
+
+function toggleGroup(runId, type) {
+  const key = groupKey(runId, type);
+  if (openGroups.has(key)) openGroups.delete(key);
+  else openGroups.add(key);
+  redraw();
+}
+
 function setConn(text, cls) {
   connEl.textContent = text;
   connEl.className = cls;
@@ -74,7 +96,7 @@ async function launchJob(artifactPath) {
 }
 
 // Injected into every row so render.js never sees app state directly.
-const ctx = { isPending, onLaunch: launchJob };
+const ctx = { isPending, onLaunch: launchJob, isGroupOpen, onToggleGroup: toggleGroup };
 
 // --- draw -------------------------------------------------------------------
 
@@ -168,6 +190,12 @@ function redrawLogView() {
 // "run" and "artifact" differ only in which URL and which id renderLogView
 // gets, never in how the fetch/error/render sequence goes. callId narrows an
 // "artifact" fetch server-side to just that one call's log.
+//
+// An "artifact" scope also fetches its manifest summary (type, parameters,
+// dependency links -- see main.py's manifest_endpoint) to show above the
+// log table. That fetch gets its own try/catch: a manifest hiccup (or an
+// artifact that's declared but not built yet, so it 404s-as-error) should
+// never blank out logs that did load.
 async function pollLogView(scope, id, callId) {
   try {
     let url = scope === "run" ? `logs/run/${id}` : `logs/artifact/${id}`;
@@ -175,7 +203,18 @@ async function pollLogView(scope, id, callId) {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     lastLogPayload = await res.json();
-    lastLogOpts = { scope, id, callId: callId || null, hiddenLevels, onToggleLevel: toggleLevel };
+
+    let manifest = null;
+    if (scope === "artifact") {
+      try {
+        const mRes = await fetch(`manifest/${id}`, { cache: "no-store" });
+        manifest = mRes.ok ? await mRes.json() : null;
+      } catch {
+        manifest = null;
+      }
+    }
+
+    lastLogOpts = { scope, id, callId: callId || null, hiddenLevels, onToggleLevel: toggleLevel, manifest };
     renderLogView(logViewEl, lastLogPayload, lastLogOpts);
     setConn("live", "ok");
   } catch (err) {
