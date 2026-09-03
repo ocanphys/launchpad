@@ -36,6 +36,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -47,7 +48,7 @@ from typing import Self, Union, get_args, get_origin, get_type_hints
 sys.path.append(
     str(Path(__file__).resolve().parents[1])
 )  # config.py is at the repo root
-from config import get_git_commit
+from config import LAB_COMMIT_ENV, STORAGE, get_git_commit
 
 MANIFEST = "manifest.json"
 
@@ -58,8 +59,16 @@ ARTIFACTS: dict[str, type[Artifact]] = {}  # class name -> class, to read manife
 def _head() -> str:
     """The commit every artifact built in this process is stamped with. Read
     once, so a session can't stamp two commits onto one tree -- restart the
-    kernel to pick up new work."""
-    return get_git_commit()
+    kernel to pick up new work.
+
+    In the lab container, LAB_COMMIT_ENV is already set -- baked in by
+    main.py's lab_image from a `get_git_commit()` call made locally, where a
+    real checkout exists (see config.py) -- so this reads that instead of
+    shelling out to a `git` binary the container doesn't have, against a
+    `.git` directory that was never shipped there either.
+    """
+    override = os.environ.get(LAB_COMMIT_ENV)
+    return override if override else get_git_commit()
 
 
 def _digest(*parts: object) -> str:
@@ -275,11 +284,19 @@ class Artifact(ABC):
         root = Path(*path.parts[: -len(relpath)])
         return artifact.bind(root) if artifact.exists(root) else artifact
 
-    def bind(self, root: Path) -> Self:
+    def bind(self, root: Path | str | None = None) -> Self:
         """A copy of this artifact with whatever its files hold loaded onto
         it, ready to be used rather than just named. This object -- the one
         `bind` was called on -- is left untouched; nothing about it changes,
         and it never becomes usable just because something else bound it.
+
+        `root` defaults to `Path(STORAGE)` -- the volume's own mount point --
+        so `artifact.bind()` works unmodified wherever that mount is real:
+        inside a worker or lab container. It is not a way to reach the volume
+        from a laptop; there is no remote fetch path for `bind`, only for
+        `declare` (see `Artifact.declare`). Called from anywhere the mount
+        doesn't exist, the default just produces a FileNotFoundError like any
+        other missing root.
 
         Every artifact gets the same check here: an artifact whose files
         aren't all there yet -- declared, maybe, but not built -- has nothing
@@ -294,7 +311,7 @@ class Artifact(ABC):
         `bound = tokenizer.bind(root)` followed by using `bound`, not
         `tokenizer`, from then on.
         """
-        root = Path(root)
+        root = Path(root) if root is not None else Path(STORAGE)
         missing = [
             str(path) for path in self.completion_paths(root) if not path.exists()
         ]
@@ -308,6 +325,41 @@ class Artifact(ABC):
         """Subclass hook: populate whatever in-memory state this artifact's
         own methods need, once `bind` has confirmed the files are there. The
         default is a no-op -- most artifacts have nothing to load."""
+
+    def declare(
+        self,
+        *,
+        write: bool = False,
+        strict_commit: bool = False,
+        run_id: str | None = None,
+        cell: str | None = None,
+    ) -> None:
+        """Check (or, with write=True, declare) this artifact and its whole
+        dependency tree against the volume, via the deployed `declare`
+        function -- the one thing a client-side notebook can reach on the
+        volume, since `Path(STORAGE)` and `volume.reload()`/`commit()` only
+        work inside a Modal container (see main.declare). Prints the report;
+        a cell calling this doesn't need to print() it too.
+
+        pretraining.declare()             # preview, writes nothing
+        pretraining.declare(write=True)   # same report, manifests written
+
+        run_id/cell are optional and additive: pass both (typically run_id
+        and the cell that defined this run, via In[-1]) and a successful
+        write also drops a starter notebook at runs/{run_id}/notebook.ipynb
+        -- lab imports plus that cell -- left alone if one's already there.
+        Omit run_id and this is exactly the two lines above: no notebook.
+        """
+        import modal
+
+        from config import APP_NAME
+
+        declare_fn = modal.Function.from_name(APP_NAME, "declare")
+        print(
+            declare_fn.remote(
+                self, write=write, strict_commit=strict_commit, run_id=run_id, cell=cell
+            )
+        )
 
     @property
     @abstractmethod

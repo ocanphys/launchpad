@@ -270,6 +270,16 @@ export function runRow(id, run, ctx) {
   const header = el("tr", { class: "run-header" },
     el("td", { colspan: 5 },
       el("a", { class: "run-link", href: "#/run/" + id, text: id }),
+      run.notebook
+        ? el("a", {
+            class: "lab-run-link",
+            href: "/lab/run/" + encodeURIComponent(id),
+            target: "_blank",
+            rel: "noopener",
+            title: "open in lab",
+            text: "lab ↗",
+          })
+        : null,
     ),
   );
   if (Object.keys(artifacts).length === 0) {

@@ -6,7 +6,7 @@ from dag.job import Job
 from datasets.artifact import DataSet
 
 if TYPE_CHECKING:
-    from runtime import Worker
+    from system.runtime import Worker
 
 
 class DataSetJob(Job):

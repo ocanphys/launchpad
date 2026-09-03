@@ -1,4 +1,8 @@
+import json
+import os
+import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import modal
@@ -9,25 +13,30 @@ from config import (
     CONTAINER_LIFETIME,
     FLATLINE,
     HEARTBEAT_SECONDS,
+    LAB_COMMIT_ENV,
+    LAB_IDLE_SECONDS,
+    LAB_PORT,
+    LAB_SECRET,
     STORAGE,
     VOLUME_NAME,
+    get_git_commit,
 )
 from dag.artifact import MANIFEST, Artifact, Resources
-from lease_protocol import beats, leases, new_grant
-from logs import LOG_FILENAME, read_call_logs, read_log
-from runtime import initialize_worker
+from system.lease_protocol import beats, leases, new_grant
+from system.logs import LOG_FILENAME, read_call_logs, read_log
+from system.runtime import initialize_worker
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 base_image = modal.Image.debian_slim(python_version="3.12").pip_install("regex", "tqdm")
 
-# The modules every call needs whatever it runs: config, its logger, its
-# lease, the scope that wires those two together. No third-party
-# dependencies of their own -- add_local_python_source copies these .py
-# files into an image, it doesn't install what they import, and none of
-# them import anything outside the stdlib.
-CALL_SOURCE = ("config", "logs", "lease_protocol", "runtime")
+# The modules every call needs whatever it runs: config, and the system
+# package (its logger, its lease, the scope that wires those two together).
+# No third-party dependencies of their own -- add_local_python_source copies
+# these .py files into an image, it doesn't install what they import, and
+# none of them import anything outside the stdlib.
+CALL_SOURCE = ("config", "system")
 
 # The artifact/job model, one package per family (see dag/spec.md): "dag"
 # is the framework (Artifact, Job, resolve, visualizer), the rest are its
@@ -71,10 +80,11 @@ def is_active(grant: dict | None, beat: dict | None, now: float) -> bool:
 #
 # Both carry all of CALL_SOURCE even so, and not just the modules each one's
 # own function reads. A container starts by importing the module its function
-# is defined in -- this one -- and this module imports `runtime`, which
-# imports `logs`, whether or not the function actually being called touches
-# them. Trimming an image to only what its own function reads gets a crash
-# loop, not a smaller image (see git history if that stops being obvious).
+# is defined in -- this one -- and this module imports `system.runtime`,
+# which imports `system.logs`, whether or not the function actually being
+# called touches them. Trimming an image to only what its own function reads
+# gets a crash loop, not a smaller image (see git history if that stops
+# being obvious).
 #
 # Both also carry DAG_SOURCE alongside CALL_SOURCE, not folded into it: each
 # entry there is its own package (dag/__init__.py, sources/__init__.py, ...),
@@ -108,6 +118,28 @@ web_image = (
 # resolves and inspects), and has no reason to carry it.
 worker_image = base_image.pip_install("numpy").add_local_python_source(
     *CALL_SOURCE, *DAG_SOURCE
+)
+
+# The lab: a JupyterLab server with the volume mounted, so a notebook can
+# hold a real artifact rather than a copy of one pulled down by hand.
+#
+# It bakes in this deploy's commit under LAB_COMMIT_ENV: get_git_commit()
+# runs right here, in this process, on whatever machine is running `modal
+# deploy` -- a real checkout, exactly the context that function assumes.
+# `modal.is_local()` gates the call because this whole module -- lab_image
+# included -- is re-imported inside every container too, to hydrate whatever
+# function it's about to run; there, `is_local()` is False and PROJECT_ROOT
+# has neither `git` nor a `.git` directory (add_local_python_source ships
+# only the named source files), so calling it unguarded crashes container
+# startup. The remote re-evaluation's result is discarded either way -- the
+# image was already built and selected before the container booted -- so a
+# placeholder there is harmless; dag.artifact._head() reads the real value
+# baked in by the local build, off this env var, instead of shelling out
+# itself.
+lab_image = (
+    base_image.pip_install("numpy", "torch", "einops", "matplotlib", "jupyterlab")
+    .env({LAB_COMMIT_ENV: get_git_commit() if modal.is_local() else "unknown"})
+    .add_local_python_source(*CALL_SOURCE, *DAG_SOURCE, "lab")
 )
 
 
@@ -257,7 +289,10 @@ def read_state() -> dict:
         except Exception as exc:
             problem_runs[run_id] = {"error": str(exc)}
             continue
-        runs[run_id] = {"artifacts": {a.artifact_path.as_posix(): state_for(a) for a in declared}}
+        runs[run_id] = {
+            "artifacts": {a.artifact_path.as_posix(): state_for(a) for a in declared},
+            "notebook": (runs_root / run_id / "notebook.ipynb").exists(),
+        }
 
     sources = {
         a.artifact_path.as_posix(): state_for(a)
@@ -339,7 +374,7 @@ def artifact_manifest_summary(artifact_path: str, root: Path) -> dict | None:
 def _stamp(entries: list[dict], artifact_path: str, job_name: str | None) -> list[dict]:
     """Tag every entry with the artifact_path and job name it belongs to --
     `read_call_logs`/`read_log` have no notion of either, they only know
-    call_ids and log files (see logs.py)."""
+    call_ids and log files (see system/logs.py)."""
     for entry in entries:
         entry["artifact_path"] = artifact_path
         entry["job"] = job_name
@@ -377,6 +412,9 @@ def run_log_entries(run_id: str, root: Path) -> list[dict]:
     image=web_image,
     volumes={STORAGE: volume},
     max_containers=1,
+    # Only for the lab's token, so `/lab` can hand it straight to Jupyter --
+    # nothing else in here reads a secret.
+    secrets=[modal.Secret.from_name(LAB_SECRET)],
 )
 @modal.asgi_app()
 def leasebook():
@@ -388,6 +426,7 @@ def leasebook():
     Served together, `state` is just a relative path, and no CORS question arises.
     """
     from fastapi import FastAPI
+    from fastapi.responses import RedirectResponse
     from fastapi.staticfiles import StaticFiles
 
     api = FastAPI()
@@ -399,6 +438,32 @@ def leasebook():
     @api.get("/state")
     def state() -> dict:
         return read_state()
+
+    # The header's "lab" link. A redirect rather than a URL the page fetches:
+    # the lab lives on its own subdomain, and the token that gets it past the
+    # login screen is this container's to hold, not something to hand to the
+    # browser as data and then hope it isn't logged. app.js never learns either
+    # -- the anchor in index.html is a plain relative href.
+    @api.get("/lab")
+    def lab_redirect() -> RedirectResponse:
+        url = jupyter.get_web_url()
+        token = os.environ.get("JUPYTER_TOKEN")
+        return RedirectResponse(f"{url}/lab?token={token}" if token else url)
+
+    # Same redirect, but straight to one run's own notebook rather than the
+    # lab's root -- the "lab" icon per run in the dashboard's runs view.
+    # :path even though a run_id has no /s of its own, same reasoning as
+    # run_logs_endpoint below: never trust a URL segment's shape to match the
+    # shape of the thing it names. An invalid run_id falls back to plain
+    # /lab rather than erroring -- still useful, just not deep-linked.
+    @api.get("/lab/run/{run_id:path}")
+    def lab_run_redirect(run_id: str) -> RedirectResponse:
+        if not safe_relpath(run_id):
+            return RedirectResponse("/lab")
+        url = jupyter.get_web_url()
+        token = os.environ.get("JUPYTER_TOKEN")
+        target = f"{url}/lab/tree/runs/{run_id}/notebook.ipynb"
+        return RedirectResponse(f"{target}?token={token}" if token else target)
 
     # :path, not a plain path segment -- an artifact_path contains its own
     # /s (runs/my-run/pretraining), which a plain segment can't match.
@@ -468,21 +533,72 @@ def leasebook():
 
 
 @app.function(image=worker_image, volumes={STORAGE: volume})
-def declare(artifact: Artifact, *, write: bool = False, strict_commit: bool = False) -> str:
+def declare(
+    artifact: Artifact,
+    *,
+    write: bool = False,
+    strict_commit: bool = False,
+    run_id: str | None = None,
+    cell: str | None = None,
+) -> str:
     """Check (or, with write=True, declare) `artifact` and its full
     dependency tree against the volume -- the notebook equivalent of
     `Declaration(artifact, root).check()` / `.write()`, run where `root` can
     be the volume itself rather than a local mirror of it. Returns the
     human-readable report either way.
+
+    When write succeeds and run_id is given, also drops a starter notebook
+    at runs/{run_id}/notebook.ipynb -- lab imports, then cell (typically the
+    cell that defined this run) -- left alone if one's already there (see
+    _write_run_notebook). Omit run_id and this is exactly today's declare:
+    no notebook, no side effect beyond the declaration itself.
     """
     volume.reload()
     declaration = dag_resolve.Declaration(artifact, Path(STORAGE), strict_commit)
     if write:
         declaration.write()
+        if run_id:  # the notebook step is opt-in: no run_id, no notebook, ever
+            _write_run_notebook(run_id, cell or "")
         volume.commit()
     else:
         declaration.check()
     return str(declaration)
+
+
+def _write_run_notebook(run_id: str, cell: str) -> None:
+    """Starter notebook at runs/{run_id}/notebook.ipynb, the first time this
+    run declares successfully -- lab imports first, then cell, so opening it
+    in the lab picks up right where the declaring notebook left off.
+    Exclusive create, same as Declaration.write()'s manifests: left alone on
+    every later call for the same run_id, since by then it may already be
+    the thing someone's editing.
+    """
+    path = Path(STORAGE) / "runs" / run_id / "notebook.ipynb"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    source = "import lab\nfrom lab import worker\nlab.refresh()\n\n" + cell
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "id": uuid.uuid4().hex[:8],
+                "metadata": {},
+                "outputs": [],
+                "source": source.splitlines(keepends=True),
+            }
+        ],
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    try:
+        with path.open("x") as handle:
+            handle.write(json.dumps(notebook, indent=1))
+    except FileExistsError:
+        pass  # already there -- left alone, not resynced (see docstring)
 
 
 @app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
@@ -522,6 +638,62 @@ def declared_artifact(artifact_path: str) -> tuple[Artifact, dict] | None:
         return None
     artifact = Artifact.load(manifest_path)
     return artifact, artifact_state(artifact, Path(STORAGE))
+
+
+@app.function(
+    image=lab_image,
+    volumes={STORAGE: volume},
+    secrets=[modal.Secret.from_name(LAB_SECRET)],
+    # One lab, so one filesystem view: two containers would each hold their own
+    # uncommitted copy of the same notebook and the later commit would win.
+    max_containers=1,
+    timeout=CONTAINER_LIFETIME,
+    scaledown_window=LAB_IDLE_SECONDS,
+)
+# A notebook UI is a browser holding a websocket open and firing many requests
+# in parallel -- without this, each one is a separate input and max_containers=1
+# serializes the whole session into a queue.
+@modal.concurrent(max_inputs=100)
+@modal.web_server(LAB_PORT, startup_timeout=120)
+def jupyter():
+    """JupyterLab, rooted at the volume.
+
+    Named `jupyter`, not `lab`: `lab` is the module a notebook imports (lab.py)
+    and `/lab` is the dashboard route that redirects here, and a Modal function
+    object called `lab` in this module's namespace would shadow the first and
+    read as the second.
+
+    `root_dir` is the volume itself, not a notebooks folder -- pointing at an
+    artifact path is the whole point, and the file browser is where you find
+    out what the paths are (`runs/`, `sources/`, `tokenizers/`).
+
+    No `--IdentityProvider.token`: jupyter_server reads JUPYTER_TOKEN out of
+    the environment, which LAB_SECRET puts there, and keeping it out of the
+    command line keeps it out of every `ps` and traceback.
+
+    No explicit `volume.commit()` here or on a background clock: every Volume
+    mount already sets `allow_background_commits=True`, so the platform
+    flushes writes on its own, and JupyterLab's own autosave writes a
+    notebook to disk on its own clock too. Unlike `run_job`, nothing is
+    waiting on a precise moment to see the lab's writes, so background
+    commits are enough -- no reason to force one.
+    """
+    subprocess.Popen(
+        [
+            "jupyter",
+            "lab",
+            "--ip=0.0.0.0",
+            f"--port={LAB_PORT}",
+            "--no-browser",
+            "--allow-root",
+            f"--ServerApp.root_dir={STORAGE}",
+            # Modal terminates TLS and forwards to this container under a
+            # different host than the browser typed, which jupyter_server reads
+            # as a remote/cross-origin access and blocks by default.
+            "--ServerApp.allow_remote_access=True",
+            "--ServerApp.allow_origin=*",
+        ]
+    )
 
 
 def resource_options(resources: Resources) -> dict:

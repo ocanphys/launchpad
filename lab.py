@@ -6,9 +6,10 @@ because it is the whole notebook-facing API, and bringing the lab back is
 re-adding the image and the web_server function, not rewriting this.
 
 Everything here needs the volume mounted. A notebook on your laptop can only
-reach it through `modal.Function.from_name(APP_NAME, "declare").remote(...)`
--- one function, returning one string, and nothing else about the volume is
-reachable at all: `Path(STORAGE)` is not a mount out there, and
+reach it through `artifact.declare(...)` (dag.artifact.Artifact.declare,
+itself a thin wrapper over `modal.Function.from_name(APP_NAME,
+"declare").remote(...)`) -- one function, returning one string, and nothing
+else about the volume is reachable at all: `Path(STORAGE)` is not a mount out there, and
 `volume.reload()` refuses to run off a container (see
 `main.declared_artifact`'s docstring). Where `ROOT` *is* the volume, the two
 ways of getting hold of an artifact both work directly:
@@ -27,6 +28,9 @@ writing; if a behaviour is surprising, it belongs to `dag.resolve` or
 `dag.artifact`, not to this module.
 """
 
+import logging
+import os
+import tempfile
 from pathlib import Path
 
 import dag.resolve as dag_resolve
@@ -38,9 +42,35 @@ import dag.resolve as dag_resolve
 from config import LAB_NOTEBOOKS, STORAGE, VOLUME_NAME
 from dag.artifact import MANIFEST, Artifact
 from dag.visualizer import SVG, visualize
+from system.runtime import Worker
 
 ROOT = Path(STORAGE)
 NOTEBOOKS = ROOT / LAB_NOTEBOOKS
+
+# A fake Worker for running a job by hand from a lab cell --
+# job.run(root, worker) -- instead of through main.run_job, which is the only
+# other thing that ever builds a real one. No lease, no heartbeat:
+# confirm_lease is a no-op, since nothing else is racing to hold an
+# artifact_path from inside a notebook. No job.run() implementation actually
+# reads artifact_path/call_id today (only main.run_job does, around the
+# call), so these are placeholders, not identity.
+#
+# log goes to the console only, not to a file under ROOT -- TODO: wire this
+# up to system.logs.call_logger once something needs to read a lab-run job's
+# log back. That opens a real file on the volume, which would need routing
+# through _outside_volume the same way refresh/publish are, since an open
+# log file blocks reload exactly like an open cwd does.
+_log = logging.getLogger("lab")
+_log.setLevel(logging.INFO)
+if not _log.handlers:  # module-level, so this only ever runs once per process
+    _log.addHandler(logging.StreamHandler())
+
+worker = Worker(
+    artifact_path="lab",
+    call_id="lab",
+    log=_log,
+    confirm_lease=lambda *_, **__: None,
+)
 
 
 def _volume():
@@ -54,6 +84,23 @@ def _volume():
     return modal.Volume.from_name(VOLUME_NAME)
 
 
+def _outside_volume(op):
+    """Run a Modal volume operation with cwd stepped outside the mount first.
+
+    Modal counts an open cwd under the volume the same as an open file, and
+    every notebook here starts rooted under ROOT (`jupyter`'s `root_dir`) --
+    so reload (and commit, which reloads internally to pick up what it just
+    committed) would otherwise fail from essentially every real cell with
+    "there are open files preventing the operation: cwd is inside volume".
+    """
+    cwd = os.getcwd()
+    os.chdir(tempfile.gettempdir())
+    try:
+        return op()
+    finally:
+        os.chdir(cwd)
+
+
 def refresh() -> None:
     """Pull in whatever other containers have committed since this one booted.
 
@@ -62,7 +109,7 @@ def refresh() -> None:
     explicit call in a cell than a background thread that fails half the time
     and yanks the filesystem the other half.
     """
-    _volume().reload()
+    _outside_volume(_volume().reload)
 
 
 def publish() -> None:
@@ -72,7 +119,7 @@ def publish() -> None:
     ROOT by hand -- until it lands, the writes exist only on this container's
     own disk, same as a job's do before `initialize_worker` commits.
     """
-    _volume().commit()
+    _outside_volume(_volume().commit)
 
 
 def ls(prefix: str = "") -> list[str]:

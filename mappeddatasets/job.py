@@ -5,7 +5,7 @@ from dag.job import Job
 from mappeddatasets.artifact import MappedDataSet
 
 if TYPE_CHECKING:
-    from runtime import Worker
+    from system.runtime import Worker
 
 
 class MappedDataSetJob(Job):

@@ -35,7 +35,7 @@ from dag.job import Job
 from sources.artifact import Source
 
 if TYPE_CHECKING:
-    from runtime import Worker
+    from system.runtime import Worker
 
 # lifting pretokenizer regex from tiktoken
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -131,7 +131,7 @@ class Tokenizer(Artifact):
             if self.vocab_size > 1000
             else str(self.vocab_size)
         )
-        digest = _digest(self.special_tokens, sorted(s.uid for s in self.sources))
+        digest = _digest(self.vocab_size, self.special_tokens, sorted(s.uid for s in self.sources))
         return f"bpe-{vocab_label}-{digest}"
 
     @property
@@ -378,7 +378,7 @@ class TokenizerJob(Job):
         self.special_tokens = list(artifact.special_tokens)
         self.vocab_size = artifact.vocab_size
 
-    def run(self, root: Path, worker: "Worker") -> None:
+    def run(self, root: Path , worker: "Worker") -> None:
         worker.log.info(
             f"training BPE tokenizer (vocab_size={self.vocab_size}) "
             f"on {len(self.sources)} source(s)"

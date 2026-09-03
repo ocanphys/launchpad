@@ -45,7 +45,7 @@ from dag.job import Job
 from sources.artifact import Source
 
 if TYPE_CHECKING:
-    from runtime import Worker
+    from system.runtime import Worker
 
 UNKNOWN = "<unk>"  # this template's own choice; your algorithm may not need one
 

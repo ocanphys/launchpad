@@ -42,15 +42,23 @@ own artifacts and a dataset's dependency closure are both grouped by
 artifact type the same way. No build step, no framework. Full writeup:
 [docs/UI.md](docs/UI.md).
 
-## The lab (removed for now)
+## The lab
 
-There was a `jupyter` function serving JupyterLab with the volume mounted,
-linked from the dashboard's header. It is gone: no `lab_image`, no `/lab`
-route, no `launchpad-lab` secret, and nothing seeds or commits
-`/storage/notebooks` any more. Notebooks already saved there are untouched.
+A `jupyter` function serves JupyterLab with the volume mounted, in its own
+container (own image, own idle-scaledown) separate from `leasebook`. The
+dashboard's header links to `/lab`, which redirects there with the auth
+token already attached. `lab_image` carries every dependency
+`pyproject.toml` declares, not just what today's registered jobs need, so a
+notebook running there can import and run anything in the repo (`torch`
+included), not only what `worker_image` is trimmed to.
 
-What survives is [lab.py](lab.py), the API those notebooks import -- a thin
-wrapper over `dag.resolve` that works anywhere `lab.ROOT` is a real mount:
+Requires a one-time secret, per Modal workspace/environment:
+```
+modal secret create launchpad-lab JUPYTER_TOKEN=$(openssl rand -hex 24)
+```
+
+The API those notebooks import is [lab.py](lab.py) -- a thin wrapper over
+`dag.resolve` that works anywhere `lab.ROOT` is a real mount:
 
 ```python
 import lab
@@ -60,8 +68,9 @@ Tokenizer(vocab_size=3000, ...).bind(lab.ROOT)    # by parameters, equal artifac
 lab.check(pretraining); lab.declare(pretraining)  # local, not a round trip
 ```
 
-Bringing the lab back means re-adding the image and the `web_server`
-function, plus the secret; nothing in `lab.py` has to change.
+Nothing here forces a `volume.commit()`: every Volume mount sets
+`allow_background_commits=True`, so the platform flushes the lab's writes on
+its own, and JupyterLab's own autosave does the rest.
 
 ## Read/write traffic
 

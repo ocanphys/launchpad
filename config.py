@@ -5,10 +5,22 @@ CONTAINER_LIFETIME = 3600  # no container lives beyond this many seconds.
 HEARTBEAT_SECONDS = 1
 FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
 
-# Where a notebook lives on the volume, relative to STORAGE. The Jupyter
-# container that used to serve them is removed for now; lab.py still names
-# this folder, and the notebooks already on the volume are still there.
+# Where a notebook lives on the volume, relative to STORAGE. lab.py names
+# this folder; the `jupyter` function (main.py) roots its file browser one
+# level up, at STORAGE itself, so this is a landmark inside it, not a mount
+# point of its own.
 LAB_NOTEBOOKS = "notebooks"
+
+LAB_PORT = 8888
+LAB_SECRET = "launchpad-lab"  # supplies JUPYTER_TOKEN to both the lab and the dashboard
+LAB_IDLE_SECONDS = 900  # scale the lab container down after this much idle
+
+# The lab container has no `git` binary and no `.git` directory -- only the
+# named source files are shipped there, not the repo -- so it can't answer
+# `get_git_commit()` itself. main.py calls get_git_commit() once, locally,
+# while building lab_image, and bakes the result in under this env var name;
+# dag.artifact._head() reads it instead of shelling out when it's set.
+LAB_COMMIT_ENV = "LAUNCHPAD_LAB_COMMIT"
 
 import subprocess
 from pathlib import Path

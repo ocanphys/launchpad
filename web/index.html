@@ -29,6 +29,17 @@
   #viewNav a.active { opacity: 1; font-weight: 600; }
   #viewNav .nav-sep { opacity: .3; margin: 0 .3rem; }
 
+  /* Leaves the SPA entirely (a redirect to the lab's own subdomain), so it
+     sits outside #viewNav and takes no part in app.js's data-view
+     route-highlighting. */
+  #labLink { font-size: 12px; color: inherit; opacity: .55; text-decoration: none; }
+  #labLink:hover { opacity: .85; }
+
+  /* Per-run lab-icon link (runRow, web/render.js) -- same treatment as
+     #labLink above, scoped as a class since it repeats once per run. */
+  a.lab-run-link { font-size: 12px; color: inherit; opacity: .55; text-decoration: none; margin-left: 8px; }
+  a.lab-run-link:hover { opacity: .85; }
+
   #conn { font-size: 11px; padding: .1rem .55rem; border: 1px solid; border-radius: 999px; white-space: nowrap; }
   .ok  { color: #1a7f37; border-color: #1a7f37; }
   .bad { color: #cf222e; border-color: #cf222e; }
@@ -224,6 +235,7 @@
     <span class="nav-sep">|</span>
     <a href="#/sources" data-view="sources">sources</a>
   </nav>
+  <a id="labLink" href="/lab" target="_blank" rel="noopener">lab ↗</a>
   <span id="conn" class="bad">loading</span>
 </header>
 <div id="meta"></div>

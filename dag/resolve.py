@@ -325,6 +325,11 @@ class Declaration:  # one would dump the whole plan into a notebook
                     raise ValueError(f"{path} was declared as something else")
                 continue
             written.append(path)
+        # self.rows above is a pre-write snapshot -- every row just written
+        # still reads "new" on it. Re-check so the report (and .rows/.ok for
+        # anything reading the object directly afterward) reflects what's
+        # actually on disk now, not what was true before this call started.
+        self.check()
         return written
 
     def __str__(self) -> str:

@@ -7,7 +7,7 @@ from dag.job import Job
 from models.mock.artifact import Pretraining
 
 if TYPE_CHECKING:
-    from runtime import Worker
+    from system.runtime import Worker
 
 
 class PretrainJob(Job):

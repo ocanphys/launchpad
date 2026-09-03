@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING
 from dag.artifact import Artifact
 
 if TYPE_CHECKING:
-    # Type-only: `runtime.Worker` pulls in `modal`, and the artifact/job
+    # Type-only: `system.runtime.Worker` pulls in `modal`, and the artifact/job
     # modules otherwise have no third-party imports of their own (see
     # main.py's CALL_SOURCE comment) -- a real import here would change that
     # for every notebook that imports a job module just to plan or inspect a
     # run.
-    from runtime import Worker
+    from system.runtime import Worker
 
 REGISTRY: dict[type[Artifact], type["Job"]] = {}  # artifact type -> its producer
 
@@ -62,7 +62,7 @@ class Job(ABC):
         """Do the work, writing self.artifact's files under root.
 
         `worker` is what main.py's run_job holds for the call this job is
-        running under (see runtime.Worker) -- its `.log` is the file that
+        running under (see system.runtime.Worker) -- its `.log` is the file that
         call's whole story lands in, boot/heartbeat/done lines included, so
         a job's own narration belongs there too, not in a print() logs.py
         already won't capture.

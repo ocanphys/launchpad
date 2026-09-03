@@ -1,6 +1,6 @@
 """One call, one scope: a logger, a lease, and a commit that had to be earned.
 
-`logs.py` gives a call its own logger; `lease_protocol.py` tells a call whether it
+`system.logs` gives a call its own logger; `system.lease_protocol` tells a call whether it
 still owns the run. Neither is useful to a job on its own, and every job would
 otherwise wire them together the same way -- and get the ordering wrong in the
 same two places:
@@ -34,8 +34,8 @@ from pathlib import Path
 import modal
 
 from config import HEARTBEAT_SECONDS, STORAGE
-from lease_protocol import Lease, LeaseLost, beats
-from logs import LOG_FILENAME, call_logger, release_call_logger
+from system.lease_protocol import Lease, LeaseLost, beats
+from system.logs import LOG_FILENAME, call_logger, release_call_logger
 
 
 @dataclass(frozen=True)

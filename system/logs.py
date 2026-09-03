@@ -48,7 +48,7 @@ _MARK = "_call_handler"
 
 # The name every call's log file is written under, inside its own
 # `{artifact_path}/logs/{call_id}/` folder -- named here so the reading side
-# (`read_call_logs`) and the writing side (`runtime.initialize_worker`) can't
+# (`read_call_logs`) and the writing side (`system.runtime.initialize_worker`) can't
 # drift apart on what the file is called.
 LOG_FILENAME = "job.log"
 
@@ -201,7 +201,7 @@ def read_call_logs(logs_dir: Path) -> list[dict]:
     single timeline sorted on the one column every entry shares.
 
     One artifact's `logs/` holds one subfolder per call_id that has ever held
-    its lease (see `runtime.initialize_worker`) -- this is that artifact's
+    its lease (see `system.runtime.initialize_worker`) -- this is that artifact's
     whole history, superseded attempts included, not just its current call.
     """
     if not logs_dir.exists():
