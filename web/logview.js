@@ -6,8 +6,8 @@
 // no app state — app.js fetches and calls renderLogView(container, payload,
 // opts), which replaces the container's children with what comes back.
 // Level-filter selection is UI state, not data, so it lives in app.js too
-// (same ctx-injection pattern render.js uses for isPending/onLaunch) and
-// arrives here read-only, via opts.
+// (same ctx-injection pattern render.js uses for onLaunch/onToggleGroup)
+// and arrives here read-only, via opts.
 //
 //   opts = {
 //     scope: "run" | "artifact",     // id is the run_id or artifact_path

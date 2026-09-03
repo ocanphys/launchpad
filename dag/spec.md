@@ -614,6 +614,30 @@ boundary an undeclared input, with nothing here to detect it.
 **Garbage collection.** Nothing currently removes anything. A rule for what is
 reachable from a set of held manifests would give one.
 
+**Background volume refresh.** Every `leasebook` route that reads the volume
+calls `volume.reload()` inline, synchronously, before it reads anything --
+including the dashboard's own state-polling routes. `volume.reload()` is a
+real network call, not a local operation, so that latency shows up directly
+as UI latency, most visibly when switching between panes: the new pane's
+first fetch has never reloaded before and pays the full cost inline, with no
+loading state shown while it waits (`rowsEl` isn't cleared until the fetch
+resolves, so the *previous* pane's rows sit on screen, under the new title,
+for however long that takes). The fix sketched but not (yet) built: one
+background thread per `leasebook` container (it's pinned to
+`max_containers=1`, so one thread is enough) looping `volume.reload()` on its
+own clock, with every route reading `Path(STORAGE)` as-is and trusting that
+loop to have refreshed it recently, instead of reloading per request. The
+trade is explicit: a response can lag the real volume by up to the loop's own
+interval instead of always being exactly as fresh as a reload can make it --
+fine for a display-only dashboard already polling on a multi-second cadence,
+so long as nothing safety-critical (`declared_artifact`, which gates whether
+it's safe to launch a job) is made to depend on the same relaxed freshness.
+The one open question before building this: whether reading `Path(STORAGE)`
+from a request-handling thread is safe while a background thread's
+`volume.reload()` is concurrently in progress, or whether that needs its own
+guard (a lock, or reading a snapshot the loop hands off rather than the live
+mount).
+
 ---
 
 ## Invariants

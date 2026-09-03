@@ -3,14 +3,18 @@
 // Each function takes state and returns a DOM node. Nothing here reaches into
 // app state or fetches anything: to add a column or a new cell you edit one
 // small function, not the poll loop. Interaction is injected via `ctx` so this
-// file never needs to know WHERE the pending-set or the launch call live.
+// file never needs to know WHERE the launch call or group state live.
 //
 //   ctx = {
-//     isPending(artifactPath)    -> boolean, // is this artifact mid-launch?
-//     onLaunch(artifactPath)     -> void,    // user clicked a launchable artifact
-//     isGroupOpen(runId, type)   -> boolean, // is this run's type-group expanded?
-//     onToggleGroup(runId, type) -> void,    // user clicked a group's summary row
+//     onLaunch(artifactPath)      -> void,    // user clicked a launchable artifact
+//     isJustClicked(artifactPath) -> boolean, // clicked, not yet refreshed by a poll
+//     isGroupOpen(ns, type)       -> boolean, // is this owner's type-group expanded?
+//     onToggleGroup(ns, type)     -> void,    // user clicked a group's summary row
 //   }
+//   `ns` namespaces group open/closed state so two different owners (two
+//   runs, or a run and a dataset) with a same-named type-group never
+//   collide -- a run id in runRow, a dataset's own artifact_path in
+//   datasetRows.
 
 import { el } from "./el.js";
 
@@ -34,7 +38,11 @@ function dim(text) {
 // Takes an artifact's own state now, not a run's -- a lease is granted per
 // artifact_path (see main.py's attempt_launch), so this is the granularity
 // at which "active" actually means anything.
-function verdict(state) {
+//
+// Exported: app.js also uses this (not just dot()) to tell whether a
+// just-clicked artifact's status has actually changed since the click, in
+// which case its "just clicked" mark clears early -- see justClicked there.
+export function verdict(state) {
   if (state.done) return "done";
   if (state.active) return "running";
   if (state.status === "conflict") return "failed";
@@ -94,11 +102,15 @@ function heartbeat(state) {
 
 // One square button per artifact. "Frozen" (shown but inert) when it isn't
 // launchable -- keeps its slot in the row from shifting once it does become
-// launchable. Frozen when: mid-launch, this artifact already has an active
-// call, or it isn't ready (already done, or blocked on a dependency).
+// launchable. Frozen when this artifact already has an active call, isn't
+// ready (already done, or blocked on a dependency), or was just clicked
+// (ctx.isJustClicked) -- that last one is purely local (app.js's
+// justClicked), held for a minimum stretch of polls or until this
+// artifact's own verdict actually changes, whichever comes first. A
+// just-clicked button turns blue rather than showing a spinner.
 function launchButton(path, state, ctx) {
-  const pending = ctx.isPending(path);
-  const frozen = pending || state.active || !state.ready;
+  const justClicked = ctx.isJustClicked(path);
+  const frozen = justClicked || state.active || !state.ready;
 
   const title = !state.ready
     ? state.done
@@ -106,35 +118,37 @@ function launchButton(path, state, ctx) {
       : "blocked on " + (state.blocked_by.join(", ") || "?")
     : state.active
     ? "already running"
-    : pending
+    : justClicked
     ? "launching…"
     : "launch";
 
-  const button = el("button", {
-    class: "launch-btn",
+  return el("button", {
+    class: "launch-btn" + (justClicked ? " clicked" : ""),
     text: "run",
     title,
     disabled: frozen,
-    onclick: frozen ? undefined : () => ctx.onLaunch(path),
+    // Passes `state` along with `path` -- app.js's launchJob snapshots
+    // this artifact's verdict at the moment of the click, to compare
+    // against on every later poll (see justClicked there).
+    onclick: frozen ? undefined : () => ctx.onLaunch(path, state),
   });
-
-  if (!pending) return button;
-
-  return el("span", { class: "launch-wrap" },
-    button,
-    el("span", { class: "launch-spinner" }),
-  );
 }
 
 // One <tr> per declared artifact: status dot + type, path, call/heartbeat,
-// and the button that launches it. `grouped` indents it one level deeper --
-// it's nested under a type-group's summary row rather than sitting directly
-// under the run header.
-function artifactRow(path, state, ctx, grouped = false) {
-  return el("tr", { class: "artifact-row" + (grouped ? " grouped" : "") },
+// and the button that launches it. `depth` indents it further for each
+// level of nesting it's under -- 0 for a row sitting directly under its
+// owner (a run header, or a dataset's own row), 1 for one nested under a
+// type-group's summary row, and so on (a dataset's dependency rows are
+// nested two deep: the dataset's own row, then its type-group, then this).
+function artifactRow(path, state, ctx, depth = 0) {
+  return el("tr", { class: "artifact-row" + (depth > 0 ? " depth-" + depth : "") },
     el("td", {},
       dot(state),
       el("span", { class: "artifact-type", text: state.type }),
+      // `mapped` only ever appears on a dataset (main.py's read_state, its
+      // `datasets` key) -- MappedDataSet owns no bytes of its own, worth flagging inline
+      // rather than making a reader infer it from the type name alone.
+      state.mapped ? el("span", { class: "artifact-tag", text: " (Mapped)" }) : null,
     ),
     el("td", { class: "artifact-path dim" },
       el("a", { class: "artifact-link", href: "#/artifact/" + path, text: path, title: path }),
@@ -151,9 +165,12 @@ function artifactRow(path, state, ctx, grouped = false) {
 // row, not just the arrow -- a group can have a lot of artifacts under it,
 // and a fiddly hit target for the only way to reach them is a bad trade.
 // Same weight as a plain artifact row -- it's standing in for one, not a
-// heading, so it shouldn't out-shout the rows around it.
-function groupHeaderRow(runId, type, states, open, ctx) {
-  return el("tr", { class: "group-header", onclick: () => ctx.onToggleGroup(runId, type) },
+// heading, so it shouldn't out-shout the rows around it. `depth` works the
+// same as artifactRow's own -- 0 for a group sitting directly under its
+// owner, 1 for one nested one level deeper (a dataset's own dependency
+// groups, under the dataset's row).
+function groupHeaderRow(ns, type, states, open, ctx, depth = 0) {
+  return el("tr", { class: "group-header" + (depth > 0 ? " depth-" + depth : ""), onclick: () => ctx.onToggleGroup(ns, type) },
     el("td", { colspan: 5 },
       el("span", { class: "dot " + groupVerdict(states) }),
       el("span", { class: "group-arrow", text: open ? "▾" : "▸" }),
@@ -163,55 +180,130 @@ function groupHeaderRow(runId, type, states, open, ctx) {
   );
 }
 
-// A run is a grouping label, not a data row of its own now -- everything
-// that used to be per-run (lease, call, heartbeat) is per-artifact instead
-// (see main.py's read_state). One header row, then the run's artifacts
-// grouped by type (state.type -- the job class name, e.g. "SourceJob"):
-// a type with more than one artifact collapses behind a summary row
-// (closed unless ctx.isGroupOpen says otherwise), while a type with just
-// one artifact renders that row directly -- collapsing a group of one
-// would only cost a click for no payoff. Groups are ordered by type name;
-// paths within a group keep the path sort `read_state` uses, so a fully
-// expanded run still lists in the same order a directory listing under
-// runs/{id} would.
-//
-// Returned as an array -- app.js's draw() flattens these into the table
-// with the rest.
-export function runRow(id, run, ctx) {
-  const artifacts = run.artifacts || {};
-  const paths = Object.keys(artifacts).sort();
-
-  const header = el("tr", { class: "run-header" },
-    el("td", { colspan: 5 },
-      el("a", { class: "run-link", href: "#/run/" + id, text: id }),
-    ),
-  );
-  if (paths.length === 0) {
-    return [header, el("tr", {}, el("td", { colspan: 5 }, dim("no artifacts declared")))];
+// Topological depth of every artifact in `artifacts`, from its own
+// `depends_on` list (an edge to another path already present in this same
+// dict -- a dependency outside the set, e.g. not yet built, doesn't count).
+// 0 for a leaf (a Source, a Tokenizer -- nothing here to build first); 1 +
+// its deepest dependency otherwise. `typeGroupedRows` sorts by this,
+// descending, so what has to exist before anything else can be built sinks
+// to the bottom and what depends on everything above it floats to the top
+// -- a topological order, inverted for display. Memoized per call, with a
+// zero planted before recursing so a cycle (shouldn't happen -- deps.py
+// forbids it -- but this is display code, not the source of truth) reads
+// as depth 0 rather than looping forever.
+function topoDepth(artifacts) {
+  const depths = new Map();
+  function depth(path) {
+    if (depths.has(path)) return depths.get(path);
+    depths.set(path, 0);
+    const dependsOn = (artifacts[path].depends_on || []).filter((p) => p in artifacts);
+    const d = dependsOn.length === 0 ? 0 : 1 + Math.max(...dependsOn.map(depth));
+    depths.set(path, d);
+    return d;
   }
+  for (const path of Object.keys(artifacts)) depth(path);
+  return depths;
+}
 
-  const groups = new Map(); // type -> paths, in path-sorted order
+// A flat {path: state} dict, grouped by artifact type and rendered as
+// group-header + artifactRow rows -- the piece runRow and datasetRows both
+// need (a run's own artifacts; a dataset's dependency closure), factored
+// out so there's one grouping/collapsing implementation, not two drifting
+// copies. A type with more than one member collapses behind a summary row
+// (closed unless ctx.isGroupOpen says otherwise); a type with just one
+// member renders that row directly -- collapsing a group of one would only
+// cost a click for no payoff. Groups, and paths within a group, are ordered
+// by topological depth (topoDepth), deepest first, so a run reads top to
+// bottom the way it was built bottom to top -- ties (same depth) break on
+// type name, then path, so ordering stays deterministic poll to poll.
+//
+// `ns` namespaces the open/closed state (see the ctx doc comment up top).
+// `depth` is where the *group header* (and any singleton row) sits;
+// members of an expanded group render one level deeper still.
+function typeGroupedRows(ns, artifacts, ctx, depth = 0) {
+  const paths = Object.keys(artifacts);
+  if (paths.length === 0) return [];
+
+  const depths = topoDepth(artifacts);
+
+  const groups = new Map(); // type -> paths
   for (const path of paths) {
     const type = artifacts[path].type;
     if (!groups.has(type)) groups.set(type, []);
     groups.get(type).push(path);
   }
+  for (const groupPaths of groups.values()) {
+    groupPaths.sort((a, b) => depths.get(b) - depths.get(a) || a.localeCompare(b));
+  }
 
-  const rows = [header];
-  for (const type of [...groups.keys()].sort()) {
+  const groupDepth = (type) => Math.max(...groups.get(type).map((p) => depths.get(p)));
+  const orderedTypes = [...groups.keys()].sort(
+    (a, b) => groupDepth(b) - groupDepth(a) || a.localeCompare(b)
+  );
+
+  const rows = [];
+  for (const type of orderedTypes) {
     const groupPaths = groups.get(type);
     if (groupPaths.length === 1) {
-      rows.push(artifactRow(groupPaths[0], artifacts[groupPaths[0]], ctx));
+      rows.push(artifactRow(groupPaths[0], artifacts[groupPaths[0]], ctx, depth));
       continue;
     }
-    const open = ctx.isGroupOpen(id, type);
+    const open = ctx.isGroupOpen(ns, type);
     const states = groupPaths.map((path) => artifacts[path]);
-    rows.push(groupHeaderRow(id, type, states, open, ctx));
+    rows.push(groupHeaderRow(ns, type, states, open, ctx, depth));
     if (open) {
-      for (const path of groupPaths) rows.push(artifactRow(path, artifacts[path], ctx, true));
+      for (const path of groupPaths) rows.push(artifactRow(path, artifacts[path], ctx, depth + 1));
     }
   }
   return rows;
+}
+
+// A run is a grouping label, not a data row of its own now -- everything
+// that used to be per-run (lease, call, heartbeat) is per-artifact instead
+// (see main.py's read_state). One header row, then the run's artifacts
+// type-grouped via typeGroupedRows, namespaced by the run's own id.
+//
+// Returned as an array -- app.js's draw() flattens these into the table
+// with the rest.
+export function runRow(id, run, ctx) {
+  const artifacts = run.artifacts || {};
+  const header = el("tr", { class: "run-header" },
+    el("td", { colspan: 5 },
+      el("a", { class: "run-link", href: "#/run/" + id, text: id }),
+    ),
+  );
+  if (Object.keys(artifacts).length === 0) {
+    return [header, el("tr", {}, el("td", { colspan: 5 }, dim("no artifacts declared")))];
+  }
+  return [header, ...typeGroupedRows(id, artifacts, ctx)];
+}
+
+// The `sources` view: a flat table, one row per Source ever declared
+// (main.py's read_state, its `sources` key) -- no grouping, per spec. `[]`
+// rather than `null` reads as "genuinely empty" the same way runRow's own
+// artifacts dict does, so app.js can drive the shared #empty message off
+// length alone regardless of which view it's showing.
+export function sourcesRows(payload, ctx) {
+  const artifacts = payload.sources || {};
+  const paths = Object.keys(artifacts).sort();
+  return paths.map((path) => artifactRow(path, artifacts[path], ctx));
+}
+
+// The `datasets` view: DataSet + MappedDataSet artifacts (main.py's
+// read_state, its `datasets` key), shown the same way runRow shows a run --
+// the dataset's own row, then everything it depends on (its full dependency closure:
+// TokenizedSource, and through those, Tokenizer and Source), type-grouped
+// and collapsible via the same typeGroupedRows runRow uses. Namespaced by
+// the dataset's own artifact_path, so two datasets that both have (say) a
+// "Source" group never share open/closed state.
+export function datasetRows(payload, ctx) {
+  const datasets = payload.datasets || {};
+  const paths = Object.keys(datasets).sort();
+  return paths.flatMap((path) => {
+    const entry = datasets[path];
+    const row = artifactRow(path, entry.state, ctx);
+    return [row, ...typeGroupedRows(path, entry.artifacts || {}, ctx, 1)];
+  });
 }
 
 // One <tr> in the problem-runs table: a run whose artifact discovery itself

@@ -6,7 +6,9 @@ dist/
 wheels/
 *.egg-info
 scratch/
+.scratch/
 storage/
+data_demo/
 .claude/
 # Virtual environments
 .venv

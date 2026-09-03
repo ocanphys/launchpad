@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>runs</title>
+<!-- Inline SVG, not a mounted file -- avoids both a GET /favicon.ico 404
+     (browsers request that path automatically unless a <link rel="icon">
+     says otherwise) and adding a static file just for this. Same dot motif
+     as the status lights elsewhere on the page (see render.js's dot()). -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%230969da'/></svg>">
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -12,6 +17,18 @@
   }
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .4rem; }
   h1 { font-size: 1rem; font-weight: 600; margin: 0; }
+
+  /* runs | datasets | sources -- always visible, regardless of which view
+     or drill-down page is on screen, so jumping between top-level views
+     never means going back to the dashboard first. Active view is bold,
+     not a different color -- same "no separate palette for UI chrome"
+     rule the rest of the page follows. */
+  #viewNav { font-size: 12px; }
+  #viewNav a { color: inherit; opacity: .55; text-decoration: none; }
+  #viewNav a:hover { opacity: .85; }
+  #viewNav a.active { opacity: 1; font-weight: 600; }
+  #viewNav .nav-sep { opacity: .3; margin: 0 .3rem; }
+
   #conn { font-size: 11px; padding: .1rem .55rem; border: 1px solid; border-radius: 999px; white-space: nowrap; }
   .ok  { color: #1a7f37; border-color: #1a7f37; }
   .bad { color: #cf222e; border-color: #cf222e; }
@@ -54,18 +71,31 @@
     padding-left: 1.4rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  tr.artifact-row.grouped td:first-child { padding-left: 2.8rem; }
+  /* depth-1: nested one level under a type-group's summary row (or, in the
+     `datasets` view, under a dataset's own row). depth-2: a dataset's own
+     dependency rows nested inside a type-group nested under the dataset's
+     row -- three levels deep in that one case, so this needs a tier
+     typeGroupedRows' plain run case never reaches. */
+  tr.artifact-row.depth-1 td:first-child { padding-left: 2.8rem; }
+  tr.artifact-row.depth-2 td:first-child { padding-left: 4.2rem; }
 
   /* A type-group's summary row -- same indent level as an ungrouped
-     artifact row, since it stands in for one. Not bold and not dimmed --
-     it's a stand-in for a normal row, not a heading. Whole row is the
-     click target (see groupHeaderRow in render.js), so it gets the
-     pointer cursor, not just the arrow glyph. */
+     artifact row at the same depth, since it stands in for one. Not bold
+     and not dimmed -- it's a stand-in for a normal row, not a heading.
+     Whole row is the click target (see groupHeaderRow in render.js), so
+     it gets the pointer cursor, not just the arrow glyph. depth-1: a
+     dataset's own dependency groups, nested under the dataset's row. */
   tr.group-header td { padding-left: 1.4rem; cursor: pointer; user-select: none; }
+  tr.group-header.depth-1 td { padding-left: 2.8rem; }
   tr.group-header:hover { background: rgba(128,128,128,.06); }
   .group-arrow { display: inline-block; width: 1rem; opacity: .6; }
 
   .artifact-type, .group-type { font-size: 11px; }
+  /* "(Mapped)" next to a MappedDataSet's type, in the `datasets` view --
+     see render.js's artifactRow (state.mapped) and main.py's
+     datasets_state. Dim like every other secondary label on the page, not
+     a badge -- it's a note about the row, not a status. */
+  .artifact-tag { opacity: .5; font-size: 11px; }
   /* Long paths truncate with an ellipsis instead of wrapping to a second
      line -- a wrapped row grows taller and throws off every row's
      vertical rhythm. Full path is still one hover away via the link's
@@ -83,29 +113,21 @@
     cursor: pointer;
   }
   .launch-btn:hover:not(:disabled) { background: rgba(26,127,55,.15); }
-  /* Not ready, already running, or mid-launch: pale and frozen -- no color,
-     no hover, no pointer. Still shown so its slot in the row doesn't shift
-     once it does become launchable. */
+  /* Not ready or already running: pale and frozen -- no color, no hover,
+     no pointer. Still shown so its slot in the row doesn't shift once it
+     does become launchable. */
   .launch-btn:disabled {
     border-color: rgba(128,128,128,.3); color: rgba(128,128,128,.5);
     cursor: default;
   }
-
-  /* Spinner shown over the launch button while a launch is pending -- spins
-     until the next poll shows the artifact active (or it times out/fails,
-     see PENDING_MS in app.js). */
-  .launch-wrap { position: relative; display: inline-block; }
-  .launch-spinner {
-    position: absolute; top: 50%; left: 50%;
-    width: 1.1rem; height: 1.1rem;
-    margin: -.55rem 0 0 -.55rem;
-    border: 2px solid rgba(9,105,218,.25);
-    border-top-color: #0969da;
-    border-radius: 999px;
-    animation: spin .7s linear infinite;
-    pointer-events: none;
+  /* Just clicked, waiting on the next poll to land (render.js's
+     launchButton, app.js's justClicked) -- same blue as the "running" dot
+     elsewhere on the page, so it reads as "something's happening" rather
+     than the plain gray every other disabled button gets. Comes after
+     .launch-btn:disabled so it wins the tie on equal specificity. */
+  .launch-btn.clicked:disabled {
+    border-color: #0969da; color: #0969da;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
 
   .empty { opacity: .55; padding: 1rem 0; }
 
@@ -195,6 +217,13 @@
 
 <header>
   <h1 id="title">runs</h1>
+  <nav id="viewNav">
+    <a href="#/runs" data-view="runs">runs</a>
+    <span class="nav-sep">|</span>
+    <a href="#/datasets" data-view="datasets">datasets</a>
+    <span class="nav-sep">|</span>
+    <a href="#/sources" data-view="sources">sources</a>
+  </nav>
   <span id="conn" class="bad">loading</span>
 </header>
 <div id="meta"></div>
@@ -213,7 +242,7 @@
   </thead>
   <tbody id="rows"></tbody>
 </table>
-<p class="empty" id="empty" hidden>no run folders on the volume yet.</p>
+<p class="empty" id="empty" hidden></p>
 
 <!-- Only a run whose preflight check itself raised lands here -- a normal
      run, even an empty or blocked one, never does. Hidden entirely when

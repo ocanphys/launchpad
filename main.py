@@ -166,106 +166,56 @@ def _with_lease(info: dict, path: str, grants: dict, beat_records: dict, now: fl
     return info
 
 
-def sources_state() -> dict:
-    """Flat state for the `sources` view: every Source ever declared under
-    root/sources, attached to a run or not (see dag_resolve.declared_of_kind)
-    -- unlike `runs`, there's no grouping here, just the one flat table.
-    """
-    volume.reload()
-    root = Path(STORAGE)
-    grants, beat_records, now = _lease_snapshot()
-    cache: dag_resolve.InspectCache = {}
-
-    artifacts_state = {}
-    for a in dag_resolve.declared_of_kind("sources", root):
-        path = a.artifact_path.as_posix()
-        artifacts_state[path] = _with_lease(
-            artifact_state(a, root, cache), path, grants, beat_records, now
-        )
-
-    return {"now": now, "artifacts": artifacts_state}
-
-
-def datasets_state() -> dict:
-    """State for the `datasets` view: every DataSet and MappedDataSet ever
-    declared (root/datasets and root/mappeddatasets -- see
-    dag_resolve.declared_of_kind), each shown the same way `read_state`
-    shows a run -- its own row, plus everything it depends on.
-
-    Unlike a run, a dataset's dependency tree isn't scoped to a folder full
-    of manifests to walk from; it's the one artifact's own full transitive
-    closure (dag_resolve.dependency_closure), which for a dataset reaches
-    every TokenizedSource its train/valid mix uses and, through those, the
-    Tokenizer and Source(s) behind them -- not just the sources directly,
-    since a dataset's tokenizer is as much a dependency worth seeing as its
-    sources are.
-
-    Each dataset's own entry also carries `mapped`: True for a
-    MappedDataSet, so the frontend can tag it inline without parsing
-    `type` -- the two kinds share this one view by design (both read as
-    "a dataset" to everything that isn't the resolver), but a MappedDataSet
-    owns no bytes of its own (mappeddatasets/artifact.py), worth flagging
-    at a glance.
-
-    One `cache` (dag_resolve.InspectCache) for the whole call: datasets
-    routinely share tokenizers and sources, so without it the same shared
-    artifact gets independently re-inspected -- re-read, re-parsed, re-
-    stat'd -- once per dataset that happens to depend on it, rather than
-    once total.
-    """
-    volume.reload()
-    root = Path(STORAGE)
-    grants, beat_records, now = _lease_snapshot()
-    cache: dag_resolve.InspectCache = {}
-
-    datasets = [
-        *dag_resolve.declared_of_kind("datasets", root),
-        *dag_resolve.declared_of_kind("mappeddatasets", root),
-    ]
-
-    datasets_out = {}
-    for a in datasets:
-        path = a.artifact_path.as_posix()
-        info = _with_lease(artifact_state(a, root, cache), path, grants, beat_records, now)
-        info["mapped"] = type(a).__name__ == "MappedDataSet"
-
-        deps_state = {}
-        for dep in dag_resolve.dependency_closure(a):
-            dep_path = dep.artifact_path.as_posix()
-            deps_state[dep_path] = _with_lease(
-                artifact_state(dep, root, cache), dep_path, grants, beat_records, now
-            )
-
-        datasets_out[path] = {"state": info, "artifacts": deps_state}
-
-    return {"now": now, "datasets": datasets_out}
-
-
 def read_state() -> dict:
-    """One read of the whole book, starting from the runs that exist rather
-    than the leases that were granted.
+    """One read of the whole volume, sliced into the three shapes the
+    dashboard's views (runs/sources/datasets) each want.
+
+    Every view used to be its own function, each doing its own
+    `volume.reload()`, its own lease snapshot, and its own `InspectCache` --
+    and since a source or tokenizer is routinely reachable from a run *and*
+    from `sources`/`datasets`' own shared-folder listing, the same artifact
+    got independently re-inspected once per view that happened to reach it.
+    One read fixes that at the root: one `volume.reload()`, one lease
+    snapshot, one cache, and one `states` map below that computes each
+    distinct artifact_path's state at most once no matter how many of
+    `runs`/`sources`/`datasets` reference it -- dependency graphs are cheap
+    to walk once the state they're built from is already in hand.
 
     `runs` comes from the volume's `runs/` directory, not from `leases`: a
     folder with no lease -- never started, or superseded and never reclaimed --
     is exactly the gap worth being able to see, and starting from `leases`
-    instead would hide it.
+    instead would hide it. A run's artifacts come from
+    `dag_resolve.declared_under`, which can raise on a bad manifest --
+    "broken", not "not ready". This is the one place that decides what a
+    raise means for a whole run: not `runs`, but `problem_runs`, keyed the
+    same way, holding the error instead of an artifacts snapshot. One
+    run_id's raise doesn't cost the rest of the book -- the loop below
+    catches it per run_id, not around the whole loop.
+
+    `sources` is flat -- every Source ever declared under root/sources,
+    attached to a run or not (see dag_resolve.declared_of_kind), unlike
+    `runs` there's no grouping. `datasets` is every DataSet and
+    MappedDataSet ever declared (root/datasets and root/mappeddatasets),
+    each shown the way a run shows its artifacts -- its own row, plus its
+    full transitive dependency closure (dag_resolve.dependency_closure),
+    which for a dataset reaches every TokenizedSource its train/valid mix
+    uses and, through those, the Tokenizer and Source(s) behind them. Each
+    dataset's own entry also carries `mapped`: True for a MappedDataSet, so
+    the frontend can tag it inline without parsing `type` -- the two kinds
+    share this one view by design, but a MappedDataSet owns no bytes of its
+    own (mappeddatasets/artifact.py), worth flagging at a glance. That flag
+    is stamped on a copy of the shared state dict, not the cached original
+    -- `states` is shared with `runs`/`sources`, and a dataset reachable
+    from a run too should not show a run artifact tagged `mapped`.
 
     `leases` and `beats` go back close to untouched: `leases` verbatim, `beats`
     with one field added per entry, `lease`, naming which artifact_path that
     call_id is the *current* holder for (None if it is not the current holder
     of anything -- a superseded container still beating, or one that never
-    held a lease at all). Both reads come from the one snapshot taken here,
-    so a beat's `lease` always agrees with what a run's own artifacts say
-    that call holds -- a lease is granted per artifact_path (see
-    `attempt_launch`), so that agreement is checked per artifact below, not
-    per run.
-
-    A run's artifacts come from `dag_resolve.declared_under`, which
-    can raise on a bad manifest -- "broken", not "not ready". This is the
-    one place that decides what a raise means for a whole run: not `runs`,
-    but `problem_runs`, keyed the same way, holding the error instead of an
-    artifacts snapshot. One run_id's raise doesn't cost the rest of the book
-    -- the loop below catches it per run_id, not around the whole loop.
+    held a lease at all). Both come from the one snapshot taken here, so a
+    beat's `lease` always agrees with what a run's own artifacts say that
+    call holds -- a lease is granted per artifact_path (see `attempt_launch`),
+    so that agreement is checked per artifact, not per run.
     """
     volume.reload()
     storage_root = Path(STORAGE)
@@ -278,33 +228,50 @@ def read_state() -> dict:
 
     grants, beat_records, now = _lease_snapshot()
 
-    held_by = {grant["call_id"]: run_id for run_id, grant in grants.items()}
+    # `grants` is keyed by artifact_path (a lease is granted per
+    # artifact_path -- see attempt_launch), so this maps each call_id to
+    # the artifact_path it currently holds the lease for.
+    held_by = {grant["call_id"]: artifact_path for artifact_path, grant in grants.items()}
 
-    # One cache for every run in this read, not one per run -- a tokenizer
-    # or source shared across several runs (the common case) then gets
-    # inspected once total instead of once per run that uses it. See
-    # dag_resolve.inspect's own doc for what this saves.
+    # One cache, and one memoized state dict, for the whole read -- not one
+    # per run or per view. A tokenizer or source shared across several runs,
+    # or reachable from both a run and the sources/datasets views, then gets
+    # inspected and stamped with its lease exactly once, regardless of how
+    # many places reference it below.
     cache: dag_resolve.InspectCache = {}
+    states: dict[str, dict] = {}
+
+    def state_for(a: Artifact) -> dict:
+        path = a.artifact_path.as_posix()
+        if path not in states:
+            states[path] = _with_lease(
+                artifact_state(a, storage_root, cache), path, grants, beat_records, now
+            )
+        return states[path]
 
     runs = {}
     problem_runs = {}
     for run_id in run_ids:
         try:
             declared = dag_resolve.declared_under(run_id, storage_root)
-            artifacts_state = {}
-            for a in declared:
-                path = a.artifact_path.as_posix()
-                # A lease is granted per artifact_path now (see
-                # attempt_launch), not per run -- so this is where
-                # lease/heartbeat actually belong, not on the run itself.
-                artifacts_state[path] = _with_lease(
-                    artifact_state(a, storage_root, cache), path, grants, beat_records, now
-                )
         except Exception as exc:
             problem_runs[run_id] = {"error": str(exc)}
             continue
+        runs[run_id] = {"artifacts": {a.artifact_path.as_posix(): state_for(a) for a in declared}}
 
-        runs[run_id] = {"artifacts": artifacts_state}
+    sources = {
+        a.artifact_path.as_posix(): state_for(a)
+        for a in dag_resolve.declared_of_kind("sources", storage_root)
+    }
+
+    datasets = {}
+    for a in [
+        *dag_resolve.declared_of_kind("datasets", storage_root),
+        *dag_resolve.declared_of_kind("mappeddatasets", storage_root),
+    ]:
+        info = {**state_for(a), "mapped": type(a).__name__ == "MappedDataSet"}
+        deps_state = {dep.artifact_path.as_posix(): state_for(dep) for dep in dag_resolve.dependency_closure(a)}
+        datasets[a.artifact_path.as_posix()] = {"state": info, "artifacts": deps_state}
 
     beats_out = {
         call_id: {**beat, "lease": held_by.get(call_id)}
@@ -317,6 +284,8 @@ def read_state() -> dict:
         "problem_runs": problem_runs,
         "beats": beats_out,
         "leases": grants,
+        "sources": sources,
+        "datasets": datasets,
     }
 
 
@@ -423,21 +392,13 @@ def leasebook():
 
     api = FastAPI()
 
+    # The one state route for all three table views (runs/sources/datasets)
+    # -- read_state() reads the whole volume once and slices it three ways,
+    # so the frontend fetches this once per poll and switches views locally
+    # instead of round-tripping again on every nav click.
     @api.get("/state")
     def state() -> dict:
         return read_state()
-
-    # The `datasets`/`sources` nav views -- same tracking mechanics as
-    # `/state` (artifact_state, lease/heartbeat stamping), just scoped to a
-    # shared kind's whole folder instead of one run. See sources_state /
-    # datasets_state for what's grouped and what isn't.
-    @api.get("/state/sources")
-    def sources_state_endpoint() -> dict:
-        return sources_state()
-
-    @api.get("/state/datasets")
-    def datasets_state_endpoint() -> dict:
-        return datasets_state()
 
     # :path, not a plain path segment -- an artifact_path contains its own
     # /s (runs/my-run/pretraining), which a plain segment can't match.
