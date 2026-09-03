@@ -198,6 +198,32 @@ def _with_lease(info: dict, path: str, grants: dict, beat_records: dict, now: fl
     return info
 
 
+def _with_progress(info: dict, artifact: Artifact, root: Path, beat_records: dict) -> dict:
+    """Stamp one artifact's state dict with its two progress signals.
+
+    `durable_progress` is unconditional -- read straight off `root` via
+    `artifact.durable_progress`, same as any other file-existence check
+    `artifact_state` already makes, so a finished run still shows its final
+    progress even with no active call left to hold `live_progress`.
+
+    `live_progress` only exists while `info["active"]` does (stamped by
+    `_with_lease`, which must run before this) -- a call's self-reported
+    payload rides along on its own beat (system.runtime.Worker.progress),
+    read back here via the same `beat_records` snapshot `_with_lease` used,
+    and interpreted by the job that wrote it (`dag_resolve.producer_for`,
+    the same lookup `run_job`/`artifact_job_name` already use) so each job
+    type decides what its own payload means. `producer_for` is only reached
+    at all when there's a real payload to interpret -- most artifacts never
+    report one, and an inactive call's stale payload is never surfaced as
+    if it were current.
+    """
+    beat = beat_records.get(info["call_id"]) if info["call_id"] else None
+    raw = beat.get("progress") if beat and info["active"] else None
+    info["durable_progress"] = artifact.durable_progress(root)
+    info["live_progress"] = dag_resolve.producer_for(artifact).progress(raw) if raw else None
+    return info
+
+
 def read_state() -> dict:
     """One read of the whole volume, sliced into the three shapes the
     dashboard's views (runs/sources/datasets) each want.
@@ -248,6 +274,15 @@ def read_state() -> dict:
     beat's `lease` always agrees with what a run's own artifacts say that
     call holds -- a lease is granted per artifact_path (see `attempt_launch`),
     so that agreement is checked per artifact, not per run.
+
+    Every state dict also carries `durable_progress` and `live_progress` (see
+    `_with_progress`) -- two independent signals, not one. `durable_progress`
+    is read straight off `root` and survives a lost lease or a dead container;
+    `live_progress` is a currently-active call's own self-reported payload and
+    disappears the moment it isn't active anymore. Most artifact types have
+    neither (both `None`): only a job that actually reports incremental
+    progress (models.mock.job.PretrainJob, at each checkpoint) has anything to
+    show here.
     """
     volume.reload()
     storage_root = Path(STORAGE)
@@ -276,9 +311,10 @@ def read_state() -> dict:
     def state_for(a: Artifact) -> dict:
         path = a.artifact_path.as_posix()
         if path not in states:
-            states[path] = _with_lease(
+            info = _with_lease(
                 artifact_state(a, storage_root, cache), path, grants, beat_records, now
             )
+            states[path] = _with_progress(info, a, storage_root, beat_records)
         return states[path]
 
     runs = {}

@@ -401,3 +401,23 @@ class Artifact(ABC):
         return all(
             p.exists() for p in self.completion_paths(root)
         )  # a partial file set doesn't count as existing
+
+    def durable_progress(self, root: Path) -> dict | None:
+        """This artifact's furthest on-disk progress, or None -- the default,
+        right for almost everything: most artifacts are just done or not,
+        nothing partial about them worth reporting. A subclass whose job
+        writes intermediate state as it goes (models.mock.artifact.Pretraining's
+        checkpoint files, at each of the job's own checkpoint steps) overrides
+        this to read it back.
+
+        Read fresh from `root` on every call, same as `exists`/`completion_paths`
+        -- no caching here, and none needed: this costs the same order of
+        `Path` work those already pay per artifact, and it's meant to answer
+        "what does the volume say right now," not a snapshot from whenever
+        this was last asked. Called by whichever container is asking (in
+        practice, main.py's dashboard container, reading whatever `root` it
+        has mounted) -- never by the job that built the artifact, which has
+        no business reporting on itself this way (see `system.runtime.Worker.
+        progress` for how a running job reports live instead).
+        """
+        return None

@@ -71,8 +71,16 @@ class PretrainJob(Job):
                 self.artifact.paths(root)["checkpoint"].write_text(body)
             else:
                 (folder / f"checkpoint_{step}.txt").write_text(body)
+            # Same cadence as the checkpoint write above, not every step --
+            # this is a live, in-memory report (see system.runtime.Worker.
+            # progress), cheap enough to call every checkpoint but with
+            # nothing to gain from calling it every step too.
+            worker.progress.update({"step": step, "total_steps": config.total_steps, "loss": loss})
             worker.log.info(f"step {step}/{config.total_steps} loss={loss:.4f}")
         self.artifact.paths(root)["progress"].write_text(
             json.dumps({"step": config.total_steps, "complete": True}, indent=2)
         )  # last, so `done` can't be observed before the checkpoint is durable
         worker.log.info("training complete")
+
+    def progress(self, raw: dict) -> dict:
+        return {**raw, "fraction": raw["step"] / raw["total_steps"]}

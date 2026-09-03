@@ -100,6 +100,28 @@ function heartbeat(state) {
   );
 }
 
+// One payload (main.py's live_progress or durable_progress -- same shape
+// either way, whatever the job's own progress()/durable_progress returned)
+// into one line of text. step/total_steps is the one shape a real job type
+// (PretrainJob) actually produces today, so that gets a clean "n/total";
+// anything else -- a future job type reporting something different -- still
+// shows *something* rather than nothing, generically.
+function formatProgress(p) {
+  if (!p) return null;
+  if (typeof p.step === "number" && typeof p.total_steps === "number") {
+    return p.step + "/" + p.total_steps;
+  }
+  return Object.entries(p).map(([k, v]) => k + "=" + v).join(" ");
+}
+
+// live_progress first -- a currently-active call's own self-report -- falling
+// back to durable_progress (main.py's `_with_progress`: the volume-read
+// signal, the only one still meaningful once nothing's active anymore).
+function progressCell(state) {
+  const text = formatProgress(state.live_progress) || formatProgress(state.durable_progress);
+  return text ? el("span", { text }) : dim("—");
+}
+
 // One square button per artifact. "Frozen" (shown but inert) when it isn't
 // launchable -- keeps its slot in the row from shifting once it does become
 // launchable. Frozen when this artifact already has an active call, isn't
@@ -155,6 +177,7 @@ function artifactRow(path, state, ctx, depth = 0) {
     ),
     el("td", { class: "call" }, callId(state)),
     el("td", {}, heartbeat(state)),
+    el("td", {}, progressCell(state)),
     el("td", {}, launchButton(path, state, ctx)),
   );
 }
@@ -171,7 +194,7 @@ function artifactRow(path, state, ctx, depth = 0) {
 // groups, under the dataset's row).
 function groupHeaderRow(ns, type, states, open, ctx, depth = 0) {
   return el("tr", { class: "group-header" + (depth > 0 ? " depth-" + depth : ""), onclick: () => ctx.onToggleGroup(ns, type) },
-    el("td", { colspan: 5 },
+    el("td", { colspan: 6 },
       el("span", { class: "dot " + groupVerdict(states) }),
       el("span", { class: "group-arrow", text: open ? "▾" : "▸" }),
       el("span", { class: "group-type", text: type }),
@@ -268,7 +291,7 @@ function typeGroupedRows(ns, artifacts, ctx, depth = 0) {
 export function runRow(id, run, ctx) {
   const artifacts = run.artifacts || {};
   const header = el("tr", { class: "run-header" },
-    el("td", { colspan: 5 },
+    el("td", { colspan: 6 },
       el("a", { class: "run-link", href: "#/run/" + id, text: id }),
       run.notebook
         ? el("a", {
@@ -283,7 +306,7 @@ export function runRow(id, run, ctx) {
     ),
   );
   if (Object.keys(artifacts).length === 0) {
-    return [header, el("tr", {}, el("td", { colspan: 5 }, dim("no artifacts declared")))];
+    return [header, el("tr", {}, el("td", { colspan: 6 }, dim("no artifacts declared")))];
   }
   return [header, ...typeGroupedRows(id, artifacts, ctx)];
 }

@@ -6,6 +6,7 @@ gets its own sibling package here with this same shape: artifact.py for its
 ModelParameters/Config/Pretraining, job.py for its actual training loop.
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,3 +67,24 @@ class Pretraining(Artifact):
         # checkpoint can exist because the process died midway through writing
         # it.
         return {"checkpoint": "checkpoint.txt", "progress": "progress.json"}
+
+    def durable_progress(self, root: Path) -> dict | None:
+        # progress.json existing means the final step's checkpoint.txt landed
+        # too (see files' own comment: written last, after the checkpoint is
+        # durable) -- the run is done, full stop, without needing to trust
+        # whatever intermediate checkpoint_{step}.txt files happen to still
+        # be lying around.
+        if self.paths(root)["progress"].exists():
+            return {"step": self.config.total_steps, "total_steps": self.config.total_steps}
+        # Otherwise, the furthest intermediate checkpoint is the honest
+        # answer -- the final step never gets one of these (it writes
+        # checkpoint.txt directly, see job.py), which is exactly why the
+        # progress.json check above has to come first, not be folded into
+        # this same glob.
+        folder = root / self.artifact_path
+        steps = [
+            int(m.group(1))
+            for p in folder.glob("checkpoint_*.txt")
+            if (m := re.match(r"checkpoint_(\d+)\.txt$", p.name))
+        ]
+        return {"step": max(steps), "total_steps": self.config.total_steps} if steps else None

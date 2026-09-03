@@ -49,12 +49,20 @@ class Worker:
     No `dir`: a job resolves its own paths via `artifact.paths(root)` (root
     being the storage root, a constant, not a per-call value), so there is
     nothing left for a per-call directory to do.
+
+    `progress` is a plain mutable dict, not a method: a job reports by
+    mutating it directly (`worker.progress.update(...)`), which costs nothing
+    but a local write -- no network, so a job can report as often as it likes
+    without ever blocking its own loop on one. Nobody else reads it except the
+    heartbeat thread below, on its own cadence, which is the only thing that
+    ever puts it on the wire.
     """
 
     artifact_path: str
     call_id: str
     log: logging.Logger
     confirm_lease: Callable[..., None]
+    progress: dict
 
 
 @contextmanager
@@ -95,6 +103,7 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
         call_id=call_id,
         log=logger,
         confirm_lease=lease.confirm,
+        progress={},
     )
 
     def heartbeat():
@@ -107,10 +116,22 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
         # stale beat from a live one by checking whether its call_id is still
         # the artifact's current holder (`main.read_state` does this), not by
         # racing to write first.
+        #
+        # `worker.progress` rides along on the same put, snapshotted with
+        # `dict(...)` rather than passed by reference -- the job's own thread
+        # can still be mutating it the moment this fires, and a snapshot is
+        # what keeps the beat's payload internally consistent even so. Its own
+        # cadence is entirely this thread's, not the job's: a job that reports
+        # progress ten times between two beats still only ever puts twice, and
+        # one that reports nothing at all just rides `None` along instead.
         while True:
             time.sleep(HEARTBEAT_SECONDS)
             try:
-                beats.put(call_id, {"artifact_path": artifact_path, "last_beat_ts": time.time()})
+                beats.put(call_id, {
+                    "artifact_path": artifact_path,
+                    "last_beat_ts": time.time(),
+                    "progress": dict(worker.progress) if worker.progress else None,
+                })
             except Exception as exc:
                 logger.warning(f"heartbeat: not recorded ({exc})")
 

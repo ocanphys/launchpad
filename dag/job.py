@@ -72,3 +72,15 @@ class Job(ABC):
         artifact_job_name) and shown as its own column when the log is read
         back, so messages here should just be plain narration.
         """
+
+    def progress(self, raw: dict) -> dict:
+        """Interpret `raw` -- whatever a running call of this job most
+        recently wrote to `worker.progress` (system.runtime.Worker), read
+        back off its beat -- into something display-ready. Default: pass it
+        through verbatim. Most job types never call `worker.progress.update`
+        at all, so `raw` is only ever handed to this when there's something
+        real to interpret; a subclass that does report (e.g. PretrainJob)
+        overrides this to shape it, not to fetch it -- fetching is main.py's
+        job (`_with_progress`), this is only ever the second step.
+        """
+        return raw
