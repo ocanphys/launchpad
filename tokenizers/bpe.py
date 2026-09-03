@@ -379,6 +379,7 @@ class TokenizerJob(Job):
         self.vocab_size = artifact.vocab_size
 
     def run(self, root: Path , worker: "Worker") -> None:
+        (root / self.artifact.artifact_path).mkdir(parents=True, exist_ok=True)
         worker.log.info(
             f"training BPE tokenizer (vocab_size={self.vocab_size}) "
             f"on {len(self.sources)} source(s)"
@@ -546,6 +547,7 @@ class TokenizeSourceJob(Job):
         self.source = artifact.source
 
     def run(self, root: Path, worker: "Worker") -> None:
+        (root / self.artifact.artifact_path).mkdir(parents=True, exist_ok=True)
         worker.log.info(f"tokenizing {self.source.name}")
 
         tokenizer = self.tokenizer.bind(root)  # reads the tokenizer.json its job wrote

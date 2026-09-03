@@ -13,6 +13,7 @@ class SourceJob(Job):
     artifact: Source  # no dependencies: a source is downloaded, not derived
 
     def run(self, root: Path, worker: "Worker") -> None:
+        (root / self.artifact.artifact_path).mkdir(parents=True, exist_ok=True)
         worker.log.info(f"downloading {self.artifact.name} from {self.artifact.url}")
 
         request = urllib.request.Request(

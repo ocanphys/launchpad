@@ -19,6 +19,8 @@ class PretrainJob(Job):
         self.tokenizer = artifact.tokenizer
 
     def run(self, root: Path, worker: "Worker") -> None:
+        folder = root / self.artifact.artifact_path
+        folder.mkdir(parents=True, exist_ok=True)
         train_ids = array("H")
         train_ids.frombytes(self.dataset.paths(root)["training set"].read_bytes())
         vocab_size = len(
@@ -27,7 +29,6 @@ class PretrainJob(Job):
 
         model_parameters = self.artifact.model_parameters
         config = self.artifact.config
-        folder = root / self.artifact.artifact_path
         every = config.checkpoint_every
         steps = list(range(every, config.total_steps + 1, every))
         if not steps or steps[-1] != config.total_steps:

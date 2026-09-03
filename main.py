@@ -678,6 +678,46 @@ def jupyter():
     waiting on a precise moment to see the lab's writes, so background
     commits are enough -- no reason to force one.
     """
+    # Default-on autocomplete and editor niceties: ONE overrides.json, in
+    # JupyterLab's application settings directory -- not the per-user
+    # settings tree (~/.jupyter/lab/user-settings/), which holds one
+    # <plugin-id>.jupyterlab-settings file per plugin (what the Settings
+    # Editor writes when a person changes something by hand), and isn't
+    # where overrides.json is read from. Keyed by full plugin id, verified
+    # against JupyterLab's own schemas rather than guessed:
+    #   - completer-extension:manager's `autoCompletion` (default false) is
+    #     what actually turns "press Tab to see suggestions" into
+    #     suggestions appearing as you type.
+    #   - codemirror-extension:plugin's `defaultConfig` is an open object of
+    #     CodeMirror editor options (autoClosingBrackets, lineNumbers, ...),
+    #     applied to every editor -- notebook cells included, so there's no
+    #     separate notebook-extension setting needed for these.
+    # Deliberately not attempting "open the contextual-help/inspector panel
+    # by default" here: inspector-extension's own schema declares zero
+    # properties (`additionalProperties: false`, nothing in between) --
+    # there is no settings key for it. That needs a pre-built default
+    # *workspace* (layout state, a different mechanism from settings
+    # overrides entirely), not attempted here.
+    from jupyterlab.commands import get_app_dir
+
+    settings_dir = Path(get_app_dir()) / "settings"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    (settings_dir / "overrides.json").write_text(
+        json.dumps(
+            {
+                "@jupyterlab/completer-extension:manager": {"autoCompletion": True},
+                "@jupyterlab/codemirror-extension:plugin": {
+                    "defaultConfig": {
+                        "autoClosingBrackets": True,
+                        "lineNumbers": True,
+                        "codeFolding": True,
+                    }
+                },
+            },
+            indent=2,
+        )
+    )
+
     subprocess.Popen(
         [
             "jupyter",

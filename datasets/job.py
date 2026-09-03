@@ -18,6 +18,7 @@ class DataSetJob(Job):
         self.valid_set = artifact.valid_set
 
     def run(self, root: Path, worker: "Worker") -> None:
+        (root / self.artifact.artifact_path).mkdir(parents=True, exist_ok=True)
         paths = self.artifact.paths(root)
         for name, path, tokenized_sources in (
             ("training", paths["training set"], self.train_set),
