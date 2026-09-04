@@ -27,6 +27,13 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+# lab.py's "local" target -- a project-local storage root with the same
+# manifest/artifact layout as the volume, for declaring/binding against
+# without a Modal deployment. Under .scratch/, already gitignored. Distinct
+# from the older, informal `.scratch/demo-volume` the demo notebooks build by
+# hand -- those don't go through lab.py and aren't part of this.
+LOCAL_STORAGE = PROJECT_ROOT / ".scratch" / "storage"
+
 
 def get_git_commit(dirty_suffix: bool = True) -> str:
     """Git commit hash of PROJECT_ROOT's current HEAD. Meant to be called from

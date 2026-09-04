@@ -58,15 +58,28 @@ modal secret create launchpad-lab JUPYTER_TOKEN=$(openssl rand -hex 24)
 ```
 
 The API those notebooks import is [lab.py](lab.py) -- a thin wrapper over
-`dag.resolve` that works anywhere `lab.ROOT` is a real mount:
+`dag.resolve` that works from JupyterLab (the volume mounted) or a local
+notebook alike, routed by `environment` (auto-detected: "modal" or "local")
+and `target` (a choice, `lab.init(target=...)`, defaulting to `environment`):
 
 ```python
 import lab
-lab.ls("tokenizers")                              # what's declared
-lab.load("tokenizers/bpe-3.0k-e4649eb4ff")        # by path, bound if built
-Tokenizer(vocab_size=3000, ...).bind(lab.ROOT)    # by parameters, equal artifact
-lab.check(pretraining); lab.declare(pretraining)  # local, not a round trip
+lab.init(target="modal")                          # only needed to reach the
+                                                    # real volume from a local
+                                                    # environment; otherwise
+                                                    # target already defaults
+                                                    # to environment
+lab.ls("tokenizers")                              # what's declared, on the current target
+lab.bind("tokenizers/bpe-3.0k-e4649eb4ff")        # by path, bound if built
+lab.bind(Tokenizer(vocab_size=3000, ...))         # by object -- calls its own .bind()
+lab.declare(pretraining)                          # resolve + check, no writes
+lab.declare(pretraining, commit=True)             # ...and write + publish
 ```
+
+Not every (environment, target) pair is allowed -- a modal environment can
+never touch local-only storage, and a local environment can declare against
+the real volume but never `bind` from it (no bytes to read locally). See
+[lab.py](lab.py)'s own module docstring for the full permission matrix.
 
 Nothing here forces a `volume.commit()`: every Volume mount sets
 `allow_background_commits=True`, so the platform flushes the lab's writes on

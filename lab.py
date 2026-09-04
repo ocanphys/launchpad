@@ -1,33 +1,65 @@
-"""Lab API: the same functions work from JupyterLab (volume mounted) or a
-local notebook (VS Code, no volume) -- the same names, the same shapes back,
-routed differently underneath:
+"""Lab API: environment (where this runs) vs. target (what storage an
+operation touches) -- two different questions, kept separate on purpose.
 
-    lab.load("tokenizers/bpe-3.0k-e4649eb4ff")     # by path
-    lab.check(pretraining)      # preview the graph, no writes
-    lab.declare(pretraining)    # declare, then commit
+`environment` is a fact about this process, auto-detected, never chosen:
+`"modal"` inside a container with the volume mounted, `"local"` everywhere
+else (a laptop, VS Code, a local Jupyter). `target` is a choice, made once at
+the top of a notebook via `lab.init(target=...)`, naming which storage
+backend `declare`/`bind` should actually touch: `"local"` (a project-local
+directory, `config.LOCAL_STORAGE`) or `"modal"` (the volume,
+`config.STORAGE`). `target` defaults to `environment` -- reaching the real
+volume from a laptop, or touching local-only storage from a container, are
+both things you have to ask for, never something that happens silently:
 
-In JupyterLab, `ROOT` is real (the volume is mounted), so these read and
-write it directly -- `load` comes back bound when the artifact is built,
-`check`/`declare` return the full `Declaration` (`.rows`, `.problems`, `.ok`).
-Locally, `ROOT` doesn't exist, so the same calls route through the deployed
-Modal functions instead (`declared_artifact`, `declare`) -- `load` comes back
-*unbound* (the manifest, not the bytes: bind() needs files that are only ever
-on the volume), and `check`/`declare` return `None` -- their report is
-printed, same as `main.declare`'s always was, because there's no local
-Declaration to hand back when there's no local filesystem to build one from.
+    import lab
+    lab.init(target="modal")   # only needed to reach the real volume from
+                                # a local environment -- otherwise skip this,
+                                # target already defaults to environment
 
-That's the one real difference, and it's `_in_container()` below deciding it,
-not the caller: a notebook that only calls `load`/`check`/`declare` and reads
-their *printed* output doesn't need to know or care which side it's on. It
-only becomes visible the moment code tries to use what `load` gave back as if
-it were bound (`.encode(...)`, `.train_tokens`, ...) -- which is the "loading
-something too big to have locally" case, and there's no way around that one
-except being in a container.
+Not every (environment, target) pair is allowed:
+
+    environment  target   declare   bind
+    local        local    yes       yes
+    local        modal    yes       no
+    modal        local    no        no
+    modal        modal    yes       yes
+
+`declare`/`bind` call `_require` first and raise `PermissionError` on a
+disallowed pair rather than doing something surprising -- an artifact never
+has to know any of this itself, it's `lab`'s rule to enforce, not the
+artifact's to ask about. The two `no`-for-bind cells collapse to one fact:
+`bind` is only ever allowed when `target == environment`, so it never needs a
+remote call -- it's always a plain local read against whichever root this
+process already has. `declare` has the one real cross-environment case:
+local environment, modal target -- write a manifest to the real volume from a
+laptop, via `Artifact.declare()` (a thin wrapper over the deployed `declare`
+function). A modal environment can never touch local-target storage at all
+-- that would be ephemeral, untracked state living only on one container's
+own disk, gone the moment it recycles.
+
+    lab.declare(pretraining)                 # resolve + check, no writes
+    lab.declare(pretraining, commit=True)     # ...and write/publish
+    lab.bind(tokenizer)                       # bind an object you have
+    lab.bind("tokenizers/bpe-3.0k-e4649eb4ff")  # or by path, if you don't
+
+`bind` never mutates what you hand it -- same contract `Artifact.bind` always
+had: the artifact you pass in stays exactly as unbound as it was, and what
+comes back is a new object, same class and parameters, with `_load` run and
+its methods usable.
+
+Distributed execution is not this API's job -- that's the Launcher (main.py's
+attempt_launch/run_job, leases, concurrency). What this API gives a notebook
+for running something itself is `lab.worker` plus `lab.root()`, for driving a
+job's `run(root, worker)` by hand, sequentially, against local-target storage
+-- the same shape the demo notebooks already use by hand against their own
+throwaway root.
 """
 
+import json
 import logging
 import os
 import tempfile
+import uuid
 from pathlib import Path
 
 import dag.resolve as dag_resolve
@@ -36,23 +68,77 @@ import dag.resolve as dag_resolve
 # family is imported for its side effect there, which is what makes
 # `Artifact.at` able to name the class a manifest refers to. main.py leans on
 # the same import for the same reason.
-from config import APP_NAME, LAB_NOTEBOOKS, STORAGE, VOLUME_NAME
+from config import APP_NAME, LOCAL_STORAGE, STORAGE, VOLUME_NAME
 from dag.artifact import MANIFEST, Artifact
 from dag.visualizer import SVG, visualize
 from system.runtime import Worker
 
-ROOT = Path(STORAGE)
-NOTEBOOKS = ROOT / LAB_NOTEBOOKS
+
+def _detect_environment() -> str:
+    """Where this process is actually running: "modal" if the volume is
+    mounted here, "local" otherwise. A fact about the process, not a
+    setting -- computed once, at import, and never re-checked: nothing about
+    a running process's own mounts changes later."""
+    return "modal" if Path(STORAGE).exists() and Path(STORAGE).is_dir() else "local"
 
 
-def _in_container() -> bool:
-    """Is the volume actually mounted here? The one thing every function
-    below branches on -- cheap and deterministic (a stat, not a network
-    call), so it's fine to call it on every entry rather than caching it
-    once at import: nothing about a running process's mounts changes later,
-    but recomputing costs nothing and needs no invalidation story either.
+environment = _detect_environment()
+target = environment  # default: touch whatever this environment natively has
+
+
+def init(target: str | None = None) -> None:
+    """Configure this session's target -- call once, at the top of a
+    notebook, right after `import lab`:
+
+        import lab
+        lab.init(target="modal")   # reach the real volume from anywhere
+
+    Omit `target` (or pass None) to reset it back to the default,
+    `environment` -- touch whatever this environment natively has. `target`
+    is a plain module attribute underneath (`lab.target = ...` still works;
+    `init` doesn't do anything `declare`/`bind` couldn't already see by
+    reading `lab.target` directly) -- this is just the one obvious place to
+    look for "how do I point this at something else."
     """
-    return ROOT.exists() and ROOT.is_dir()
+    globals()["target"] = target if target is not None else environment
+
+
+# Which (environment, target) pairs may do what -- see this module's own
+# docstring for the reasoning behind each cell.
+_PERMISSIONS = {
+    ("local", "local"): {"declare", "bind"},
+    ("local", "modal"): {"declare"},
+    ("modal", "local"): set(),
+    ("modal", "modal"): {"declare", "bind"},
+}
+
+
+def _require(op: str) -> None:
+    if op not in _PERMISSIONS[(environment, target)]:
+        raise PermissionError(
+            f"{op}() not allowed: environment={environment!r} cannot target "
+            f"{target!r} storage -- see lab.py's module docstring for the "
+            f"full permission matrix"
+        )
+
+
+def _root_for(t: str) -> Path:
+    if t == "local":
+        LOCAL_STORAGE.mkdir(parents=True, exist_ok=True)
+        return LOCAL_STORAGE
+    return Path(STORAGE)
+
+
+def root() -> Path:
+    """The current target's storage root -- what to pass as `root` to
+    job.run(root, worker) for a manual local run, or anywhere else a plain
+    root is needed. Not permission-checked itself (execution is out of this
+    API's scope, see the module docstring) -- by convention this is only
+    ever meaningful with target == environment, the same restriction bind()
+    itself enforces.
+    """
+    return _root_for(target)
+
 
 # A fake Worker for running a job by hand from a lab cell --
 # job.run(root, worker) -- instead of through main.run_job, which is the only
@@ -62,7 +148,7 @@ def _in_container() -> bool:
 # reads artifact_path/call_id today (only main.run_job does, around the
 # call), so these are placeholders, not identity.
 #
-# log goes to the console only, not to a file under ROOT -- TODO: wire this
+# log goes to the console only, not to a file under root() -- TODO: wire this
 # up to system.logs.call_logger once something needs to read a lab-run job's
 # log back. That opens a real file on the volume, which would need routing
 # through _outside_volume the same way refresh/publish are, since an open
@@ -77,6 +163,7 @@ worker = Worker(
     call_id="lab",
     log=_log,
     confirm_lease=lambda *_, **__: None,
+    progress={},
 )
 
 
@@ -95,10 +182,11 @@ def _outside_volume(op):
     """Run a Modal volume operation with cwd stepped outside the mount first.
 
     Modal counts an open cwd under the volume the same as an open file, and
-    every notebook here starts rooted under ROOT (`jupyter`'s `root_dir`) --
-    so reload (and commit, which reloads internally to pick up what it just
-    committed) would otherwise fail from essentially every real cell with
-    "there are open files preventing the operation: cwd is inside volume".
+    every notebook here starts rooted under root() (`jupyter`'s `root_dir`)
+    -- so reload (and commit, which reloads internally to pick up what it
+    just committed) would otherwise fail from essentially every real cell
+    with "there are open files preventing the operation: cwd is inside
+    volume".
     """
     cwd = os.getcwd()
     os.chdir(tempfile.gettempdir())
@@ -111,123 +199,185 @@ def _outside_volume(op):
 def refresh() -> None:
     """Pull in whatever other containers have committed since this one booted.
 
-    No-op outside a container -- there's no local mount to reload. Inside
-    one, this does real work and can raise for real reasons (an actually
-    open file, most commonly), which reach the caller unchanged: swallowing
-    them here would hide exactly the failure a notebook needs to see and act
-    on (close whatever's open, or read the error to find out what is -- see
-    `_outside_volume`'s own docstring for the one case already handled).
+    Keyed on `environment` alone, not `target`: this is about the volume
+    *this container* has mounted, a fact of where the process is running,
+    not a caller's storage choice -- no-op outside a container, since
+    there's no local mount to reload.
 
     Not automatic even in a container. A notebook server rooted at the
     volume routinely holds files open under it, and reload can't run while
     it does -- better an explicit call in a cell than a background thread
-    that fails half the time and yanks the filesystem the other half.
+    that fails half the time and yanks the filesystem the other half. Real
+    failures (an actually open file, most commonly) reach the caller
+    unchanged -- see `_outside_volume`'s own docstring.
     """
-    if _in_container():
+    if environment == "modal":
         _outside_volume(_volume().reload)
 
 
 def publish() -> None:
     """Make this container's writes visible to everything else.
 
-    No-op outside a container -- there's nothing local to commit; `declare`
-    already routes to the volume on its own when called locally (see
-    `declare`). Inside a container, this is for anything else a cell writes
-    under ROOT by hand -- until it lands, the writes exist only on this
-    container's own disk, same as a job's do before `initialize_worker`
-    commits. Real failures propagate, same reasoning as `refresh`.
+    Same `environment`-only gating as `refresh`, same reasoning. `declare`
+    already calls this on its own when it commits against a modal target.
+    This is for anything else a cell writes under root() by hand -- until it
+    lands, the writes exist only on this container's own disk, same as a
+    job's do before `initialize_worker` commits.
     """
-    if _in_container():
+    if environment == "modal":
         _outside_volume(_volume().commit)
 
 
 def ls(prefix: str = "") -> list[str]:
-    """Every artifact declared under `prefix`, as artifact_paths.
+    """Every artifact declared under `prefix`, on the current target, as
+    artifact_paths.
 
-    The listing that makes `load` usable without guessing -- an artifact's
-    folder is its identity, so "what's on the volume" is exactly "where are the
-    manifests".
+    The listing that makes `bind` usable without guessing -- an artifact's
+    folder is its identity, so "what's declared" is exactly "where are the
+    manifests". Same access pattern as `bind` (a direct local read against
+    whichever root the target resolves to, no remote equivalent exists for
+    either), so it shares `bind`'s permission cell rather than getting a row
+    of its own in the matrix.
 
-        lab.ls()             -> every artifact
+        lab.ls()             -> every artifact on the current target
         lab.ls("tokenizers") -> just the shared tokenizers
         lab.ls("runs/RUN_TOKENS")
     """
-    base = ROOT / prefix
+    _require("bind")
+    r = _root_for(target)
+    base = r / prefix
     if not base.exists():
         return []
-    return sorted(
-        path.parent.relative_to(ROOT).as_posix() for path in base.rglob(MANIFEST)
-    )
+    return sorted(path.parent.relative_to(r).as_posix() for path in base.rglob(MANIFEST))
 
 
-def load(artifact_path: str | Path) -> Artifact:
-    """The artifact declared at `artifact_path`.
+def bind(artifact_or_path: Artifact | str | Path) -> Artifact:
+    """The bound version of `artifact_or_path`, on the current target.
 
-    In a container, this is `Artifact.at(ROOT / artifact_path)` -- a local
-    read, bound when every declared file is there, plain when it isn't
-    (declared but not run yet, or run halfway). Locally, there's no ROOT to
-    read, so this calls the deployed `declared_artifact` function instead
-    and gets back the same kind of object, minus the binding: the manifest
-    and its parameters, never the bytes `bind()` would have read off disk,
-    because those bytes only ever exist on the volume. Calling a method that
-    needs the bound state (`.encode(...)`, `.train_tokens`, ...) on what
-    this returns locally raises the same `RuntimeError` an unbuilt artifact's
-    would in a container -- "not bound yet" -- for the same reason: nothing
-    to read it from here.
+    Two ways in, same old structure either way -- this never reimplements
+    binding, it only ever supplies the root:
+
+    - Given an artifact object -- one you already have, with its own
+      parameters and therefore its own artifact_path -- calls *that
+      object's own* `.bind(root)` directly. `lab.bind(tokenizer)` is exactly
+      `tokenizer.bind(lab.root())`, just letting `lab` name the root instead
+      of you spelling it out. The result is a new object, same class and
+      parameters as what you passed in, just now with `_load` run and its
+      methods usable (`.encode(...)`, etc.) -- `Artifact.bind`'s own
+      contract, untouched. What you passed in is never mutated.
+    - Given a path -- resolves whatever's declared there first
+      (`Artifact.at`), for when you don't have the object in hand, only its
+      folder.
+
+    Only ever allowed when `target == environment` (see the permission
+    matrix) -- so this is always a plain local read, never a remote call.
+    Comes back bound when every declared file is there, plain when it
+    isn't -- declared but not run yet, or run halfway.
     """
-    if _in_container():
-        return Artifact.at(ROOT / artifact_path)
-
-    import modal
-    declared_artifact_fn = modal.Function.from_name(APP_NAME, "declared_artifact")
-    result = declared_artifact_fn.remote(str(artifact_path))
-    if result is None:
-        raise FileNotFoundError(f"{artifact_path}: not declared on the volume")
-    artifact, _state = result
-    return artifact
+    _require("bind")
+    r = _root_for(target)
+    if isinstance(artifact_or_path, Artifact):
+        return artifact_or_path.bind(r)
+    return Artifact.at(r / artifact_or_path)
 
 
-def check(artifact: Artifact, strict_commit: bool = False) -> dag_resolve.Declaration | None:
-    """Reconcile `artifact` and its whole dependency tree against the volume,
-    writing nothing.
+def _write_run_notebook(run_id: str, cell: str, root: Path) -> None:
+    """Starter notebook at `root`/runs/{run_id}/notebook.ipynb, the first
+    time this run declares successfully -- lab imports first, then `cell`,
+    so opening it in the lab picks up right where the declaring notebook
+    left off. Exclusive create: left alone on every later call for the same
+    run_id, since by then it may already be the thing someone's editing.
 
-    In a container, returns the `Declaration` itself rather than its report:
-    in a cell it prints the report anyway (`Declaration.__repr__` is
-    `__str__`), and having the object means `.rows`, `.problems` and `.ok`
-    are there when the report isn't enough. Locally there's no ROOT to build
-    a `Declaration` from, so this routes through `artifact.declare(write=
-    False)` (the deployed `declare` function) instead and returns `None` --
-    its report is printed, same as `main.declare`'s always was, but there's
-    no local object behind it to hand back.
+    Same shape `main.py`'s own `_write_run_notebook` writes for the
+    cross-environment case (routed through the deployed `declare` function)
+    -- duplicated here on purpose rather than imported: `declare`'s direct
+    path (target == environment) runs in every worker container, and none
+    of them stage `lab.py` except the lab's own image, so `main.py` can't
+    import this module without breaking `run_job`/`declare` elsewhere. A
+    few lines of duplication is cheaper than that.
     """
-    if _in_container():
-        return dag_resolve.Declaration(artifact, ROOT, strict_commit).check()
-    artifact.declare(write=False, strict_commit=strict_commit)
-    return None
+    path = root / "runs" / run_id / "notebook.ipynb"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    source = 'import lab\nfrom lab import worker\nlab.init(target="modal")\nlab.refresh()\n\n' + cell
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "id": uuid.uuid4().hex[:8],
+                "metadata": {},
+                "outputs": [],
+                "source": source.splitlines(keepends=True),
+            }
+        ],
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    try:
+        with path.open("x") as handle:
+            handle.write(json.dumps(notebook, indent=1))
+    except FileExistsError:
+        pass  # already there -- left alone, not resynced
 
 
-def declare(artifact: Artifact, strict_commit: bool = False) -> dag_resolve.Declaration | None:
-    """`check`, then write a manifest for everything still `new`, then commit.
+def declare(
+    artifact: Artifact, *, commit: bool = False, strict_commit: bool = False, cell: str | None = None
+) -> dag_resolve.Declaration | None:
+    """Resolve `artifact` and its whole dependency tree against the current
+    target and check it -- creating the plan, nothing more -- unless
+    `commit` is True, in which case it also writes a manifest for everything
+    still `new` and publishes. An artifact never has to know any of this
+    permission logic itself; it just needs to know the target it's being
+    asked to declare against, which this supplies.
 
-    In a container: writes locally, commits, and returns the `Declaration`
-    (same reasoning as `check`). Refuses outright if the tree is
-    inconsistent -- `Declaration.write` raises rather than declaring half of
-    a disputed graph, and nothing is committed in that case, so a refusal
-    leaves the volume exactly as it was. Locally: routes through
-    `artifact.declare(write=True)`, which does the same check-then-write on
-    the volume via the deployed `declare` function, and returns `None` for
-    the same reason `check` does.
+    If `artifact` has its own `run_id` (a run-scoped artifact, e.g. a
+    Pretraining) and `commit` is True, this also sets up that run's starter
+    notebook the first time -- no separate call needed, `run_id` is read
+    straight off the artifact rather than asked for again. `cell` -- the
+    defining cell's own source, typically `In[-1]` -- seeds it beyond the
+    bare `import lab` boilerplate; omit it and the notebook still gets
+    created, just without that seed.
+
+    When `target == environment`, this is a direct local operation: builds a
+    `Declaration` against whatever root the target resolves to, refuses
+    outright if the tree is inconsistent when `commit` is True (nothing is
+    written in that case, so a refusal leaves the target exactly as it was),
+    and returns the `Declaration` itself -- `.rows`, `.problems`, `.ok` are
+    there when the printed report isn't enough.
+
+    The one other allowed case (local environment, modal target) routes
+    through `artifact.declare(write=commit, strict_commit=strict_commit,
+    run_id=..., cell=cell)` instead -- the deployed `declare` function, the
+    only thing a local process can reach on the volume, which sets up the
+    same starter notebook server-side -- and returns `None`: its report is
+    printed there, same as `main.declare`'s always was, but there's no local
+    `Declaration` object to hand back when there's no local root to have
+    built one from.
     """
-    if _in_container():
-        declaration = dag_resolve.Declaration(artifact, ROOT, strict_commit)
-        declaration.write()
-        publish()
+    _require("declare")
+    run_id = getattr(artifact, "run_id", None)
+    if target == environment:
+        r = _root_for(target)
+        declaration = dag_resolve.Declaration(artifact, r, strict_commit)
+        declaration.write() if commit else declaration.check()
+        if commit:
+            if run_id:
+                _write_run_notebook(run_id, cell or "", r)
+            if environment == "modal":
+                publish()
         return declaration
-    artifact.declare(write=True, strict_commit=strict_commit)
+    artifact.declare(write=commit, strict_commit=strict_commit, run_id=run_id, cell=cell)
     return None
 
 
 def plan(artifact: Artifact) -> SVG:
     """The dependency graph, drawn, with each node outlined by its status on
-    the volume. Renders inline as a cell's last line."""
-    return visualize(dag_resolve.resolve(artifact), ROOT)
+    the current target. Renders inline as a cell's last line. Same
+    permission cell as `bind`/`ls` -- a direct local read, no remote
+    equivalent."""
+    _require("bind")
+    return visualize(dag_resolve.resolve(artifact), _root_for(target))

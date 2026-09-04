@@ -608,10 +608,21 @@ def _write_run_notebook(run_id: str, cell: str) -> None:
     Exclusive create, same as Declaration.write()'s manifests: left alone on
     every later call for the same run_id, since by then it may already be
     the thing someone's editing.
+
+    `lab.init(target="modal")` is explicit here, not left to default: this
+    run_id and everything under it live on the volume, so this notebook has
+    to reach the volume no matter where it's later opened from. Opened in
+    JupyterLab, `lab.target` would already default to "modal" on its own
+    (environment is "modal" there) -- but opened locally instead (this file
+    copied down, or read some other way), the same default would silently
+    resolve to "local" and start working against an unrelated
+    `.scratch/storage` directory that has never heard of this run. Pinning
+    it here means this notebook always means the same thing regardless of
+    where it's opened, which a run-scoped notebook has to.
     """
     path = Path(STORAGE) / "runs" / run_id / "notebook.ipynb"
     path.parent.mkdir(parents=True, exist_ok=True)
-    source = "import lab\nfrom lab import worker\nlab.refresh()\n\n" + cell
+    source = 'import lab\nfrom lab import worker\nlab.init(target="modal")\nlab.refresh()\n\n' + cell
     notebook = {
         "cells": [
             {
