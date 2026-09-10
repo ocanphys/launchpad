@@ -12,12 +12,6 @@ STATE_REFRESH_SECONDS = 0.5  # how often leasebook's one thread re-reads the vol
 CALL_LOGS = "call_functions"
 LOG_FLUSH_SECONDS = 10  # how long a worker waits on the way out for its last line to come back from Modal
 
-# Where a notebook lives on the volume, relative to STORAGE. lab.py names
-# this folder; the `jupyter` function (main.py) roots its file browser one
-# level up, at STORAGE itself, so this is a landmark inside it, not a mount
-# point of its own.
-LAB_NOTEBOOKS = "notebooks"
-
 LAB_PORT = 8888
 LAB_SECRET = "launchpad-lab"  # supplies JUPYTER_TOKEN to both the lab and the dashboard
 LAB_IDLE_SECONDS = 900  # scale the lab container down after this much idle
@@ -33,13 +27,6 @@ import subprocess
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-
-# lab.py's "local" target -- a project-local storage root with the same
-# manifest/artifact layout as the volume, for declaring/binding against
-# without a Modal deployment. Under .scratch/, already gitignored. Distinct
-# from the older, informal `.scratch/demo-volume` the demo notebooks build by
-# hand -- those don't go through lab.py and aren't part of this.
-LOCAL_STORAGE = PROJECT_ROOT / ".scratch" / "storage"
 
 
 def get_git_commit(dirty_suffix: bool = True) -> str:

@@ -47,6 +47,7 @@ class Pretraining(Artifact):
     starting_checkpoint: Pretraining | None = None
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.training_parameters.total_steps <= 0:
             raise ValueError("training_parameters.total_steps must be positive")
         if self.starting_checkpoint is None:

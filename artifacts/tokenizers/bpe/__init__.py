@@ -107,13 +107,13 @@ class Tokenizer(Artifact):
 
     vocab_size: int
     special_tokens: tuple[str, ...]
-    sources: tuple[Source, ...]  # trained on these; order doesn't identify it
+    sources: frozenset[Source]  # a set: which sources trained it, not in what order
 
     @property
     def uid(self) -> str:
         # digest covers what can't stay readable (special_tokens, sources), so
-        # two tokenizers differing only there don't share a folder. Sources are
-        # sorted -- *which* sources trained it, not the order they were listed in.
+        # two tokenizers differing only there don't share a folder. A set has no
+        # order, so the digest picks one to hash.
         vocab_label = (
             f"{self.vocab_size / 1000:.1f}k"
             if self.vocab_size > 1000
@@ -135,10 +135,10 @@ class Tokenizer(Artifact):
     # Held on the instance and deliberately not a field: it isn't what
     # identifies this tokenizer, so it stays out of ==, hash, and the manifest.
     # object.__setattr__ because the dataclass is frozen -- but by the time
-    # this runs, `self` is already the private copy Artifact.bind just made
-    # (see bind's own docstring), not the object bind() was called on. Nobody
-    # else holds a reference to this particular copy yet, so mutating it here
-    # is invisible to everyone but the caller about to receive it back.
+    # this runs, `self` is the object Artifact.bind read from the stored
+    # manifest, not the one bind() was called on. Nobody else holds a
+    # reference to it yet, so mutating it here is invisible to everyone but
+    # the caller about to receive it back.
 
     def _load(self, root: Path) -> None:
         """Artifact._load's hook: read this artifact's own tokenizer.json --
@@ -146,8 +146,8 @@ class Tokenizer(Artifact):
         artifact declares. The inverse of TokenizerJob.save.
 
         object.__setattr__ because the dataclass is frozen -- see the comment
-        above this method for why that's safe: `self` here is bind's own
-        private copy, not the artifact anyone else is holding.
+        above this method for why that's safe: `self` here is the object bind
+        read from the manifest, not the artifact anyone else is holding.
         """
         data = json.loads(self.paths(root)["tokenizer"].read_text())
         if tuple(data["special_tokens"]) != self.special_tokens:

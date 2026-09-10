@@ -1,76 +1,85 @@
-"""Resolver regressions using local manifests."""
+"""Pure resolution: order, deduplication, agreement, cycles. No storage."""
+
+from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from typing import ClassVar
 
 from artifacts.core.artifact import Artifact
-from artifacts.core.resolve import Node, conflict_diff, declare, resolve
+from artifacts.core.resolve import resolve
+from artifacts.sources import Source
+from artifacts.tokenizers.bpe import TokenizedSource, Tokenizer
+
+ODYSSEY = Source(name="odyssey", url="https://example.org/odyssey.txt")
+ILIAD = Source(name="iliad", url="https://example.org/iliad.txt")
+
+
+def tokenizer(*sources: Source) -> Tokenizer:
+    return Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=sources)
 
 
 @dataclass(frozen=True)
-class Example(Artifact):
-    producer = "unused.Job"
-    value: object
+class Link(Artifact):
+    """One optional dependency, so a cycle can be closed by hand."""
+
+    producer: ClassVar[str | None] = None
+
+    name: str
+    to: Link | None = None
 
     @property
-    def uid(self):
-        return "example"
+    def uid(self) -> str:
+        return self.name
 
     @property
-    def artifact_path(self):
-        return Path(self.uid)
+    def artifact_path(self) -> Path:
+        return Path("links") / self.name
 
     @property
-    def files(self):
-        return {"first": "first.txt", "second": "second.txt"}
+    def files(self) -> dict[str, str]:
+        return {}
 
 
 class ResolveTests(unittest.TestCase):
-    def test_empty_containers_are_visible_in_conflicts(self):
-        node = Node(
-            Example([], commit="new"),
-            (),
-            "conflict",
-            recorded=Example({}, commit="old"),
-        )
+    def test_dependencies_come_first_and_the_request_last(self):
+        tokens = TokenizedSource(tokenizer=tokenizer(ODYSSEY, ILIAD), source=ODYSSEY)
+        # fields by name: `source` is walked before `tokenizer`, whose own
+        # sources then come by path, with odyssey already seen
         self.assertEqual(
-            conflict_diff(node), ["parameters.value: on disk {}, requested []"]
+            [str(a.artifact_path) for a in resolve(tokens)],
+            [
+                "sources/odyssey",
+                "sources/iliad",
+                f"tokenizers/{tokens.tokenizer.uid}",
+                str(tokens.artifact_path),
+            ],
         )
 
-    def test_conflict_retains_commit_drift(self):
-        with TemporaryDirectory() as directory:
-            target = Path(directory)
-            declare(resolve(Example("old", commit="old"), target=target))
-            dag = resolve(Example("new", commit="new"), target=target)
-            node = dag["example"]
-            self.assertEqual(node.status, "conflict")
-            self.assertTrue(node.drift)
-            self.assertEqual(node.recorded_commit, "old")
-            self.assertFalse(dag.ok)
+    def test_a_shared_dependency_resolves_once_keeping_the_first_object(self):
+        direct = Source(name="odyssey", url=ODYSSEY.url, commit="direct")
+        nested = Source(name="odyssey", url=ODYSSEY.url, commit="nested")
+        tokens = TokenizedSource(tokenizer=tokenizer(nested), source=direct)
+        sources = [a for a in resolve(tokens) if isinstance(a, Source)]
+        self.assertEqual(len(sources), 1)
+        self.assertIs(sources[0], direct)  # `source` is walked before `tokenizer`
 
-    def test_conflicting_requests_at_same_path_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "different artifacts requested"):
-            resolve(Example("a", commit="same"), Example("b", commit="same"))
-        self.assertEqual(
-            len(resolve(Example("a", commit="same"), Example("a", commit="same"))), 1
-        )
+    def test_a_conflicting_leaf_behind_a_shared_path_is_found(self):
+        elsewhere = Source(name="odyssey", url="https://example.org/other.txt")
+        # tokenizer(elsewhere) computes the same path as tokenizer(ODYSSEY):
+        # the uid digests source names, not URLs. Only the leaf disagrees.
+        tokens = TokenizedSource(tokenizer=tokenizer(elsewhere), source=ODYSSEY)
+        with self.assertRaisesRegex(ValueError, "different definitions at sources/odyssey"):
+            resolve(tokens)
 
-    def test_declaration_and_completion_statuses(self):
-        with TemporaryDirectory() as directory:
-            target = Path(directory)
-            artifact = Example("a", commit="same")
-            dag = resolve(artifact, target=target)
-            self.assertEqual(dag["example"].status, "new")
-            self.assertEqual(len(declare(dag)), 1)
-            self.assertEqual(declare(dag), [])
-            self.assertEqual(
-                resolve(artifact, target=target)["example"].status, "declared"
-            )
-            (target / "example/first.txt").touch()
-            self.assertEqual(
-                resolve(artifact, target=target)["example"].status, "partial"
-            )
-            (target / "example/second.txt").touch()
-            self.assertEqual(resolve(artifact, target=target)["example"].status, "done")
+    def test_a_cycle_is_reported_as_a_chain(self):
+        a, b = Link("a"), Link("b")
+        object.__setattr__(a, "to", b)
+        object.__setattr__(b, "to", a)
+        with self.assertRaisesRegex(ValueError, "cycle: links/a -> links/b -> links/a"):
+            resolve(a)
+
+
+if __name__ == "__main__":
+    unittest.main()

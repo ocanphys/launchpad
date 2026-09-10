@@ -26,11 +26,10 @@ class MappedDataSet(Artifact):
     and sources/ are separate from each other.
 
     It still gets a folder (`mappeddatasets/<uid>`) and still gets declared
-    the same way as everything else -- that's what lets `Artifact.at`,
+    the same way as everything else -- that's what lets `Artifact.load`,
     resolution, and every notebook that already knows how to find an
     artifact by path find this one too. The folder just never holds
-    anything a job wrote; the manifest `artifacts.core.resolve.declare`
-    puts there is the only file in it.
+    anything a job wrote; its manifest is the only file in it.
 
     Shared, like DataSet -- no run_id, identity a digest over the tokenizer
     and source lists, the same pattern as Tokenizer/TokenizedSource. The
@@ -39,7 +38,7 @@ class MappedDataSet(Artifact):
     file); this one never writes anything at all.
     """
 
-    producer: ClassVar[str] = "artifacts.mappeddataset.jobs.MappedDataSetJob"
+    producer: ClassVar[None] = None  # nothing to write: done when its sources are
 
     train_set: tuple[TokenizedSource, ...]
     valid_set: tuple[TokenizedSource, ...]
@@ -77,10 +76,9 @@ class MappedDataSet(Artifact):
 
     def completion_paths(self, root: Path) -> list[Path]:
         """Done means every dependency's tokens.bin exists -- not anything
-        in this artifact's own (empty) folder. See Artifact.completion_paths
-        for why the base class needs this hook at all, and artifacts/core/resolve.py's
-        `inspect` for why the pre-declaration new/undeclared check still
-        looks at this artifact's own folder rather than this."""
+        in this artifact's own (empty) folder. Declaration's undeclared check
+        still asks about this artifact's own (empty) files, so it can be
+        `new` while every one of these already exists."""
         return [ts.paths(root)["tokens"] for ts in (*self.train_set, *self.valid_set)]
 
     # -- the bound view ------------------------------------------------------
@@ -96,9 +94,9 @@ class MappedDataSet(Artifact):
         from artifacts.mappeddataset.tokenstream import TokenStream
 
         # object.__setattr__ because the dataclass is frozen -- but `self`
-        # here is bind's own private copy (see Artifact.bind), never the
-        # object bind() was called on, so this is invisible to whoever is
-        # still holding the unbound original.
+        # here is the object Artifact.bind read from the stored manifest,
+        # never the one bind() was called on, so this is invisible to whoever
+        # is still holding the unbound original.
         object.__setattr__(
             self,
             "_train_tokens",

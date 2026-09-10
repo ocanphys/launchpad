@@ -60,7 +60,7 @@ class TemplateTokenizer(Artifact):
 
     vocab_size: int
     special_tokens: tuple[str, ...]
-    sources: tuple[Source, ...]  # trained on these; order doesn't identify it
+    sources: frozenset[Source]  # a set: which sources trained it, not in what order
 
     @property
     def uid(self) -> str:
@@ -74,7 +74,7 @@ class TemplateTokenizer(Artifact):
 
     @property
     def files(self) -> dict[str, str]:
-        # bare filenames, not paths: the resolver creates this folder (and
+        # bare filenames, not paths: declaration creates this folder (and
         # writes manifest.json into it) before the job runs
         return {"tokenizer": "tokenizer.json"}
 
@@ -85,12 +85,11 @@ class TemplateTokenizer(Artifact):
         the state encode()/decode() run on -- and check it against what this
         artifact declares. The inverse of TemplateTokenizerJob.save. Override
         this in your own family whenever "using" the artifact means holding
-        something in memory; `Artifact.at(folder)` and `bind(root)` call it
-        for you.
+        something in memory; `bind(root)` calls it for you.
 
         object.__setattr__ because the dataclass is frozen -- but by the time
-        this runs, `self` is bind's own private copy (see Artifact.bind),
-        never the object bind() was called on, so mutating it here is
+        this runs, `self` is the object Artifact.bind read from the stored
+        manifest, never the one bind() was called on, so mutating it here is
         invisible to whoever is still holding the unbound original.
         """
         data = json.loads(self.paths(root)["tokenizer"].read_text())

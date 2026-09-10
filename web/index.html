@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>runs</title>
+<title>artifacts</title>
 <!-- Inline SVG, not a mounted file -- avoids both a GET /favicon.ico 404
      (browsers request that path automatically unless a <link rel="icon">
      says otherwise) and adding a static file just for this. Same dot motif
@@ -18,27 +18,9 @@
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .4rem; }
   h1 { font-size: 1rem; font-weight: 600; margin: 0; }
 
-  /* runs | datasets | sources -- always visible, regardless of which view
-     or drill-down page is on screen, so jumping between top-level views
-     never means going back to the dashboard first. Active view is bold,
-     not a different color -- same "no separate palette for UI chrome"
-     rule the rest of the page follows. */
-  #viewNav { font-size: 12px; }
-  #viewNav a { color: inherit; opacity: .55; text-decoration: none; }
-  #viewNav a:hover { opacity: .85; }
-  #viewNav a.active { opacity: 1; font-weight: 600; }
-  #viewNav .nav-sep { opacity: .3; margin: 0 .3rem; }
-
-  /* Leaves the SPA entirely (a redirect to the lab's own subdomain), so it
-     sits outside #viewNav and takes no part in app.js's data-view
-     route-highlighting. */
+  /* Leaves the SPA entirely: a redirect to the lab's own subdomain. */
   #labLink { font-size: 12px; color: inherit; opacity: .55; text-decoration: none; }
   #labLink:hover { opacity: .85; }
-
-  /* Per-run lab-icon link (runRow, web/render.js) -- same treatment as
-     #labLink above, scoped as a class since it repeats once per run. */
-  a.lab-run-link { font-size: 12px; color: inherit; opacity: .55; text-decoration: none; margin-left: 8px; }
-  a.lab-run-link:hover { opacity: .85; }
 
   #conn { font-size: 11px; padding: .1rem .55rem; border: 1px solid; border-radius: 999px; white-space: nowrap; }
   .ok  { color: #1a7f37; border-color: #1a7f37; }
@@ -67,45 +49,15 @@
   .dot.blocked  { background: rgba(128,128,128,.4); }
   .dot.failed   { background: #cf222e; }
 
-  /* A run is a plain grouping label now -- everything that used to be on
-     its own summary row (lease, call, heartbeat) is per-artifact, on the
-     rows underneath. No bottom border of its own; the top border it does
-     have separates it from the *previous* run's last artifact row. */
-  tr.run-header td { font-weight: 600; opacity: .8; padding-top: .5rem; }
-  /* Indent only the first (artifact/type) column -- padding-left on every
-     td in the row would shove the call/heartbeat/run columns out of step
-     with the header and with every other row's fixed column widths. The
-     first column is widened in the colgroup below to give this room
-     without wrapping; that width comes out of the flexible path column
-     next to it, not out of the other fixed-width columns. */
+  /* The first (artifact/type) column never wraps -- a wrapped row grows
+     taller and throws off every row's vertical rhythm. */
   tr.artifact-row td:first-child {
-    padding-left: 1.4rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  /* depth-1: nested one level under a type-group's summary row (or, in the
-     `datasets` view, under a dataset's own row). depth-2: a dataset's own
-     dependency rows nested inside a type-group nested under the dataset's
-     row -- three levels deep in that one case, so this needs a tier
-     typeGroupedRows' plain run case never reaches. */
-  tr.artifact-row.depth-1 td:first-child { padding-left: 2.8rem; }
-  tr.artifact-row.depth-2 td:first-child { padding-left: 4.2rem; }
 
-  /* A type-group's summary row -- same indent level as an ungrouped
-     artifact row at the same depth, since it stands in for one. Not bold
-     and not dimmed -- it's a stand-in for a normal row, not a heading.
-     Whole row is the click target (see groupHeaderRow in render.js), so
-     it gets the pointer cursor, not just the arrow glyph. depth-1: a
-     dataset's own dependency groups, nested under the dataset's row. */
-  tr.group-header td { padding-left: 1.4rem; cursor: pointer; user-select: none; }
-  tr.group-header.depth-1 td { padding-left: 2.8rem; }
-  tr.group-header:hover { background: rgba(128,128,128,.06); }
-  .group-arrow { display: inline-block; width: 1rem; opacity: .6; }
-
-  .artifact-type, .group-type { font-size: 11px; }
-  /* "(Mapped)" next to a MappedDataSet's type, in the `datasets` view --
-     see render.js's artifactRow (state.mapped) and main.py's
-     datasets_state. Dim like every other secondary label on the page, not
-     a badge -- it's a note about the row, not a status. */
+  .artifact-type { font-size: 11px; }
+  /* "(Mapped)" next to a MappedDataSet's type. Dim like every other
+     secondary label on the page, not a badge -- a note, not a status. */
   .artifact-tag { opacity: .5; font-size: 11px; }
   /* Long paths truncate with an ellipsis instead of wrapping to a second
      line -- a wrapped row grows taller and throws off every row's
@@ -185,14 +137,7 @@
 <body>
 
 <header>
-  <h1 id="title">runs</h1>
-  <nav id="viewNav">
-    <a href="#/runs" data-view="runs">runs</a>
-    <span class="nav-sep">|</span>
-    <a href="#/datasets" data-view="datasets">datasets</a>
-    <span class="nav-sep">|</span>
-    <a href="#/sources" data-view="sources">sources</a>
-  </nav>
+  <h1 id="title">artifacts</h1>
   <a id="labLink" href="/lab" target="_blank" rel="noopener">lab ↗</a>
   <span id="conn" class="bad">loading</span>
 </header>
@@ -215,15 +160,14 @@
 </table>
 <p class="empty" id="empty" hidden></p>
 
-<!-- Only a run whose preflight check itself raised lands here -- a normal
-     run, even an empty or blocked one, never does. Hidden entirely when
-     there are none; collapsed by default when there are, since these are
-     the exception, not what a glance at the page is usually for. -->
+<!-- Only a manifest state() could not read lands here. Hidden entirely
+     when there are none; collapsed by default when there are, since these
+     are the exception, not what a glance at the page is usually for. -->
 <details id="problems" hidden>
-  <summary>problem runs (<span id="problemCount">0</span>)</summary>
+  <summary>unreadable manifests (<span id="problemCount">0</span>)</summary>
   <table>
     <thead>
-      <tr><th>run</th><th>error</th></tr>
+      <tr><th>path</th><th>error</th></tr>
     </thead>
     <tbody id="problemRows"></tbody>
   </table>

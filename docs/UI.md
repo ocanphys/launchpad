@@ -13,11 +13,10 @@ Three files split by responsibility, each a pure function of its inputs
 with no state of its own:
 
 - **[app.js](../web/app.js)** -- the only file that touches the network or
-  holds mutable state: routing, the poll loop, launching, and the small
-  bits of client-only UI state (which groups are open, which button was
-  just clicked). Everything else is handed data and gives back DOM.
-- **[render.js](../web/render.js)** -- the three table views (runs,
-  datasets, sources) and the artifact/group row components they share.
+  holds mutable state: routing, the poll loop, launching, and the one bit
+  of client-only UI state (which button was just clicked). Everything else
+  is handed data and gives back DOM.
+- **[render.js](../web/render.js)** -- the artifact row and its cells.
 - **[artifactview.js](../web/artifactview.js)** -- one artifact's own page:
   its type, parameters and dependency links.
 - **[el.js](../web/el.js)** -- the one DOM-building primitive everything
@@ -26,10 +25,9 @@ with no state of its own:
 
 ## Routing
 
-Hash-based, client-side, four shapes (`app.js`'s `parseRoute`):
+Hash-based, client-side, two shapes (`app.js`'s `parseRoute`):
 
-- `#/runs`, `#/datasets`, `#/sources` -- the three table views (`""` is an
-  alias for `runs`).
+- `""` -- the table.
 - `#/artifact/<path>` -- one artifact's own page.
 
 `route()` re-runs on every `hashchange` and once at load. It owns the one
@@ -38,54 +36,24 @@ switching routes always tears down whatever polling the previous route had
 going, so navigating away never leaves a view quietly polling in the
 background.
 
-## The three table views
+## The table
 
-All three reuse the same `<table>` markup in `index.html` and the same
-`artifactRow`/`actionButton`/`dot` components in `render.js` -- only how
-each is sliced out of the payload and grouped differs. All three come from
-one endpoint, `/state`, backed by one function, `main.py`'s `read_state`:
-it reads the volume once (one `volume.reload()`, one lease snapshot, and
-one `core_resolve.resolve` over every declared artifact on the volume) and
-computes each distinct artifact's state at most once, however many of the
-three views reference it, rather than each view re-inspecting shared
-artifacts (a source behind a dozen tokenizers, say) independently. The
-single walk is what deduplicates: a tokenizer reachable from three runs and
-two datasets is one node in one graph, visited and inspected once.
-
-| view | payload slice | shape | grouping |
-|---|---|---|---|
-| `runs` | `runs` | `{run_id: {artifacts}}` | per run, by artifact type |
-| `datasets` | `datasets` | `{path: {state, artifacts}}` | per dataset, by its dependency closure's type |
-| `sources` | `sources` | `{path: state}` | none -- flat |
-
-A run's own artifacts and a dataset's dependency closure are both
-type-grouped the same way, via one shared function, `typeGroupedRows`: a
-type with more than one member collapses behind a summary row (closed by
-default; open/closed state lives in `app.js`'s `openGroups`, namespaced so
-two different owners' same-named groups never collide); a type with just
-one member renders directly. Groups, and members within a group, are
-ordered by topological depth (`render.js`'s `topoDepth`, walking each
-artifact's own `depends_on` list), deepest first -- what has to be built
-before anything else (a Source, a Tokenizer) sinks to the bottom, what
-depends on everything above it floats to the top, so a run reads top to
-bottom the way it was built bottom to top. Nesting depth
-(`artifactRow`/`groupHeaderRow`'s `depth` parameter, unrelated to
-`topoDepth`) controls indentation -- a dataset's dependency rows sit one
-level deeper than a run's own, since they're nested under the dataset's
-row rather than a run header.
+One `<table>` in `index.html`, one row per artifact on the volume, by path,
+built from `artifactRow`/`actionButton`/`dot` in `render.js`. It comes from
+one endpoint, `/state`, backed by one function, `main.py`'s `state()`: one
+`volume.reload()`, one lease snapshot, one glob of the manifests, and one
+flat `{artifact_path: state}` map. There is no grouping by run, source or
+dataset; a manifest `state()` could not read lands in the collapsed
+"unreadable manifests" table under it.
 
 ## Polling
 
 `EVERY_MS` (2000ms) bounds staleness, not correctness. Two things worth
 knowing about how it actually fires (`app.js`):
 
-- **Switching between the three table views doesn't wait on a fetch.**
-  Since all three come from the one `/state` payload, `route()` redraws
-  immediately from `lastPayload` (whatever the last poll landed, for
-  whichever view) the moment you navigate, and only then kicks off
-  `pollTableView` to keep that payload current. The old per-view endpoints
-  meant every nav click paid a fresh round trip before anything on screen
-  changed; a single shared payload removes that wait entirely.
+- **Coming back from an artifact's page doesn't wait on a fetch.**
+  `route()` redraws immediately from `lastPayload` (whatever the last poll
+  landed) and only then kicks off `pollTable` to keep it current.
 - **`schedulePoll` is self-rescheduling, not `setInterval`.** It awaits
   each fetch and only schedules the next one `EVERY_MS` after that one
   *finishes* -- a `setInterval` fires on a fixed clock regardless of
@@ -160,15 +128,13 @@ ended. When a log page comes, it reads the Dict entry and never the file.
   in-process. The separation exists so the CLI entrypoint (`launch_job`,
   which runs outside any container) can share the same code path -- but it
   costs every launch click a cold container's worth of latency for an
-  answer `read_state` already has.
-- **`/state`'s `beats` output is computed and serialized every poll and
-  nothing reads it.** `read_state()` builds `held_by` and `beats_out` by
-  iterating every historical beat record -- and since nothing prunes old
-  ones from that `modal.Dict`, the cost grows with the deployment's total
-  call history, not its current active-call count, on every single poll.
-  `leases` is in the same position: serialized every poll, read by nothing.
+  answer `state()` already has.
+- **`state()` snapshots every historical beat record on every pass.**
+  Nothing prunes old ones from that `modal.Dict`, so the snapshot's cost
+  grows with the deployment's total call history, not its current
+  active-call count.
 - **`/manifest/<path>` is the last request that touches the mount.** One
   small read, against a volume the refresh thread reloads on its own clock
   (see the README). Small enough to live with; the way to close it for good
   is to fold the summary into what that thread already computes, since it has
-  every artifact resolved in front of it already.
+  every artifact loaded in front of it already.

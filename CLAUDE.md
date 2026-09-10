@@ -32,6 +32,14 @@ every caller then carries the branch too.
 **"Might be general later" is not a reason.** It reliably produces a helper with one caller
 today and one caller forever.
 
+**A complicated part gets its own module, behind a seam you can name.** A codec, a graph
+walk, a lease protocol: anything that is a whole problem on its own lives in one file, and
+the rest of the code reaches it through a few names (`to_manifest`, `from_manifest`,
+`dependencies`) and nothing else. The test is whether you could rewrite that file, or
+replace it with a library, without touching a caller. If callers reach past the seam, it
+is not a seam. This is not the same as extracting helpers: a helper is a name for a
+few lines, a seam is a boundary around a problem you may want to solve differently later.
+
 ## Docstrings and comments
 
 **First line says what it returns, present tense.** Then at most one paragraph, for the single

@@ -37,11 +37,9 @@ where things live and how traffic flows between them.
 
 ## Dashboard
 
-The web app (`leasebook`) serves a small dashboard with three views --
-`runs`, `datasets`, `sources` -- sharing one set of UI components; a run's
-own artifacts and a dataset's dependency closure are both grouped by
-artifact type the same way. No build step, no framework. Full writeup:
-[docs/UI.md](docs/UI.md).
+The web app (`leasebook`) serves a small dashboard: one table, one row per
+artifact on the volume, plus a drill-down page per artifact. No build step,
+no framework. Full writeup: [docs/UI.md](docs/UI.md).
 
 ## The lab
 
@@ -58,32 +56,22 @@ Requires a one-time secret, per Modal workspace/environment:
 modal secret create launchpad-lab JUPYTER_TOKEN=$(openssl rand -hex 24)
 ```
 
-The API those notebooks import is [lab.py](lab.py) -- a thin wrapper over
-`artifacts.core.resolve` that works from JupyterLab (the volume mounted) or a local
-notebook alike, routed by `environment` (auto-detected: "modal" or "local")
-and `target` (a choice, `lab.init(target=...)`, defaulting to `environment`):
-
-See [docs/LAB.md](docs/LAB.md) for the complete API reference and permission
-matrix.
+The API those notebooks import is [lab.py](lab.py), and it has one entry
+point, declaration. Everything else stays on the artifact classes, reading
+the volume's mount (`config.STORAGE`) unless handed another root:
 
 ```python
 import lab
-lab.init(target="modal")                          # only needed to reach the
-                                                    # real volume from a local
-                                                    # environment; otherwise
-                                                    # target already defaults
-                                                    # to environment
-lab.ls("tokenizers")                              # what's declared, on the current target
-lab.bind("tokenizers/bpe-3.0k-e4649eb4ff")        # by path, bound if built
-lab.bind(Tokenizer(vocab_size=3000, ...))         # by object -- calls its own .bind()
-lab.declare(pretraining)                          # resolve + check, no writes
-lab.declare(pretraining, commit=True)             # ...and write + publish
+report = lab.declare(pretraining)                 # resolve + check, no writes
+report = lab.declare(pretraining, commit=True)    # ...and publish missing manifests
+
+Artifact.load("tokenizers/bpe-3.0k-e4649eb4ff")   # what's declared there, unbound
+Tokenizer(vocab_size=3000, ...).bind()            # the built object, ready to use
 ```
 
-Not every (environment, target) pair is allowed -- a modal environment can
-never touch local-only storage, and a local environment can declare against
-the real volume but never `bind` from it (no bytes to read locally). See
-[lab.py](lab.py)'s own module docstring for the full permission matrix.
+There is nothing to initialize and no environment detection. The mount
+exists only inside a container, so a laptop works against a folder of its
+own by passing `root=` -- the same mechanism a test uses with a `tmp_path`.
 
 Nothing here forces a `volume.commit()`: every Volume mount sets
 `allow_background_commits=True`, so the platform flushes the lab's writes on
@@ -96,13 +84,11 @@ its own, and JupyterLab's own autosave does the rest.
   there's one copy of the traffic pattern below, not several racing each
   other.
   - **One thread keeps this container's picture of the volume fresh**, on a
-    `STATE_REFRESH_SECONDS` clock: `read_state()`, and nothing else -- one
+    `STATE_REFRESH_SECONDS` clock: `state()`, and nothing else -- one
     `volume.reload()`, one `leases`/`beats` Dict snapshot (no mount needed),
-    one walk of the manifests off `leasebook`'s own **local mount**, sliced
-    into the runs/sources/datasets shapes the dashboard's three views each
-    want, so a shared artifact (a source behind several tokenizers, say) is
-    only inspected once per pass no matter how many views reference it. The
-    whole state is computed there, in that thread. It writes nothing, syncs
+    one glob of the manifests off `leasebook`'s own **local mount**, one flat
+    map of every artifact on the volume. The whole state is computed there,
+    in that thread. It writes nothing, syncs
     nothing, and no request waits on it.
   - `/state`: hands back what that thread last computed -- a dict lookup, not
     a reload. Never slower than that, never fresher than the last pass.
@@ -127,7 +113,7 @@ its own, and JupyterLab's own autosave does the rest.
     discovers it lost the artifact even if the cancel itself never lands.
 - **`declared_artifact`** and **`run_job`** are separate Modal functions,
   each with their own container and their own mount of the volume --
-  `declared_artifact` reads one manifest and its status; `run_job` writes
+  `declared_artifact` computes `state()` and picks one entry; `run_job` writes
   locally and only publishes those writes with an explicit
   `volume.commit()` right before exiting. Nothing either writes is visible
   to any other reader, mounted or not, until that commit lands.

@@ -4,11 +4,11 @@
 inside `leasebook()`, which only runs when a container starts, and a handler's
 body only runs when a request arrives. So a deleted route, a name that no
 longer exists, or a handler that raises are all invisible to an import -- and
-one deletion that took `/launch`, `/cancel`, `/manifest` and `/lab/run` with it
+one deletion that took `/launch`, `/cancel` and `/manifest` with it
 is why this file exists.
 
 Nothing here talks to Modal. `leasebook`'s raw function is built against stubs:
-`read_state` returns a fixed payload, the volume-reading helpers return fixed
+`state` returns a fixed map, the volume-reading helpers return fixed
 answers, and launching/cancelling record what they were asked rather than
 spawning anything. What's left under test is the wiring -- which routes exist,
 what shape they answer, and whether the handlers reference anything that isn't
@@ -30,14 +30,12 @@ import main
 # --- the stubs ---------------------------------------------------------------
 
 STATE = {
-    "now": 1757260800.0,
-    "runs": {"toy": {"artifacts": {}, "notebook": True}},
-    "problem_runs": {},
-    "leases": {},
-    "beats": {},
-    "sources": {},
-    "datasets": {},
-    "metrics": {"read_state_seconds": 0.1},
+    "sources/tinyshakespeare": {
+        "type": "Source", "status": "done", "error": None, "depends_on": [],
+        "blocked_by": [], "done": True, "ready": False, "call_id": None,
+        "active": False, "last_heartbeat": None, "live_progress": None,
+        "durable_progress": {"phase": "files", "done": 1, "total": 1},
+    },
 }
 
 SUMMARY = {
@@ -52,14 +50,14 @@ def client(**overrides):
     would touch Modal or the volume replaced.
 
     The refresh thread is left running: it is a daemon, its first pass happens
-    before any request, and `read_state` is a stub, so it costs a stubbed call
+    before any request, and `state` is a stub, so it costs a stubbed call
     per interval and proves the thread starts without raising.
     """
     from fastapi.testclient import TestClient
 
     calls = {"launched": [], "cancelled": []}
 
-    main.read_state = lambda: STATE
+    main.state = lambda: STATE
     main.artifact_manifest_summary = lambda path, root: overrides.get("summary", SUMMARY)
     main.attempt_launch = lambda path: (
         calls["launched"].append(path) or (True, f"granted {path}", None)
@@ -86,7 +84,6 @@ def test_every_route_is_registered():
     for expected in (
         "/state",
         "/lab",
-        "/lab/run/{run_id:path}",
         "/launch/{artifact_path:path}",
         "/cancel/{artifact_path:path}",
         "/manifest/{artifact_path:path}",
@@ -98,9 +95,7 @@ def test_every_route_is_registered():
 
 def test_state_serves_what_the_thread_computed():
     api, _ = client()
-    body = api.get("/state").json()
-    assert body["runs"] == STATE["runs"]
-    assert body["metrics"]["read_state_seconds"] == 0.1
+    assert api.get("/state").json() == STATE
 
 
 def test_launch_reaches_the_launcher():
@@ -148,15 +143,10 @@ def test_an_unbuilt_artifact_says_so_rather_than_erroring():
     assert "not built yet" in body["error"], body
 
 
-def test_the_lab_links_carry_the_token():
+def test_the_lab_link_carries_the_token():
     api, _ = client()
     root = api.get("/lab")
     assert root.status_code == 307 and "lab.test" in root.headers["location"]
-    run = api.get("/lab/run/toy")
-    assert "runs/toy/notebook.ipynb" in run.headers["location"], run.headers
-    # Encoded, for the reason the traversal test above spells out.
-    bad = api.get("/lab/run/%2e%2e/secrets")
-    assert bad.headers["location"] == "/lab", "an unsafe run_id should fall back"
 
 
 def test_logs_come_from_the_dict_not_the_mount():

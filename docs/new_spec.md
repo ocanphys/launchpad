@@ -43,7 +43,7 @@ A concrete type defines:
 | `commit` | Recorded definition provenance, excluded from identity. |
 | `allocated_resources` | Recorded execution allocation, excluded from identity. |
 
-`deps()` returns only direct artifact-valued parameters. Support individual artifacts, optional artifacts, and tuples of artifacts. Parameter annotations distinguish empty dependency tuples from ordinary empty tuples. Other nested configuration contains ordinary values, never hidden artifact dependencies.
+`deps()` returns only direct artifact-valued parameters, in a deterministic order: fields by name, sets by artifact path. Support individual artifacts, optional artifacts, and tuples or sets of artifacts. Parameter annotations distinguish an empty dependency container from an ordinary empty tuple. Other nested configuration contains ordinary values, never hidden artifact dependencies.
 
 Paths, files, producers, and dependency lists are derived. They are not constructor arguments or separately persisted state. Artifact modules remain lightweight; resolving a producer imports its implementation only when executing it.
 
@@ -57,7 +57,9 @@ Keep three questions distinct:
 
 Declaration and resolution check definition agreement with `==`, and always between two artifacts already known to share a path — a manifest read from that path, or a second route reaching it during traversal. Sharing a path is therefore never evidence of agreement: two sources named `odyssey` with different URLs land on one path, compare unequal, and must conflict.
 
-Normalization happens at construction and reconstruction. A tokenizer's `sources` are ordered canonically by artifact path because their supplied order is non-identifying. Repeated source paths are rejected. Order remains identifying where it changes the result, such as a mapped dataset's concatenated source streams. Path calculation, definition comparison, serialization, and traversal all use these normalized values.
+A dependency field's declared type says whether its order identifies the artifact, and nothing else does. A `tuple` is a sequence: its order and its repeats are part of what the artifact is, as with a mapped dataset's concatenated source streams. A `frozenset` is a set: neither is, as with a tokenizer's `sources`. Equality and hashing then follow from the type, so no value is ever reordered to make two definitions compare equal.
+
+Construction accepts any iterable for a set-valued field and rejects two members that share an artifact path, which is a conflicting definition wherever it appears. A set has no order, so anything rendering one as a sequence -- a digest, a JSON array, a traversal, a job's input stream -- picks one at that point. Those orders are renderings, never comparisons.
 
 Parameters are immutable, including nested configuration. A result-changing setting belongs among the parameters even if it also affects execution. Resource allocation never silently changes scientific configuration.
 
@@ -269,6 +271,8 @@ The source occurs once even though both the tokenizer and tokenized source refer
 
 `lab` is the notebook API, imported with `import lab`. It has one entry point: declaration. Construction, loading, and binding stay on the artifact classes and instances — `Tokenizer(...)`, `Artifact.load(path)`, `tokenizer.bind()` — and all read `STORAGE` directly (§4). There is nothing to initialize.
 
+The one other name it exports is `lab.worker`, a stand-in execution context for running a single job by hand from a cell, `job.run(root, lab.worker)`: no lease, no heartbeat, logging to the console. It is not configuration, and nothing in `lab` reads it.
+
 ```python
 import lab
 
@@ -351,11 +355,11 @@ Preview never creates folders or temporary files. Definition and completion chec
 
 Five stages, each testable before the next.
 
-1. **`artifacts/core/artifact.py` — the definition contract.** Normalize artifact-valued tuples in `__post_init__`, rejecting repeated paths. Rename `manifest()` to `to_manifest()` and make the encoder canonical (trailing newline, `allow_nan=False`). Change `load(path)` to `load(artifact_path, root=None)`, absorbing the path-agreement check. Delete `Artifact.at` and `Artifact.declare`. Add `status(root=None)`, folding in `exists()`. Give `bind()` the stored-declaration read and definition check it currently lacks. Allow `producer = None`. Leave `__eq__`/`__hash__` exactly as they are — the generated definition comparison is the contract (§2).
+1. **`artifacts/core/artifact.py` — the definition contract.** Read dependency fields off their annotations, so an empty container stays a dependency and a set-valued one is coerced and checked for colliding paths in `__post_init__`. Rename `manifest()` to `to_manifest()` and give the canonical encoding its own function (two-space indent, trailing newline, `allow_nan=False`). Change `load(path)` to `load(artifact_path, root=None)`, absorbing the path-agreement check. Delete `Artifact.at` and `Artifact.declare`. Add `status(root=None) -> Footprint`, folding in `exists()`. Give `bind()` the stored-declaration read and definition check it currently lacks. Allow `producer = None`. Leave `__eq__`/`__hash__` exactly as they are — the generated definition comparison is the contract (§2).
 2. **`artifacts/core/resolve.py` — shrink to one pure function.** `resolve(artifact) -> list[Artifact]`, with definition agreement checked on every repeated path. Delete `Node`, `Dag`, `_check`, `plan`, and `declared`; move `declare(dag)` and `conflict_diff` out.
-3. **`lab.py` — one declaration operation.** `lab.declare` holds what `_check` and `declare(dag)` used to do: resolve once, inspect all paths, reject blockers, publish missing manifests in dependency order, return a `DeclarationReport`. Delete `environment`, `target`, `_PERMISSIONS`, `init`, `_root_for`, `bind`, and `plan`.
-4. **`state()` — one glob, one entry per path.** Replace `read_state`'s three-prefix discovery and its `resolve` over every root. Keep the per-artifact shape, the lease and heartbeat snapshot, and both progress kinds; drop only the runs/sources/datasets grouping.
-5. **Callers.** `main.py`: delete the deployed `declare` function, update `run_job`, `declared_artifact`, and `attempt_launch`. Delete `artifacts/mappeddataset/jobs.py`. Update the visualizer, which imports `Dag` and `Status`, and the tests, which import `Node`, `conflict_diff`, and `declare`. Then the notebooks.
+3. **`lab.py` — one declaration operation.** `lab.declare` holds what `_check` and `declare(dag)` used to do: resolve once, inspect all paths, reject blockers with `DeclarationError`, publish missing manifests in dependency order, return a `DeclarationReport`. Volume reload and commit happen inside it, only when `root` is `STORAGE`. Delete `environment`, `target`, `_PERMISSIONS`, `init`, `_root_for`, `root`, `ls`, `refresh`, `publish`, `bind`, `plan`, the run-notebook seeding, and `visualize`; `config.LOCAL_STORAGE` goes with them.
+4. **`state()` — one glob, one entry per path.** Replace `read_state`'s three-prefix discovery and its `resolve` over every root. Keep the per-artifact shape, the lease and heartbeat snapshot, and both progress kinds; drop the runs/sources/datasets grouping and the `/lab/run` deep link with it, and move the per-view slicing into the dashboard. `declared_artifact` becomes one lookup in the map.
+5. **Callers.** `MappedDataSet.producer = None` and delete `artifacts/mappeddataset/jobs.py`, whose body was a no-op. Delete the visualizer: its only caller was `lab.declare`'s `visualize` flag. Delete the notebooks that tested the old session model (`lab_test_uniform`) and the stray copy; rewrite `notebook.ipynb` and `notebooks/resolve_demo.ipynb` against `lab.declare`, `resolve`, `status` and `bind`, each taking an explicit `ROOT`.
 
 The final API has one `declare` function, one `resolve` function, one `state` function, and no session configuration.
 
@@ -385,32 +389,36 @@ what's missing and leaves what's already there untouched.
 ### One state entry per declared path
 
 ```python
-state(root=STORAGE) -> dict[Path, dict]
+state(root=STORAGE) -> dict[str, dict]
 ```
 
-Replaces `main.py`'s `read_state()`. Computes the current state of every
-artifact under `root` over one glob -- no dependency resolution, no DAG walk:
+`main.py`'s whole-volume read, keyed by artifact path as a string since the
+map is what `/state` serves. Computes the current state of every artifact
+under `root` over one glob -- no dependency resolution, no DAG walk:
 
 1. `glob(root/**/manifest.json)` -- every declared artifact, by folder.
-2. Per manifest, once: `Artifact.from_manifest(...)`, then `artifact.status(root)`.
+2. Per manifest, once: `Artifact.load(...)`, then `artifact.status(root)`.
 3. Per artifact, `deps()` for its direct dependency paths -- one level, every
-   path already a key in this map, no traversal.
+   path a key in this map or missing from it, no traversal.
 4. One lease and heartbeat snapshot for the whole scan.
 
-Each entry keeps the shape the dashboard reads today:
+Each entry keeps the shape the dashboard reads:
 
 ```python
-{"type": "Tokenizer", "status": "done", "drift": False,
- "depends_on": ["sources/odyssey"], "blocked_by": [], "ready": True,
+{"type": "Tokenizer", "status": "done", "error": None,
+ "depends_on": ["sources/odyssey"], "blocked_by": [], "done": True, "ready": False,
  "call_id": None, "active": False, "last_heartbeat": None, "live_progress": None,
  "durable_progress": {"phase": "files", "done": 1, "total": 1}}
 ```
 
-`blocked_by` and `ready` come from looking up `depends_on` in this same map.
-`durable_progress` is the artifact's own file-based report; `live_progress` is
-what a running worker reports about itself. What changes is only the grouping:
-one flat map of every artifact on the volume, with no runs/sources/datasets
-split. Launching, leases, and heartbeats are unaffected.
+`blocked_by` is every direct dependency not `done` on this same map, a
+dependency with no manifest included; `ready` is not done, not blocked, and
+produced by something -- a virtual artifact is never ready. There is no
+`drift`: a scan has no requested commit to compare against. `durable_progress`
+is the artifact's own file-based report; `live_progress` is what a running
+worker reports about itself. The dashboard slices the map per view itself,
+following `depends_on` for a run's or a dataset's closure. Launching, leases,
+and heartbeats are unaffected.
 
 These are not declaration's states (§4), deliberately. Declaration classifies a
 *requested* artifact against disk and can report `new`, `undeclared`, or a
@@ -458,7 +466,8 @@ The backbone is ready when these cases hold:
 | Case | Required result |
 | --- | --- |
 | Shared dependency reached twice | One resolved entry; conflicting definitions raise before writes. |
-| Tokenizer sources supplied in reverse order | Same normalized definition, identity, manifest, and training input order. |
+| Tokenizer sources supplied in reverse order | One definition, equal and equally hashed; same identity, manifest, and training input order. |
+| Two sources named alike with different URLs in one set | Rejected at construction, not deduplicated. |
 | Manifest round trip | Same definition and recorded fields; reconstructed value is unbound. |
 | Preview against empty storage | Report only; no directories or files created. |
 | Redeclare with different commit or resources | Existing manifest retained; commit drift blocks only in strict mode. |
