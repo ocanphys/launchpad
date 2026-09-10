@@ -4,14 +4,17 @@ import modal
 
 from config import APP_NAME, VOLUME_NAME
 
-# Two Dicts, not one shared store with prefixed keys: an artifact_path is
-# already a unique key in `leases`, a call_id is already a unique key in
-# `beats`, and they never need to tell each other's keys apart because they
-# are never in the same Dict. Every key any of this ever touches is a
-# top-level key -- no blob, no read-modify-write, no chance of one write
-# clobbering an unrelated entry.
+# Three Dicts, not one shared store with prefixed keys: an artifact_path is
+# already a unique key in `leases`, a call_id is already a unique key in `beats`
+# and in `call_logs`, and they never need to tell each other's keys apart
+# because they are never in the same Dict. Every key any of this ever touches is
+# a top-level key -- no blob, no read-modify-write, no chance of one write
+# clobbering an unrelated entry. `call_logs` is its own Dict rather than a field
+# of the beat so that a log too big to store can fail without taking the
+# heartbeat down with it.
 leases = modal.Dict.from_name(f"{APP_NAME}-leases", create_if_missing=True)
 beats = modal.Dict.from_name(f"{APP_NAME}-beats", create_if_missing=True)
+call_logs = modal.Dict.from_name(f"{APP_NAME}-call-logs", create_if_missing=True)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 LEASE_RETRIES = 5  # how many times an indeterminate lease read is worth re-asking

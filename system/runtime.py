@@ -1,61 +1,40 @@
-"""One call, one scope: a logger, a lease, and a commit that had to be earned.
+"""One call, one worker: a logger, a lease, and a heartbeat that carries the log.
 
-`system.logs` gives a call its own logger; `system.lease_protocol` tells a call whether it
-still owns the run. Neither is useful to a job on its own, and every job would
-otherwise wire them together the same way -- and get the ordering wrong in the
-same two places:
+A job receives the wiring finished -- it never builds a `Lease`, never names a
+log file, and never calls `commit`:
 
-    reload -> open the log file      (reload fails while a file on the volume is open)
-    close the log file -> commit     (the last lines ship only if they are flushed first)
+    def run(self, root, worker):
+        worker.log.info("counting")
+        worker.confirm_lease("before write")   # raises LeaseLost if superseded
+        (root / self.artifact.artifact_path / "count.txt").write_text("3")
 
-So the wiring lives here once, as a context manager, and a job receives the
-finished pair. A job never constructs a `Lease`, never names a log file, and never
-calls `commit` -- it writes, and it calls `scope.confirm(...)` before anything it
-would not want a superseded container to have done.
-
-    def count(scope, n):
-        scope.log.info(f"counting to {n}")
-        scope.confirm("before write")     # raises LeaseLost if we were superseded
-        (scope.dir / "count.txt").write_text(str(n))
-
-The commit is the point of the whole arrangement. It happens once, on the way out,
-and only after a final `confirm` -- so a container that lost the run mid-job
-cannot land its writes, no matter how far it got before anyone noticed.
+The log is taken from Modal's capture of the call rather than a handler, so it
+holds stderr, tqdm and every library that never heard of `worker.log`.
 """
 
+import asyncio
 import logging
 import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import modal
 
-from config import HEARTBEAT_SECONDS, STORAGE
-from system.lease_protocol import Lease, LeaseLost, beats
-from system.logs import LOG_FILENAME, call_logger, release_call_logger
+from config import HEARTBEAT_SECONDS, LOG_FLUSH_SECONDS, STORAGE
+from system.lease_protocol import Lease, LeaseLost, beats, call_logs
+from system.logs import archive_path, setup_logging
 
 
 @dataclass(frozen=True)
 class Worker:
-    """What a job is handed. Everything call-specific, nothing call-specific to build.
+    """What a job is handed.
 
-    `confirm` is the lease's bound method rather than the lease itself: a job has
-    no business releasing, re-granting, or inspecting a lease, and the narrower
-    handle is what keeps that true without a rule anyone has to remember.
-
-    No `dir`: a job resolves its own paths via `artifact.paths(root)` (root
-    being the storage root, a constant, not a per-call value), so there is
-    nothing left for a per-call directory to do.
-
-    `progress` is a plain mutable dict, not a method: a job reports by
-    mutating it directly (`worker.progress.update(...)`), which costs nothing
-    but a local write -- no network, so a job can report as often as it likes
-    without ever blocking its own loop on one. Nobody else reads it except the
-    heartbeat thread below, on its own cadence, which is the only thing that
-    ever puts it on the wire.
+    `progress` is a plain dict a job mutates; only the heartbeat thread reads
+    it, on its own cadence, so reporting costs no network.
     """
 
     artifact_path: str
@@ -67,36 +46,23 @@ class Worker:
 
 @contextmanager
 def initialize_worker(artifact_path: str, volume: modal.Volume):
-    """Set up one call's logger and lease; commit on the way out, if still owed.
+    """Set up this call's logging and lease; on the way out, archive the log
+    and commit.
 
-    The log lands at `{artifact_path}/logs/{call_id}/job.log`, nested under
-    the artifact's own folder the same way a run's logs used to be nested
-    under the run's -- one job per artifact, so the folder already says what
-    ran there.
-
-    Three ways out, three policies, because they are three different events:
-
-    - clean: confirm once more, close the log, commit.
-    - `LeaseLost`: no commit. Someone else owns this artifact, and the writes
-      under it are theirs now. The log lines still reach Modal's container
-      log through the stream handler, which is the only place they can
-      honestly go.
-    - any other exception: close the log and commit anyway. The job failed
-      while it still owned the artifact, so its log -- the thing that
-      explains the failure -- is worth keeping, and a partial output under a
-      held lease is not a correctness problem the way a superseded one is.
+    The commit is unconditional: a call that raised is the one whose log is
+    worth keeping, and the log only reaches the volume when something commits.
     """
-
     call_id = modal.current_function_call_id() or "local"
-
-    # Before the log file is opened, never after: an open file on the volume
-    # blocks reload, and this is the only moment nothing is open yet.
+    started = datetime.now(UTC)  # floor for the history fetch below
     volume.reload()
 
-    log_dir = Path(STORAGE) / artifact_path / "logs" / call_id
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    logger = call_logger(call_id, log_dir / LOG_FILENAME)
+    setup_logging()
+    # The heartbeat streams this container's stdout back in; a client that
+    # narrates its own RPCs at INFO would multiply every beat.
+    for noisy in ("modal", "grpc", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    logger = logging.getLogger("job")
+    logger.setLevel(logging.DEBUG)  # everything; filtering is the reader's job
     lease = Lease(artifact_path, call_id, logger)
     worker = Worker(
         artifact_path=artifact_path,
@@ -106,56 +72,88 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
         progress={},
     )
 
-    def heartbeat():
-        # No fence check first -- see `Lease.confirm`'s note on why. A single
-        # key write, not a read-modify-write: `beats` keys on call_id directly,
-        # so this call's beat lives at a key nobody else ever writes to. Two
-        # containers that have both, at different times, held this artifact get
-        # two different keys -- this beat can never land on top of another
-        # call's, and no read is needed first to avoid it. A reader tells a
-        # stale beat from a live one by checking whether its call_id is still
-        # the artifact's current holder (`main.read_state` does this), not by
-        # racing to write first.
-        #
-        # `worker.progress` rides along on the same put, snapshotted with
-        # `dict(...)` rather than passed by reference -- the job's own thread
-        # can still be mutating it the moment this fires, and a snapshot is
-        # what keeps the beat's payload internally consistent even so. Its own
-        # cadence is entirely this thread's, not the job's: a job that reports
-        # progress ten times between two beats still only ever puts twice, and
-        # one that reports nothing at all just rides `None` along instead.
-        while True:
-            time.sleep(HEARTBEAT_SECONDS)
-            try:
-                beats.put(call_id, {
-                    "artifact_path": artifact_path,
-                    "last_beat_ts": time.time(),
-                    "progress": dict(worker.progress) if worker.progress else None,
-                })
-            except Exception as exc:
-                logger.warning(f"heartbeat: not recorded ({exc})")
+    # Set on the way out. The container outlives the call, so a thread that
+    # only died with the process would keep a finished call's beat alive.
+    finished = threading.Event()
 
-    # A daemon thread, not a task: nothing here is async, so the only way to have
-    # this run alongside the job's own code is a second thread. It dies with the
-    # process on its own -- nothing to cancel on the way out.
-    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    # Every line Modal has captured of this call so far.
+    lines: list[str] = []
+    # Printed by the `finally`; the feed is ordered, so once the subscription
+    # sees it, everything before it is in `lines`. Dropped, not kept.
+    sentinel = f"--- end of log {call_id} ---"
+    caught_up = threading.Event()
+
+    def heartbeat():
+        # `beats` and `call_logs` key on call_id: this is the only writer of
+        # both keys, so there is no read-modify-write.
+        #
+        # The subscription blocks and keeps its cursor internally, so it is
+        # entered once, as a task; the beat is the loop body, on its own clock.
+        async def main():
+            call = modal.FunctionCall.from_id(call_id)
+            seen = set()
+            try:
+                async for entry in call.logs.fetch.aio(since=started):
+                    seen.add((entry.timestamp, entry.message))
+                    lines.append(entry.message.rstrip("\r\n"))
+            except Exception as exc:
+                logger.warning(f"heartbeat: history not fetched ({exc})")
+
+            async def follow():
+                async for entry in call.logs.stream.aio():
+                    line = entry.message.rstrip("\r\n")
+                    if line == sentinel:
+                        caught_up.set()
+                    elif (entry.timestamp, entry.message) not in seen:
+                        lines.append(line)
+
+            following = asyncio.ensure_future(follow())
+            try:
+                while not finished.is_set():
+                    await asyncio.sleep(HEARTBEAT_SECONDS)
+                    try:
+                        await beats.put.aio(
+                            call_id,
+                            {
+                                "artifact_path": artifact_path,
+                                "last_beat_ts": time.time(),
+                                "progress": dict(worker.progress) or None,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(f"heartbeat: not recorded ({exc})")
+                    try:
+                        await call_logs.put.aio(call_id, list(lines))
+                    except Exception as exc:
+                        logger.warning(f"heartbeat: logs not published ({exc})")
+            finally:
+                following.cancel()
+
+        try:
+            asyncio.run(main())
+        except Exception:
+            logger.exception("heartbeat thread died")
 
     try:
-        heartbeat_thread.start()
+        threading.Thread(target=heartbeat, daemon=True).start()
         lease.confirm("boot")
         yield worker
         lease.confirm("commit")
     except LeaseLost as exc:
-        logger.error(f"{exc} -- discarding this call's writes")
-        release_call_logger()
+        logger.error(f"{exc} -- stopping; the holder's writes will overtake ours")
         raise
     except BaseException:
         logger.exception("failed under a held lease")
-        release_call_logger()
         raise
     else:
         logger.info("done")
-        # Close first, commit second. `release_call_logger` closes the file, so
-        # the last lines above are on disk before the commit that ships them.
-        release_call_logger()
+    finally:
+        print(sentinel, flush=True)
+        if not caught_up.wait(LOG_FLUSH_SECONDS):
+            logger.warning("log flush: the last lines did not come back in time")
+
+        path = archive_path(Path(STORAGE), artifact_path, call_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n")
         volume.commit()
+        finished.set()  # after the commit: committing is still working

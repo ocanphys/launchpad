@@ -1,13 +1,17 @@
 import json
+import logging
 import os
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
 
 import modal
 
-import dag.resolve as dag_resolve
+import artifacts.core.resolve as core_resolve
+from artifacts.core.artifact import MANIFEST, Artifact, Resources
+from artifacts.core.visualizer import visualize as visualize_dag
 from config import (
     APP_NAME,
     CONTAINER_LIFETIME,
@@ -17,13 +21,13 @@ from config import (
     LAB_IDLE_SECONDS,
     LAB_PORT,
     LAB_SECRET,
+    STATE_REFRESH_SECONDS,
     STORAGE,
     VOLUME_NAME,
     get_git_commit,
 )
-from dag.artifact import MANIFEST, Artifact, Resources
-from system.lease_protocol import beats, leases, new_grant
-from system.logs import LOG_FILENAME, read_call_logs, read_log
+from system.lease_protocol import beats, call_logs, leases, new_grant
+from system.logs import setup_logging
 from system.runtime import initialize_worker
 
 app = modal.App(APP_NAME)
@@ -31,23 +35,10 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 base_image = modal.Image.debian_slim(python_version="3.12").pip_install("regex", "tqdm")
 
-# The modules every call needs whatever it runs: config, and the system
-# package (its logger, its lease, the scope that wires those two together).
-# No third-party dependencies of their own -- add_local_python_source copies
-# these .py files into an image, it doesn't install what they import, and
-# none of them import anything outside the stdlib.
+# groups of python packages from this repo - these are added to images which specify
+# the python environments of the containers.
 CALL_SOURCE = ("config", "system")
-
-# The artifact/job model, one package per family (see dag/spec.md): "dag"
-# is the framework (Artifact, Job, resolve, visualizer), the rest are its
-# concrete artifact+job pairs. Each is its own top-level package rather than
-# nested under one "artifacts" package, so a family can import another
-# (e.g. datasets importing sources.artifact) without a shared parent import
-# pulling in every family at once. datasets and mappeddatasets are separate
-# packages, not one -- DataSet and MappedDataSet are different kinds of
-# artifact (one copies bytes, one never writes any), not variants of a
-# shared "dataset" concept.
-DAG_SOURCE = ("dag", "sources", "tokenizers", "datasets", "mappeddatasets", "models")
+ARTIFACTS_SOURCE = ("artifacts",)
 
 
 def safe_relpath(path: str) -> bool:
@@ -63,227 +54,86 @@ def safe_relpath(path: str) -> bool:
 
 
 def is_active(grant: dict | None, beat: dict | None, now: float) -> bool:
-    """Is `grant`'s holder currently beating fresh enough to trust?
-
-    Pure -- takes the grant and its holder's beat rather than fetching
-    either, so `read_state` (a batch snapshot, one call_id's beat already
-    looked up per run) and `launch_job` (a single-run lookup, no mount) both
-    decide "active" the same way instead of each having its own rule.
-    """
     if grant is None or beat is None:
         return False
     return now - beat["last_beat_ts"] < FLATLINE * HEARTBEAT_SECONDS
 
-
-# Two images: the web dashboard needs fastapi and none of what a job needs;
-# a job needs neither fastapi nor the web/ folder.
-#
-# Both carry all of CALL_SOURCE even so, and not just the modules each one's
-# own function reads. A container starts by importing the module its function
-# is defined in -- this one -- and this module imports `system.runtime`,
-# which imports `system.logs`, whether or not the function actually being
-# called touches them. Trimming an image to only what its own function reads
-# gets a crash loop, not a smaller image (see git history if that stops
-# being obvious).
-#
-# Both also carry DAG_SOURCE alongside CALL_SOURCE, not folded into it: each
-# entry there is its own package (dag/__init__.py, sources/__init__.py, ...),
-# not a single module -- add_local_python_source stages each as a sibling of
-# main.py, which is what keeps `import dag...`/`import sources...`/etc valid
-# remotely, the same as they are locally.
 WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
-
 web_image = (
     base_image.pip_install("fastapi[standard]")
-    # The page is HTML/JS, so it stays HTML/JS -- mounted like a data file,
-    # not pasted into this module as strings.
     .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
-    .add_local_python_source(*CALL_SOURCE, *DAG_SOURCE)
+    .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
 
-# What `declare` and `run_job` run under: no fastapi, no volume-unrelated
-# deps -- dag/sources/datasets/mappeddatasets/*.py are stdlib-only (plus
-# config.get_git_commit, which neither function calls: every artifact either
-# arrives fully constructed from a client that already stamped its commit,
-# or is loaded straight off a manifest that already has one). tokenizers/bpe.py
-# needs regex+tqdm, hence base_image's pip_install above. models/mock is
-# stdlib-only too; a real model family under models/ would need its own
-# torch-installing image, not this one.
-#
-# The one exception is numpy, needed by mappeddatasets/tokenstream.py's memmap
-# windowing -- but only at the moment something actually binds a
-# MappedDataSet, via a local import inside MappedDataSet._load, not at
-# mappeddatasets/artifact.py's own top level. So it's added here, not to
-# base_image: web_image never calls .bind() on anything (leasebook only
-# resolves and inspects), and has no reason to carry it.
 worker_image = base_image.pip_install("numpy").add_local_python_source(
-    *CALL_SOURCE, *DAG_SOURCE
+    *CALL_SOURCE, *ARTIFACTS_SOURCE,
 )
 
-# The lab: a JupyterLab server with the volume mounted, so a notebook can
-# hold a real artifact rather than a copy of one pulled down by hand.
-#
-# It bakes in this deploy's commit under LAB_COMMIT_ENV: get_git_commit()
-# runs right here, in this process, on whatever machine is running `modal
-# deploy` -- a real checkout, exactly the context that function assumes.
-# `modal.is_local()` gates the call because this whole module -- lab_image
-# included -- is re-imported inside every container too, to hydrate whatever
-# function it's about to run; there, `is_local()` is False and PROJECT_ROOT
-# has neither `git` nor a `.git` directory (add_local_python_source ships
-# only the named source files), so calling it unguarded crashes container
-# startup. The remote re-evaluation's result is discarded either way -- the
-# image was already built and selected before the container booted -- so a
-# placeholder there is harmless; dag.artifact._head() reads the real value
-# baked in by the local build, off this env var, instead of shelling out
-# itself.
 lab_image = (
     base_image.pip_install("numpy", "torch", "einops", "matplotlib", "jupyterlab")
     .env({LAB_COMMIT_ENV: get_git_commit() if modal.is_local() else "unknown"})
-    .add_local_python_source(*CALL_SOURCE, *DAG_SOURCE, "lab")
+    .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "lab")
 )
 
 
-def artifact_state(
-    artifact: Artifact, root: Path, cache: dag_resolve.InspectCache | None = None
-) -> dict:
-    """One declared artifact's status plus what it's waiting on.
+def artifact_state(node: core_resolve.Node, dag: core_resolve.Dag) -> dict:
+    """One resolved artifact's status plus what it's waiting on.
 
-    `done`/`ready` are both derived from `status`, not stored -- there's
-    only ever one on-disk answer to agree with.
+    Reads entirely off the graph, which already holds every answer: the
+    status was collected during the one walk that built it, and
+    `dag.blocked_by` is dictionary lookups against the edges in it. Nothing
+    here touches the filesystem, so calling this for every artifact in a
+    whole-volume read costs one traversal, not one per artifact.
 
-    `cache` -- see dag_resolve.inspect -- is what keeps a whole-book read
-    (many artifacts, sharing dependencies) from re-inspecting the same
-    shared tokenizer or source once per artifact that happens to depend on
-    it. Every state-building function below passes the one cache it built
-    for its own request through every call it makes here.
+    `done`/`ready` are both derived from `status`, not stored -- there's only
+    ever one on-disk answer to agree with.
     """
-    status, drift = dag_resolve.inspect(artifact, root, cache)
-    depends_on = artifact.deps()
-    blocked_by = [
-        dep.artifact_path.as_posix()
-        for dep in depends_on
-        if dag_resolve.status(dep, root, cache) != "done"
-    ]
-    done = status == "done"
+    blocked_by = [path.as_posix() for path in dag.blocked_by(node.path)]
+    done = node.status == "done"
     return {
-        "type": type(artifact).__name__,
-        "status": status,
-        "drift": drift,
-        "depends_on": [dep.artifact_path.as_posix() for dep in depends_on],
+        "type": type(node.artifact).__name__,
+        "status": node.status,
+        "drift": node.drift,
+        "depends_on": [path.as_posix() for path in node.deps],
         "blocked_by": blocked_by,
         "done": done,
         "ready": not done and not blocked_by,
     }
 
 
-def _lease_snapshot() -> tuple[dict, dict, float]:
-    """One read of `leases`/`beats` plus the clock to judge them by -- shared
-    by every state-building function below so a beat's freshness is judged
-    against the same `now` its lease was read alongside, regardless of which
-    view is asking."""
-    return dict(leases.items()), dict(beats.items()), time.time()
-
-
-def _with_lease(info: dict, path: str, grants: dict, beat_records: dict, now: float) -> dict:
-    """Stamp one artifact's state dict with its lease/heartbeat, read off a
-    `_lease_snapshot()`. A lease is granted per artifact_path (see
-    `attempt_launch`), so this one stamp is correct regardless of whether
-    `path` belongs to a run, or to a shared kind's own flat/grouped view.
-    """
-    grant = grants.get(path)
-    beat = beat_records.get(grant["call_id"]) if grant else None
-    info["call_id"] = grant["call_id"] if grant else None
-    info["active"] = is_active(grant, beat, now)
-    info["last_heartbeat"] = beat["last_beat_ts"] if beat else None
-    return info
-
-
-def _with_progress(info: dict, artifact: Artifact, root: Path, beat_records: dict) -> dict:
-    """Stamp one artifact's state dict with its two progress signals.
-
-    `durable_progress` is unconditional -- read straight off `root` via
-    `artifact.durable_progress`, same as any other file-existence check
-    `artifact_state` already makes, so a finished run still shows its final
-    progress even with no active call left to hold `live_progress`.
-
-    `live_progress` only exists while `info["active"]` does (stamped by
-    `_with_lease`, which must run before this) -- a call's self-reported
-    payload rides along on its own beat (system.runtime.Worker.progress),
-    read back here via the same `beat_records` snapshot `_with_lease` used,
-    and interpreted by the job that wrote it (`dag_resolve.producer_for`,
-    the same lookup `run_job`/`artifact_job_name` already use) so each job
-    type decides what its own payload means. `producer_for` is only reached
-    at all when there's a real payload to interpret -- most artifacts never
-    report one, and an inactive call's stale payload is never surfaced as
-    if it were current.
-    """
-    beat = beat_records.get(info["call_id"]) if info["call_id"] else None
-    raw = beat.get("progress") if beat and info["active"] else None
-    info["durable_progress"] = artifact.durable_progress(root)
-    info["live_progress"] = dag_resolve.producer_for(artifact).progress(raw) if raw else None
-    return info
-
-
 def read_state() -> dict:
     """One read of the whole volume, sliced into the three shapes the
     dashboard's views (runs/sources/datasets) each want.
 
-    Every view used to be its own function, each doing its own
-    `volume.reload()`, its own lease snapshot, and its own `InspectCache` --
-    and since a source or tokenizer is routinely reachable from a run *and*
-    from `sources`/`datasets`' own shared-folder listing, the same artifact
-    got independently re-inspected once per view that happened to reach it.
     One read fixes that at the root: one `volume.reload()`, one lease
-    snapshot, one cache, and one `states` map below that computes each
-    distinct artifact_path's state at most once no matter how many of
-    `runs`/`sources`/`datasets` reference it -- dependency graphs are cheap
-    to walk once the state they're built from is already in hand.
+    snapshot, and one `core_resolve.resolve` over every declared artifact on
+    the volume at once. That single walk visits and inspects each distinct
+    artifact_path exactly once no matter how many of `runs`/`sources`/
+    `datasets` reference it, and the graph it returns then answers every
+    per-artifact question below -- status, dependencies, what each one is
+    blocked on -- without going back to disk.
 
-    `runs` comes from the volume's `runs/` directory, not from `leases`: a
-    folder with no lease -- never started, or superseded and never reclaimed --
-    is exactly the gap worth being able to see, and starting from `leases`
-    instead would hide it. A run's artifacts come from
-    `dag_resolve.declared_under`, which can raise on a bad manifest --
-    "broken", not "not ready". This is the one place that decides what a
-    raise means for a whole run: not `runs`, but `problem_runs`, keyed the
-    same way, holding the error instead of an artifacts snapshot. One
-    run_id's raise doesn't cost the rest of the book -- the loop below
-    catches it per run_id, not around the whole loop.
-
-    `sources` is flat -- every Source ever declared under root/sources,
-    attached to a run or not (see dag_resolve.declared_of_kind), unlike
-    `runs` there's no grouping. `datasets` is every DataSet and
-    MappedDataSet ever declared (root/datasets and root/mappeddatasets),
-    each shown the way a run shows its artifacts -- its own row, plus its
-    full transitive dependency closure (dag_resolve.dependency_closure),
-    which for a dataset reaches every TokenizedSource its train/valid mix
-    uses and, through those, the Tokenizer and Source(s) behind them. Each
-    dataset's own entry also carries `mapped`: True for a MappedDataSet, so
-    the frontend can tag it inline without parsing `type` -- the two kinds
-    share this one view by design, but a MappedDataSet owns no bytes of its
-    own (mappeddatasets/artifact.py), worth flagging at a glance. That flag
-    is stamped on a copy of the shared state dict, not the cached original
-    -- `states` is shared with `runs`/`sources`, and a dataset reachable
-    from a run too should not show a run artifact tagged `mapped`.
-
-    `leases` and `beats` go back close to untouched: `leases` verbatim, `beats`
-    with one field added per entry, `lease`, naming which artifact_path that
-    call_id is the *current* holder for (None if it is not the current holder
-    of anything -- a superseded container still beating, or one that never
-    held a lease at all). Both come from the one snapshot taken here, so a
-    beat's `lease` always agrees with what a run's own artifacts say that
-    call holds -- a lease is granted per artifact_path (see `attempt_launch`),
-    so that agreement is checked per artifact, not per run.
-
-    Every state dict also carries `durable_progress` and `live_progress` (see
-    `_with_progress`) -- two independent signals, not one. `durable_progress`
-    is read straight off `root` and survives a lost lease or a dead container;
-    `live_progress` is a currently-active call's own self-reported payload and
-    disappears the moment it isn't active anymore. Most artifact types have
-    neither (both `None`): only a job that actually reports incremental
-    progress (models.mock.job.PretrainJob, at each checkpoint) has anything to
-    show here.
+        read_state() -> {
+            "now": 1757260800.4,
+            # one entry per runs/ directory: its own roots plus their closure
+            "runs": {"toy": {"artifacts": {...}, "notebook": True}},
+            "problem_runs": {"stale": {"error": "unknown artifact type 'Mamba'"}},
+            "leases": {"runs/toy/pretraining": {"call_id": "fc-01JQ8W",
+                                                "granted_ts": 1757260742.0,
+                                                "attempt": 1,
+                                                "artifact_type": "Pretraining"}},
+            "beats": {"fc-01JQ8W": {"artifact_path": "runs/toy/pretraining",
+                                    "last_beat_ts": 1757260800.1,
+                                    "progress": {"step": 120, "total_steps": 500},
+                                    "lease": "runs/toy/pretraining"}},
+            "sources": {"sources/tinyshakespeare": {...}},
+            "datasets": {"mappeddatasets/mapped-7f3c1a2b":
+                            {"state": {..., "mapped": True}, "artifacts": {...}}},
+            "metrics": {"read_state_seconds": 0.41},
+        }
     """
+    started = time.monotonic()
+    # get a snapshot of the disk (this refreshes the launcher's view of the volume)
     volume.reload()
     storage_root = Path(STORAGE)
     runs_root = storage_root / "runs"
@@ -293,55 +143,137 @@ def read_state() -> dict:
         else []
     )
 
-    grants, beat_records, now = _lease_snapshot()
+    # One read of both Dicts and the clock to construct the state
+    grants, beat_records, now = dict(leases.items()), dict(beats.items()), time.time()
 
     # `grants` is keyed by artifact_path (a lease is granted per
     # artifact_path -- see attempt_launch), so this maps each call_id to
     # the artifact_path it currently holds the lease for.
     held_by = {grant["call_id"]: artifact_path for artifact_path, grant in grants.items()}
 
-    # One cache, and one memoized state dict, for the whole read -- not one
-    # per run or per view. A tokenizer or source shared across several runs,
-    # or reachable from both a run and the sources/datasets views, then gets
-    # inspected and stamped with its lease exactly once, regardless of how
-    # many places reference it below.
-    cache: dag_resolve.InspectCache = {}
-    states: dict[str, dict] = {}
-
-    def state_for(a: Artifact) -> dict:
-        path = a.artifact_path.as_posix()
-        if path not in states:
-            info = _with_lease(
-                artifact_state(a, storage_root, cache), path, grants, beat_records, now
-            )
-            states[path] = _with_progress(info, a, storage_root, beat_records)
-        return states[path]
-
-    runs = {}
+    # Read every manifest on the volume first, then resolve all of them into
+    # one graph. A run that can't be read at all drops out here and is
+    # reported instead of resolved.
+    run_roots: dict[str, list[Artifact]] = {}
     problem_runs = {}
     for run_id in run_ids:
         try:
-            declared = dag_resolve.declared_under(run_id, storage_root)
+            run_roots[run_id] = core_resolve.declared(
+                storage_root, f"runs/{run_id}", deep=True
+            )
         except Exception as exc:
             problem_runs[run_id] = {"error": str(exc)}
-            continue
-        runs[run_id] = {
-            "artifacts": {a.artifact_path.as_posix(): state_for(a) for a in declared},
-            "notebook": (runs_root / run_id / "notebook.ipynb").exists(),
+
+    source_roots = core_resolve.declared(storage_root, "sources")
+    dataset_roots = [
+        *core_resolve.declared(storage_root, "datasets"),
+        *core_resolve.declared(storage_root, "mappeddatasets"),
+    ]
+    ## TODO: same artifact is being resolved many times here ABOVE!
+
+    # The one walk. Every artifact declared anywhere on this volume, plus
+    # everything they depend on, visited and inspected exactly once between
+    # them -- a tokenizer behind three runs and two datasets is one node.
+    dag = core_resolve.resolve(
+        *(a for group in run_roots.values() for a in group),
+        *source_roots,
+        *dataset_roots,
+        target=storage_root,
+    )
+
+    # One memoized state dict for the whole read. The graph already
+    # deduplicates the expensive half (reading and comparing manifests); this
+    # deduplicates the rest -- the lease stamp and the progress read -- so a
+    # shared artifact is assembled once regardless of how many views below
+    # reference it.
+    states: dict[str, dict] = {}
+
+    def state_for(path: Path) -> dict:
+        """One artifact's whole state: what the graph says about it, plus who
+        holds its lease and how far along it is.
+
+            state_for(Path("runs/toy/pretraining")) -> {
+                "type": "Pretraining",          # these seven are artifact_state's
+                "status": "partial",
+                "drift": False,
+                "depends_on": ["mappeddatasets/mapped-7f3c1a2b"],
+                "blocked_by": [],
+                "done": False,
+                "ready": True,
+                "call_id": "fc-01JQ8W",
+                "active": True,
+                "last_heartbeat": 1757260800.1,
+                "live_progress": {"step": 120, "total_steps": 500, "loss": 3.4},
+                "durable_progress": {"step": 100, "total_steps": 500},
+            }
+
+        An artifact nobody is running has `call_id`, `last_heartbeat` and
+        `live_progress` None, and `durable_progress` still filled in.
+        """
+        key = path.as_posix()
+        if key in states:
+            return states[key]
+        node = dag[path]
+        # A lease is granted per artifact_path (see `attempt_launch`), so one
+        # lookup is right whether `path` is being shown under a run or in a
+        # shared kind's own view. Its holder's beat carries both the freshness
+        # `is_active` judges and whatever the call last reported about itself.
+        grant = grants.get(key)
+        beat = beat_records.get(grant["call_id"]) if grant else None
+        active = is_active(grant, beat, now)
+        states[key] = {
+            **artifact_state(node, dag),
+            "call_id": grant["call_id"] if grant else None,
+            "active": active,
+            "last_heartbeat": beat["last_beat_ts"] if beat else None,
+            "live_progress": beat.get("progress") if beat and active else None,
+            "durable_progress": node.artifact.durable_progress(storage_root),
+        }
+        return states[key]
+
+    def with_closure(artifacts: list[Artifact]) -> dict[str, dict]:
+        """These artifacts and everything they depend on, in dependency
+        order -- the shape both a run's row set and a dataset's drill-down
+        want. Ordered by walking the graph itself, so every view lists
+        dependencies before the things that need them.
+
+            with_closure([Pretraining(run_id="toy", ...)]) -> {
+                "sources/tinyshakespeare": {...},               # state_for's
+                "tokenizers/bpe-3.0k-e4649eb4ff": {...},        # shape, each
+                "tokenizers/bpe-3.0k-e4649eb4ff/bin/tinyshakespeare": {...},
+                "mappeddatasets/mapped-7f3c1a2b": {...},
+                "runs/toy/pretraining": {...},
+            }
+
+        The argument is one run's own roots; the keys reach outside it, to the
+        shared roots its dependencies live under.
+        """
+        wanted = set()
+        for a in artifacts:
+            wanted.add(a.artifact_path)
+            wanted.update(dag.closure(a.artifact_path))
+        return {
+            node.path.as_posix(): state_for(node.path)
+            for node in dag
+            if node.path in wanted
         }
 
-    sources = {
-        a.artifact_path.as_posix(): state_for(a)
-        for a in dag_resolve.declared_of_kind("sources", storage_root)
+    runs = {
+        run_id: {
+            "artifacts": with_closure(roots),
+            "notebook": (runs_root / run_id / "notebook.ipynb").exists(),
+        }
+        for run_id, roots in run_roots.items()
     }
 
+    sources = {a.artifact_path.as_posix(): state_for(a.artifact_path) for a in source_roots}
+
     datasets = {}
-    for a in [
-        *dag_resolve.declared_of_kind("datasets", storage_root),
-        *dag_resolve.declared_of_kind("mappeddatasets", storage_root),
-    ]:
-        info = {**state_for(a), "mapped": type(a).__name__ == "MappedDataSet"}
-        deps_state = {dep.artifact_path.as_posix(): state_for(dep) for dep in dag_resolve.dependency_closure(a)}
+    for a in dataset_roots:
+        info = {**state_for(a.artifact_path), "mapped": type(a).__name__ == "MappedDataSet"}
+        deps_state = {
+            path.as_posix(): state_for(path) for path in dag.closure(a.artifact_path)
+        }
         datasets[a.artifact_path.as_posix()] = {"state": info, "artifacts": deps_state}
 
     beats_out = {
@@ -357,28 +289,11 @@ def read_state() -> dict:
         "leases": grants,
         "sources": sources,
         "datasets": datasets,
+        # Wall-clock time this call itself took, start (before `reload`) to
+        # here -- read_state() is the thing being profiled, so it's the one
+        # place that can honestly time all of it, reload included.
+        "metrics": {"read_state_seconds": time.monotonic() - started},
     }
-
-
-def artifact_job_name(artifact_path: str, root: Path) -> str | None:
-    """The class name of the job that produces the artifact at
-    `artifact_path` (e.g. "SourceJob"), or None if there's no manifest to
-    resolve it from yet -- a call's log directory can exist before (or
-    outlive) the manifest that names its job, so this is best-effort, not
-    load-bearing for anything but display.
-
-    Same lookup `run_job` already does to find a job to run -- load the
-    manifest, resolve its producer -- just read for its class name instead
-    of run.
-    """
-    manifest_path = root / artifact_path / MANIFEST
-    if not manifest_path.exists():
-        return None
-    try:
-        artifact = Artifact.load(manifest_path)
-        return type(dag_resolve.producer_for(artifact)).__name__
-    except Exception:
-        return None
 
 
 def artifact_manifest_summary(artifact_path: str, root: Path) -> dict | None:
@@ -389,8 +304,8 @@ def artifact_manifest_summary(artifact_path: str, root: Path) -> dict | None:
     hands back the live Artifact objects, not their nested manifests, and a
     link to that artifact's own page is all the summary needs.
 
-    None if there's no manifest yet (declared but not built) -- same
-    "best-effort" contract as `artifact_job_name`.
+    None if there's no manifest yet -- declared but not built is a normal
+    state, not an error.
     """
     manifest_path = root / artifact_path / MANIFEST
     if not manifest_path.exists():
@@ -405,43 +320,6 @@ def artifact_manifest_summary(artifact_path: str, root: Path) -> dict | None:
             for dep in artifact.deps()
         ],
     }
-
-
-def _stamp(entries: list[dict], artifact_path: str, job_name: str | None) -> list[dict]:
-    """Tag every entry with the artifact_path and job name it belongs to --
-    `read_call_logs`/`read_log` have no notion of either, they only know
-    call_ids and log files (see system/logs.py)."""
-    for entry in entries:
-        entry["artifact_path"] = artifact_path
-        entry["job"] = job_name
-    return entries
-
-
-def artifact_log_entries(artifact_path: str, root: Path) -> list[dict]:
-    """One artifact's whole log history -- every call that has ever held its
-    lease, merged into one timeline and tagged with the artifact_path and
-    job that produced it.
-    """
-    entries = read_call_logs(root / artifact_path / "logs")
-    return _stamp(entries, artifact_path, artifact_job_name(artifact_path, root))
-
-
-def run_log_entries(run_id: str, root: Path) -> list[dict]:
-    """Every worker that has ever touched anything declared under `run_id`,
-    merged into one timeline -- the run-scoped counterpart to
-    `artifact_log_entries`.
-
-    Walks the same artifact set `read_state` shows for this run
-    (`declared_under`: the run's own manifests plus every shared dependency
-    reachable from them), so "what happened in this run" never disagrees
-    with "what this run's dashboard rows are".
-    """
-    declared = dag_resolve.declared_under(run_id, root)
-    entries: list[dict] = []
-    for artifact in declared:
-        entries.extend(artifact_log_entries(artifact.artifact_path.as_posix(), root))
-    entries.sort(key=lambda e: e["ts"])
-    return entries
 
 
 @app.function(
@@ -465,107 +343,136 @@ def leasebook():
     from fastapi.responses import RedirectResponse
     from fastapi.staticfiles import StaticFiles
 
-    api = FastAPI()
+    # Everything below is this container's whole setup and its whole life --
+    # one try around all of it, so anything that goes wrong anywhere in here
+    # (building the app, the background thread, any request any route
+    # handles) reaches this same log instead of vanishing into a container
+    # crash or a bare 500 with nothing on record.
+    try:
+        api = FastAPI()
 
-    # The one state route for all three table views (runs/sources/datasets)
-    # -- read_state() reads the whole volume once and slices it three ways,
-    # so the frontend fetches this once per poll and switches views locally
-    # instead of round-tripping again on every nav click.
-    @api.get("/state")
-    def state() -> dict:
-        return read_state()
+        setup_logging()  # stdout, where `modal app logs leasebook` picks it up
+        log = logging.getLogger("leasebook")
+        log.info("leasebook container started")
 
-    # The header's "lab" link. A redirect rather than a URL the page fetches:
-    # the lab lives on its own subdomain, and the token that gets it past the
-    # login screen is this container's to hold, not something to hand to the
-    # browser as data and then hope it isn't logged. app.js never learns either
-    # -- the anchor in index.html is a plain relative href.
-    @api.get("/lab")
-    def lab_redirect() -> RedirectResponse:
-        url = jupyter.get_web_url()
-        token = os.environ.get("JUPYTER_TOKEN")
-        return RedirectResponse(f"{url}/lab?token={token}" if token else url)
+        # One thread, one job: keep this container's picture of the volume
+        # fresh. `read_state()` is all of it -- one `volume.reload()`, one walk
+        # of the manifests, one lease/beat snapshot, the whole state computed
+        # here rather than in whatever request happens to arrive next. It
+        # writes nothing and syncs nothing, so no request ever waits on it and
+        # it never has to be told what someone is looking at.
+        latest_state = {"value": read_state()}
 
-    # Same redirect, but straight to one run's own notebook rather than the
-    # lab's root -- the "lab" icon per run in the dashboard's runs view.
-    # :path even though a run_id has no /s of its own, same reasoning as
-    # run_logs_endpoint below: never trust a URL segment's shape to match the
-    # shape of the thing it names. An invalid run_id falls back to plain
-    # /lab rather than erroring -- still useful, just not deep-linked.
-    @api.get("/lab/run/{run_id:path}")
-    def lab_run_redirect(run_id: str) -> RedirectResponse:
-        if not safe_relpath(run_id):
-            return RedirectResponse("/lab")
-        url = jupyter.get_web_url()
-        token = os.environ.get("JUPYTER_TOKEN")
-        target = f"{url}/lab/tree/runs/{run_id}/notebook.ipynb"
-        return RedirectResponse(f"{target}?token={token}" if token else target)
+        def refresh_state() -> None:
+            while True:
+                time.sleep(STATE_REFRESH_SECONDS)
+                try:
+                    computed = read_state()
+                except Exception:
+                    # This thread is the dashboard's only clock; letting it die
+                    # would freeze /state with nothing saying why. The last
+                    # good state stays up and the next pass tries again.
+                    log.exception("state refresh failed, keeping last good state")
+                    continue
+                # One assignment of one key, which the GIL makes atomic: a
+                # reader gets the whole previous state or the whole new one,
+                # never a mix, so there is nothing here for a lock to protect.
+                latest_state["value"] = computed
 
-    # :path, not a plain path segment -- an artifact_path contains its own
-    # /s (runs/my-run/pretraining), which a plain segment can't match.
-    @api.post("/launch/{artifact_path:path}")
-    def launch_endpoint(artifact_path: str) -> dict:
-        launched, message, _call = attempt_launch(artifact_path)
-        return {"launched": launched, "message": message}
+        threading.Thread(target=refresh_state, daemon=True).start()
 
-    # call_id is a query param, not a path segment: "logs of this one call"
-    # is a narrowing of the artifact-scoped view, not a route of its own --
-    # the dashboard links to it as #/artifact/<path>?call=<call_id>.
-    @api.get("/logs/artifact/{artifact_path:path}")
-    def artifact_logs_endpoint(artifact_path: str, call_id: str | None = None) -> dict:
-        if not safe_relpath(artifact_path):
-            return {"artifact_path": artifact_path, "entries": [], "error": "invalid artifact_path"}
-        if call_id is not None and not safe_relpath(call_id):
-            return {"artifact_path": artifact_path, "call_id": call_id, "entries": [], "error": "invalid call_id"}
+        # The one state route for all three table views (runs/sources/datasets)
+        # -- read_state() slices its single read three ways, so the frontend
+        # fetches this once per poll and switches views locally instead of
+        # round-tripping on every nav click. Touches nothing itself: it hands
+        # back whatever the thread above last computed, so it is never slower
+        # than a dict lookup and never fresher than the last pass.
+        @api.get("/state")
+        def state() -> dict:
+            return latest_state["value"]
 
-        volume.reload()
-        root = Path(STORAGE)
+        # The header's "lab" link. A redirect rather than a URL the page fetches:
+        # the lab lives on its own subdomain, and the token that gets it past the
+        # login screen is this container's to hold, not something to hand to the
+        # browser as data and then hope it isn't logged. app.js never learns either
+        # -- the anchor in index.html is a plain relative href.
+        @api.get("/lab")
+        def lab_redirect() -> RedirectResponse:
+            url = jupyter.get_web_url()
+            token = os.environ.get("JUPYTER_TOKEN")
+            return RedirectResponse(f"{url}/lab?token={token}" if token else url)
 
-        if call_id is not None:
-            log_path = root / artifact_path / "logs" / call_id / LOG_FILENAME
-            entries = read_log(log_path, call_id) if log_path.exists() else []
-            entries = _stamp(entries, artifact_path, artifact_job_name(artifact_path, root))
-            return {"artifact_path": artifact_path, "call_id": call_id, "entries": entries}
+        # Same redirect, but straight to one run's own notebook rather than the
+        # lab's root -- the "lab" icon per run in the dashboard's runs view.
+        # :path even though a run_id has no /s of its own -- never trust a URL
+        # segment's shape to match the shape of the thing it names. An invalid
+        # run_id falls back to plain /lab rather than erroring -- still
+        # useful, just not deep-linked.
+        @api.get("/lab/run/{run_id:path}")
+        def lab_run_redirect(run_id: str) -> RedirectResponse:
+            if not safe_relpath(run_id):
+                return RedirectResponse("/lab")
+            url = jupyter.get_web_url()
+            token = os.environ.get("JUPYTER_TOKEN")
+            target = f"{url}/lab/tree/runs/{run_id}/notebook.ipynb"
+            return RedirectResponse(f"{target}?token={token}" if token else target)
 
-        return {"artifact_path": artifact_path, "entries": artifact_log_entries(artifact_path, root)}
+        # :path, not a plain path segment -- an artifact_path contains its own
+        # /s (runs/my-run/pretraining), which a plain segment can't match.
+        @api.post("/launch/{artifact_path:path}")
+        def launch_endpoint(artifact_path: str) -> dict:
+            launched, message, _call = attempt_launch(artifact_path)
+            return {"launched": launched, "message": message}
 
-    # What the artifact drill-down page shows above its log table: type,
-    # own parameters, and dependency links -- see artifact_manifest_summary.
-    @api.get("/manifest/{artifact_path:path}")
-    def manifest_endpoint(artifact_path: str) -> dict:
-        if not safe_relpath(artifact_path):
-            return {"artifact_path": artifact_path, "error": "invalid artifact_path"}
-        volume.reload()
-        try:
-            summary = artifact_manifest_summary(artifact_path, Path(STORAGE))
-        except Exception as exc:
-            return {"artifact_path": artifact_path, "error": str(exc)}
-        if summary is None:
-            return {"artifact_path": artifact_path, "error": "not built yet -- no manifest"}
-        return {"artifact_path": artifact_path, **summary}
+        # Stop whatever call is working on this artifact -- what the row's
+        # button offers while it runs, and the only way to end a job from the
+        # dashboard.
+        @api.post("/cancel/{artifact_path:path}")
+        def cancel_endpoint(artifact_path: str) -> dict:
+            if not safe_relpath(artifact_path):
+                return {"cancelled": False, "message": f"invalid artifact_path {artifact_path!r}"}
+            cancelled, message = cancel_call(artifact_path)
+            log.info(f"cancel {artifact_path}: {message}")
+            return {"cancelled": cancelled, "message": message}
 
-    # :path even though a run_id has no /s of its own -- kept consistent
-    # with the artifact route above rather than a plain segment, on the same
-    # reasoning safe_relpath already exists for: never trust the shape of a
-    # URL segment to match the shape of the thing it names.
-    @api.get("/logs/run/{run_id:path}")
-    def run_logs_endpoint(run_id: str) -> dict:
-        if not safe_relpath(run_id):
-            return {"run_id": run_id, "entries": [], "error": "invalid run_id"}
-        volume.reload()
-        try:
-            entries = run_log_entries(run_id, Path(STORAGE))
-        except Exception as exc:
-            return {"run_id": run_id, "entries": [], "error": str(exc)}
-        return {"run_id": run_id, "entries": entries}
+        # The `call_logs` Dict, straight through: which calls have a log, and
+        # one call's lines. A Dict read, not a file -- this container reloads
+        # the mount on a clock and opens no log file on it (docs/LOGGING.md).
+        @api.get("/logs")
+        def logs_index() -> dict:
+            return {"call_ids": sorted(call_logs.keys())}
 
-    # Everything else -- index.html at "/" and its same-origin JS modules
-    # (app.js, el.js, render.js) -- is a static file under WEB_DIR. Mounted
-    # last: routes are matched in registration order, so /state and /launch
-    # are claimed above before this catch-all sees them.
-    api.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+        @api.get("/logs/{call_id}")
+        def logs_endpoint(call_id: str) -> dict:
+            return {"call_id": call_id, "lines": call_logs.get(call_id) or []}
 
-    return api
+        # What an artifact's own page shows: type, own parameters, and
+        # dependency links -- see artifact_manifest_summary. The one request
+        # here that reads the mount, and one small file is all it reads.
+        @api.get("/manifest/{artifact_path:path}")
+        def manifest_endpoint(artifact_path: str) -> dict:
+            if not safe_relpath(artifact_path):
+                return {"artifact_path": artifact_path, "error": "invalid artifact_path"}
+            try:
+                summary = artifact_manifest_summary(artifact_path, Path(STORAGE))
+            except Exception as exc:
+                return {"artifact_path": artifact_path, "error": str(exc)}
+            if summary is None:
+                return {"artifact_path": artifact_path, "error": "not built yet -- no manifest"}
+            return {"artifact_path": artifact_path, **summary}
+
+        # Everything else -- index.html at "/" and its same-origin JS modules
+        # (app.js, el.js, render.js) -- is a static file under WEB_DIR. Mounted
+        # last: routes are matched in registration order, so /state and /launch
+        # are claimed above before this catch-all sees them.
+        api.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+
+        return api
+    except Exception:
+        # getLogger rather than `log`: this also catches a failure that happened
+        # before that line ever ran.
+        logging.getLogger("leasebook").exception("leasebook failed to start")
+        raise
 
 
 @app.function(image=worker_image, volumes={STORAGE: volume})
@@ -576,12 +483,30 @@ def declare(
     strict_commit: bool = False,
     run_id: str | None = None,
     cell: str | None = None,
-) -> str:
+    verbose: bool = False,
+    visualize: bool = False,
+) -> tuple[str, str | None]:
     """Check (or, with write=True, declare) `artifact` and its full
     dependency tree against the volume -- the notebook equivalent of
-    `Declaration(artifact, root).check()` / `.write()`, run where `root` can
+    `resolve(artifact, target=root)` and `declare(dag)`, run where `root` can
     be the volume itself rather than a local mirror of it. Returns the
-    human-readable report either way.
+    human-readable report, and with `visualize` the same graph drawn as an SVG.
+
+    The drawing is done here rather than sent back as a `Dag` to draw locally,
+    because here is where the statuses are true: a caller on a laptop has no
+    `/storage` to resolve against, which is the whole reason this function
+    exists. `visualizer` builds a string and imports nothing heavy, so this
+    costs the worker image nothing.
+
+    A successful write resolves a second time before reporting, so the report
+    describes what's on disk now rather than the pre-write snapshot in which
+    everything just written still reads `new`.
+
+    `verbose` makes anything that blocks say why, in the returned report and
+    in a refusal to write alike -- the manifest on disk against the one
+    requested, leaf by leaf, for a conflict. It matters most for a plain
+    check, which is where a conflict is usually found and which returns its
+    report rather than raising.
 
     When write succeeds and run_id is given, also drops a starter notebook
     at runs/{run_id}/notebook.ipynb -- lab imports, then cell (typically the
@@ -590,22 +515,27 @@ def declare(
     no notebook, no side effect beyond the declaration itself.
     """
     volume.reload()
-    declaration = dag_resolve.Declaration(artifact, Path(STORAGE), strict_commit)
+    root = Path(STORAGE)
+    def resolved() -> core_resolve.Dag:
+        return core_resolve.resolve(
+            artifact, target=root, strict_commit=strict_commit, verbose=verbose
+        )
+
+    dag = resolved()
     if write:
-        declaration.write()
+        core_resolve.declare(dag)  # raises rather than writing over a mess
         if run_id:  # the notebook step is opt-in: no run_id, no notebook, ever
             _write_run_notebook(run_id, cell or "")
         volume.commit()
-    else:
-        declaration.check()
-    return str(declaration)
+        dag = resolved()
+    return str(dag), str(visualize_dag(dag)) if visualize else None
 
 
 def _write_run_notebook(run_id: str, cell: str) -> None:
     """Starter notebook at runs/{run_id}/notebook.ipynb, the first time this
     run declares successfully -- lab imports first, then cell, so opening it
     in the lab picks up right where the declaring notebook left off.
-    Exclusive create, same as Declaration.write()'s manifests: left alone on
+    Exclusive create, same as declare()'s manifests: left alone on
     every later call for the same run_id, since by then it may already be
     the thing someone's editing.
 
@@ -653,15 +583,15 @@ def run_job(artifact_path: str) -> None:
     """Load the artifact at `artifact_path`, run whatever produces it, under
     this call's own logger and lease.
 
-    The producing job is resolved from the registry here, and only here --
-    `resolve.producer_for` (the same lookup dependency resolution already
-    uses), called right before it's needed rather than anywhere upstream of
-    this. Nothing about launching (`attempt_launch`) has to know it either.
+    The producing job is resolved here, and only here -- `artifact.job()`
+    (the same lookup dependency resolution already uses), called right
+    before it's needed rather than anywhere upstream of this. Nothing about
+    launching (`attempt_launch`) has to know it either.
     """
     with initialize_worker(artifact_path, volume) as worker:
         worker.confirm_lease("pre run")
         artifact = Artifact.load(Path(STORAGE) / artifact_path / MANIFEST)
-        job = dag_resolve.producer_for(artifact)
+        job = artifact.job()
         job.run(Path(STORAGE), worker)
         worker.confirm_lease("pre vol commit")
 
@@ -680,11 +610,13 @@ def declared_artifact(artifact_path: str) -> tuple[Artifact, dict] | None:
     run`, and volume.reload() outright refuses to run there).
     """
     volume.reload()
-    manifest_path = Path(STORAGE) / artifact_path / MANIFEST
+    root = Path(STORAGE)
+    manifest_path = root / artifact_path / MANIFEST
     if not manifest_path.exists():
         return None
     artifact = Artifact.load(manifest_path)
-    return artifact, artifact_state(artifact, Path(STORAGE))
+    dag = core_resolve.resolve(artifact, target=root)
+    return artifact, artifact_state(dag[artifact.artifact_path], dag)
 
 
 @app.function(
@@ -834,14 +766,15 @@ def attempt_launch(
     docstring for why this can't just read `Path(STORAGE)` here directly),
     computed the same way `read_state` already does for the dashboard, so
     "is this safe to launch" and "what does the dashboard show" never have
-    two different answers. Resources come from the artifact's own
-    `allocated_resources`, turned into `Function.with_options()` kwargs by
-    `resource_options`. That call is skipped entirely when an artifact
-    declares none (`options` empty): calling it unconditionally would move
-    every launch into its own dynamically configured container pool,
-    separate even from another call with the same empty options, so an
-    artifact that asks for nothing special stays pooled on `run_job`'s own
-    base configuration.
+    two different answers.
+
+    Resources come from the artifact's own `allocated_resources`, turned into
+    `Function.with_options()` kwargs by `resource_options`. That call is
+    skipped entirely when an artifact declares none (`options` empty): calling
+    it unconditionally would move every launch into its own dynamically
+    configured container pool, separate even from another call with the same
+    empty options, so an artifact that asks for nothing special stays pooled
+    on `run_job`'s own base configuration.
 
     The producing job is never looked up here -- readiness only needs the
     artifact and its declared dependencies' statuses, not what runs it.
@@ -867,7 +800,25 @@ def attempt_launch(
     fn = run_job.with_options(**options) if options else run_job
     call = fn.spawn(artifact_path)
     leases.put(artifact_path, new_grant(call.object_id, type(artifact).__name__))
+
     return True, f"granted lease for {artifact_path} -> {call.object_id}", call
+
+
+def cancel_call(artifact_path: str) -> tuple[bool, str]:
+    """Stop the call currently holding `artifact_path`, or say there wasn't one.
+
+    The lease is released first: releasing it is what a worker between
+    checkpoints notices (`Lease.confirm` raises on the next one) even if the
+    cancel itself never lands, and a lease left behind on a killed call reads
+    as one that went stale -- red on the dashboard, for something that was
+    stopped on purpose.
+
+    """
+    grant = leases.pop(artifact_path, None)
+    if grant is None:
+        return False, f"{artifact_path}: no active call to cancel"
+    modal.FunctionCall.from_id(grant["call_id"]).cancel()
+    return True, f"cancelled {artifact_path} -> {grant['call_id']}"
 
 
 @app.local_entrypoint()

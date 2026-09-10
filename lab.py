@@ -39,6 +39,8 @@ own disk, gone the moment it recycles.
 
     lab.declare(pretraining)                 # resolve + check, no writes
     lab.declare(pretraining, commit=True)     # ...and write/publish
+    lab.plan(pretraining)                     # the artifacts to build, in order
+    lab.declare(pretraining, visualize=True)  # ...drawn, colored by status
     lab.bind(tokenizer)                       # bind an object you have
     lab.bind("tokenizers/bpe-3.0k-e4649eb4ff")  # or by path, if you don't
 
@@ -62,15 +64,11 @@ import tempfile
 import uuid
 from pathlib import Path
 
-import dag.resolve as dag_resolve
-
-# Importing dag.resolve is what fills ARTIFACTS/REGISTRY -- every concrete
-# family is imported for its side effect there, which is what makes
-# `Artifact.at` able to name the class a manifest refers to. main.py leans on
-# the same import for the same reason.
-from config import APP_NAME, LOCAL_STORAGE, STORAGE, VOLUME_NAME
-from dag.artifact import MANIFEST, Artifact
-from dag.visualizer import SVG, visualize
+import artifacts.core.resolve as core_resolve
+from artifacts.core.artifact import MANIFEST, Artifact
+from artifacts.core.visualizer import SVG
+from artifacts.core.visualizer import visualize as draw_graph
+from config import LOCAL_STORAGE, STORAGE, VOLUME_NAME
 from system.runtime import Worker
 
 
@@ -148,11 +146,10 @@ def root() -> Path:
 # reads artifact_path/call_id today (only main.run_job does, around the
 # call), so these are placeholders, not identity.
 #
-# log goes to the console only, not to a file under root() -- TODO: wire this
-# up to system.logs.call_logger once something needs to read a lab-run job's
-# log back. That opens a real file on the volume, which would need routing
-# through _outside_volume the same way refresh/publish are, since an open
-# log file blocks reload exactly like an open cwd does.
+# log goes to the console only. A job run through the launcher has its log
+# kept by Modal under the call id that ran it, for a day (docs/LOGGING.md); a
+# job run by hand from a cell is not a Modal call at all, so there is nothing
+# to fetch and nowhere for it to be filed.
 _log = logging.getLogger("lab")
 _log.setLevel(logging.INFO)
 if not _log.handlers:  # module-level, so this only ever runs once per process
@@ -325,8 +322,14 @@ def _write_run_notebook(run_id: str, cell: str, root: Path) -> None:
 
 
 def declare(
-    artifact: Artifact, *, commit: bool = False, strict_commit: bool = False, cell: str | None = None
-) -> dag_resolve.Declaration | None:
+    artifact: Artifact,
+    *,
+    commit: bool = False,
+    strict_commit: bool = False,
+    cell: str | None = None,
+    visualize: bool = False,
+    verbose: bool = False,
+) -> core_resolve.Dag | None:
     """Resolve `artifact` and its whole dependency tree against the current
     target and check it -- creating the plan, nothing more -- unless
     `commit` is True, in which case it also writes a manifest for everything
@@ -342,12 +345,35 @@ def declare(
     bare `import lab` boilerplate; omit it and the notebook still gets
     created, just without that seed.
 
-    When `target == environment`, this is a direct local operation: builds a
-    `Declaration` against whatever root the target resolves to, refuses
-    outright if the tree is inconsistent when `commit` is True (nothing is
-    written in that case, so a refusal leaves the target exactly as it was),
-    and returns the `Declaration` itself -- `.rows`, `.problems`, `.ok` are
-    there when the printed report isn't enough.
+    When `target == environment`, this is a direct local operation: resolves
+    the graph against whatever root the target resolves to, refuses outright
+    if it is inconsistent when `commit` is True (nothing is written in that
+    case, so a refusal leaves the target exactly as it was), and returns the
+    resolved `Dag` -- iterate it, or read `.problems`/`.ok`, when the printed
+    report isn't enough.
+
+    After a successful commit the graph is resolved a second time, so the
+    object handed back reports what's on disk *now* rather than the
+    pre-write snapshot in which everything just written still reads `new`.
+    That second pass is paid here, at the one place a human reads the
+    result, rather than inside every write.
+
+    `verbose=True` makes anything that blocks say *why*, in the report this
+    returns and in a refusal to commit alike: for a `conflict`, the manifest
+    on disk against the one being requested, leaf by leaf; for an
+    `undeclared`, the files found in a folder nothing declared; for a
+    `drift` under `strict_commit`, both commits. It applies to a plain check
+    too -- a check is where you usually find out something is wrong, and
+    "BLOCKED" without a reason is the moment you wanted the reason. The
+    returned graph also answers on demand, verbose or not, via
+    `print("\\n".join(dag.explain()))`.
+
+    `visualize=True` additionally renders the dependency graph inline, each
+    node outlined by its status on disk, reusing the graph this call already
+    resolved rather than resolving again. It is an argument here rather than a
+    function of its own because a drawing of statuses is only ever as true as
+    the root it was resolved against, and this is the one place that knows how
+    to reach the real one from either environment.
 
     The one other allowed case (local environment, modal target) routes
     through `artifact.declare(write=commit, strict_commit=strict_commit,
@@ -355,29 +381,61 @@ def declare(
     only thing a local process can reach on the volume, which sets up the
     same starter notebook server-side -- and returns `None`: its report is
     printed there, same as `main.declare`'s always was, but there's no local
-    `Declaration` object to hand back when there's no local root to have
-    built one from.
+    `Dag` to hand back when there's no local root to have resolved one
+    against, and nothing local for `visualize` to draw either.
     """
     _require("declare")
     run_id = getattr(artifact, "run_id", None)
     if target == environment:
         r = _root_for(target)
-        declaration = dag_resolve.Declaration(artifact, r, strict_commit)
-        declaration.write() if commit else declaration.check()
+        def resolved() -> core_resolve.Dag:
+            return core_resolve.resolve(
+                artifact, target=r, strict_commit=strict_commit, verbose=verbose
+            )
+
+        dag = resolved()
         if commit:
+            core_resolve.declare(dag)  # raises rather than writing over a mess
             if run_id:
                 _write_run_notebook(run_id, cell or "", r)
             if environment == "modal":
                 publish()
-        return declaration
-    artifact.declare(write=commit, strict_commit=strict_commit, run_id=run_id, cell=cell)
+            dag = resolved()
+        if visualize:
+            _show(draw_graph(dag))
+        return dag
+
+    svg = artifact.declare(
+        write=commit,
+        strict_commit=strict_commit,
+        run_id=run_id,
+        cell=cell,
+        verbose=verbose,
+        visualize=visualize,
+    )
+    if svg:
+        _show(SVG(svg))
     return None
 
 
-def plan(artifact: Artifact) -> SVG:
-    """The dependency graph, drawn, with each node outlined by its status on
-    the current target. Renders inline as a cell's last line. Same
-    permission cell as `bind`/`ls` -- a direct local read, no remote
-    equivalent."""
-    _require("bind")
-    return visualize(dag_resolve.resolve(artifact), _root_for(target))
+def _show(svg: SVG) -> None:
+    """Render a drawing in the notebook that asked for it. Imported here rather
+    than at module scope: `lab` is staged as source into images that have no
+    IPython, and importing it there would break every one of them."""
+    from IPython.display import display
+
+    display(svg)
+
+
+def plan(artifact: Artifact) -> list[Artifact]:
+    """The artifacts that have to be built to get `artifact`, in the order
+    they have to be built, including `artifact` itself.
+
+    One job produces one artifact, so this list *is* the work: the nth entry
+    is the nth thing to run. It keeps the whole graph rather than only what's
+    pending, which is what you want to read in a cell -- and that makes it a
+    question about the artifact's own structure, not about any storage root.
+    So it resolves without a target, touches no filesystem, and reads the same
+    from anywhere. Use `declare` for what's actually on disk.
+    """
+    return core_resolve.plan(core_resolve.resolve(artifact))

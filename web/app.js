@@ -1,11 +1,11 @@
 // app.js — the runtime: config, app state, the poll loop, launching, and
 // routing between the three table views (runs/datasets/sources) and the log
 // viewer. This is the only file that talks to the network or holds mutable
-// state. Rendering is delegated to render.js and logview.js; DOM building
+// state. Rendering is delegated to render.js and artifactview.js; DOM building
 // to el.js.
 
 import { runRow, problemRow, sourcesRows, datasetRows, verdict } from "./render.js";
-import { renderLogView } from "./logview.js";
+import { renderArtifactView } from "./artifactview.js";
 
 // --- config -----------------------------------------------------------------
 
@@ -13,7 +13,7 @@ import { renderLogView } from "./logview.js";
 // look; it is not a correctness knob.
 const EVERY_MS = 2000;
 
-// How long a just-clicked launch button stays blue+disabled at minimum, in
+// How long a just-clicked action button stays blue+disabled at minimum, in
 // case its status never visibly changes (e.g. the launch was refused, or a
 // spawn just hasn't produced a heartbeat yet). Four times the poll interval
 // -- see justClicked below for why this is a floor, not a fixed hold.
@@ -31,7 +31,7 @@ const emptyEl = document.getElementById("empty");
 const problemsEl = document.getElementById("problems");
 const problemCountEl = document.getElementById("problemCount");
 const problemRowsEl = document.getElementById("problemRows");
-const logViewEl = document.getElementById("logView");
+const artifactViewEl = document.getElementById("artifactView");
 
 // The three table views the nav bar and pollTableView both know about --
 // "runs" is the default/existing one, "datasets" and "sources" are its
@@ -45,7 +45,7 @@ const TABLE_VIEWS = ["runs", "datasets", "sources"];
 let lastPayload = null;
 let lastView = "runs"; // which of TABLE_VIEWS lastPayload belongs to
 
-// Artifact paths whose launch button was just clicked, each mapped to when
+// Artifact paths whose action button was just clicked, each mapped to when
 // and what: `since` (Date.now() at click) and `verdict` (render.js's
 // verdict() for this artifact at that moment -- the same classification
 // that picks the dot's color). A path clears out of here -- goes back to
@@ -97,33 +97,41 @@ function setConn(text, cls) {
 
 // --- launching --------------------------------------------------------------
 
-// Marks the button clicked (blue, disabled) immediately -- snapshotting
-// `state`'s verdict as the baseline reconcileJustClicked compares later
-// polls against -- then fires the POST. Doesn't wait for the POST before
-// returning, and doesn't clear the mark itself either way; that's entirely
+// The two things a row's button can ask for -- launch it, stop it -- are one
+// POST to one route named after the ask.
+//
+// Marks the button clicked (blue, disabled) immediately -- snapshotting the
+// artifact's verdict as the baseline reconcileJustClicked compares later polls
+// against -- then fires the POST. Doesn't wait for the POST before returning,
+// and doesn't clear the mark itself either way; that's entirely
 // reconcileJustClicked's job, off real poll results, not this call's own
-// outcome (a launch can report success and still not actually change
-// anything visible for a beat).
-async function launchJob(artifactPath, state) {
+// outcome (a launch can report success and still not actually change anything
+// visible for a beat).
+async function act(route, artifactPath, state) {
   justClicked.set(artifactPath, { since: Date.now(), verdict: verdict(state) });
   redraw(); // reflect the click immediately, don't wait for the next poll
 
   try {
     // No encodeURIComponent -- artifactPath's /s are meant to stay literal,
-    // matching the server's {artifact_path:path} route (a plain path
+    // matching the server's {artifact_path:path} routes (a plain path
     // segment can't match a multi-segment path).
-    const res = await fetch(`launch/${artifactPath}`, { method: "POST" });
+    const res = await fetch(`${route}/${artifactPath}`, { method: "POST" });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok || !body.launched) {
-      console.warn("launch failed:", body.message || "HTTP " + res.status);
-    }
+    if (!res.ok) throw new Error(body.message || "HTTP " + res.status);
+    if (body.message) console.info(`${route}:`, body.message);
   } catch (err) {
-    console.warn("launch failed:", err);
+    console.warn(`${route} failed:`, err);
   }
 }
 
 // Injected into every row so render.js never sees app state directly.
-const ctx = { onLaunch: launchJob, isJustClicked, isGroupOpen, onToggleGroup: toggleGroup };
+const ctx = {
+  onLaunch: (path, state) => act("launch", path, state),
+  onCancel: (path, state) => act("cancel", path, state),
+  isJustClicked,
+  isGroupOpen,
+  onToggleGroup: toggleGroup,
+};
 
 // --- draw -------------------------------------------------------------------
 
@@ -170,10 +178,9 @@ function drawDatasets(payload) {
   problemsEl.hidden = true; // problem_runs has no counterpart in this view
 }
 
-// The `sources` view -- flat, per main.py's sources_state.
+// The `sources` view -- flat, per main.py's read_state, its `sources` key.
 function drawSources(payload) {
-  const artifacts = payload.artifacts || {};
-  const count = Object.keys(artifacts).length;
+  const count = Object.keys(payload.sources || {}).length;
 
   metaEl.textContent =
     count + (count === 1 ? " source" : " sources") +
@@ -280,64 +287,20 @@ async function pollTableView(view, token) {
   }
 }
 
-// --- log view poll -----------------------------------------------------------
+// --- artifact view poll --------------------------------------------------------
 
-// The log view's own state: the last payload/opts it rendered (so a filter
-// toggle can redraw instantly, without waiting on the next poll), and which
-// levels are currently unchecked. logview.js stays a pure render function --
-// this is the app-state half of that split, same as `openGroups` is for
-// the dashboard's group toggles.
-let lastLogPayload = null;
-let lastLogOpts = null;
-const hiddenLevels = new Set();
-let lastLogScope = null; // for detecting a genuine scope/id change vs. just a call filter
-let lastLogId = null;
-
-function toggleLevel(level) {
-  if (hiddenLevels.has(level)) hiddenLevels.delete(level);
-  else hiddenLevels.add(level);
-  redrawLogView();
-}
-
-function redrawLogView() {
-  if (lastLogPayload) renderLogView(logViewEl, lastLogPayload, lastLogOpts);
-}
-
-// One fetcher, parameterized by scope, rather than two near-duplicates --
-// "run" and "artifact" differ only in which URL and which id renderLogView
-// gets, never in how the fetch/error/render sequence goes. callId narrows an
-// "artifact" fetch server-side to just that one call's log.
+// One artifact's drill-down: its manifest summary, and nothing else. A job's
+// own output isn't fetched here or anywhere in this app yet -- the worker
+// files it, and `leasebook` opens no log files at all (see artifactview.js).
 //
-// An "artifact" scope also fetches its manifest summary (type, parameters,
-// dependency links -- see main.py's manifest_endpoint) to show above the
-// log table. That fetch gets its own try/catch: a manifest hiccup (or an
-// artifact that's declared but not built yet, so it 404s-as-error) should
-// never blank out logs that did load.
-//
-// `token` guards against a stale poll the same way pollTableView's does --
-// see its comment for why this matters, same race, same fix.
-async function pollLogView(scope, id, callId, token) {
+// `token` guards against a stale poll the same way pollTableView's does -- see
+// its comment for why this matters, same race, same fix.
+async function pollArtifactView(path, token) {
   try {
-    let url = scope === "run" ? `logs/run/${id}` : `logs/artifact/${id}`;
-    if (scope === "artifact" && callId) url += `?call_id=${encodeURIComponent(callId)}`;
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const payload = await res.json();
-
-    let manifest = null;
-    if (scope === "artifact") {
-      try {
-        const mRes = await fetch(`manifest/${id}`, { cache: "no-store" });
-        manifest = mRes.ok ? await mRes.json() : null;
-      } catch {
-        manifest = null;
-      }
-    }
-
+    const res = await fetch(`manifest/${path}`, { cache: "no-store" });
+    const manifest = await res.json();
     if (token !== routeToken) return; // superseded by a newer navigation
-    lastLogPayload = payload;
-    lastLogOpts = { scope, id, callId: callId || null, hiddenLevels, onToggleLevel: toggleLevel, manifest };
-    renderLogView(logViewEl, lastLogPayload, lastLogOpts);
+    renderArtifactView(artifactViewEl, manifest);
     setConn("live", "ok");
   } catch (err) {
     if (token !== routeToken) return;
@@ -347,33 +310,20 @@ async function pollLogView(scope, id, callId, token) {
 
 // --- routing ------------------------------------------------------------------
 
-// Five routes, all client-side: the three table views (TABLE_VIEWS -- "" is
-// an alias for "runs", the original default), "run/<id>", and
-// "artifact/<path>" (optionally "?call=<call_id>", parsed off the hash's own
-// query string to narrow it to one call). No encodeURIComponent on id/path
-// when building or reading these -- an artifact_path's /s are meant to stay
-// literal, the same convention launchJob already follows for the POST
-// /launch route; callId, arriving as a query value rather than a path
-// segment, is encoded like any other query value.
+// Four routes, all client-side: the three table views (TABLE_VIEWS -- "" is
+// an alias for "runs", the original default) and "artifact/<path>". No
+// encodeURIComponent on the path when building or reading these -- an
+// artifact_path's /s are meant to stay literal, the same convention act()
+// already follows for the POST /launch and /cancel routes.
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, "");
-  if (hash.startsWith("run/")) return { view: "run", id: hash.slice(4), callId: null };
-  if (hash.startsWith("artifact/")) {
-    const rest = hash.slice(9);
-    const q = rest.indexOf("?");
-    if (q === -1) return { view: "artifact", id: rest, callId: null };
-    return {
-      view: "artifact",
-      id: rest.slice(0, q),
-      callId: new URLSearchParams(rest.slice(q + 1)).get("call"),
-    };
-  }
-  if (TABLE_VIEWS.includes(hash)) return { view: hash, id: null, callId: null };
-  return { view: "runs", id: null, callId: null };
+  if (hash.startsWith("artifact/")) return { view: "artifact", id: hash.slice(9) };
+  if (TABLE_VIEWS.includes(hash)) return { view: hash, id: null };
+  return { view: "runs", id: null };
 }
 
 // Bold whichever nav link matches the current table view; no-op (nothing
-// matches) while a run/artifact log view is showing, which correctly
+// matches) while an artifact's own page is showing, which correctly
 // leaves all three unbolded rather than guessing an owner.
 function updateNavActive(view) {
   for (const a of navEl.querySelectorAll("a[data-view]")) {
@@ -383,7 +333,7 @@ function updateNavActive(view) {
 
 let pollTimer = null; // current setTimeout id, so route() can cancel a not-yet-fired reschedule
 
-// Bumped on every route() call; handed to pollTableView/pollLogView as
+// Bumped on every route() call; handed to pollTableView/pollArtifactView as
 // `token` so a poll scheduled under an earlier route can tell, once its
 // fetch finally resolves, whether it's still the current one -- see
 // pollTableView's own comment for the race this closes. Also doubles as
@@ -420,7 +370,7 @@ let currentPoll = null;
 // Re-entered on every hashchange, and once at load. Owns the one active
 // poll loop: switching routes cancels whichever one was running before
 // (via the token check in schedulePoll -- clearTimeout alone can't stop a
-// fetch already in flight), so navigating away from a run's log view
+// fetch already in flight), so navigating away from an artifact's page
 // doesn't leave it quietly polling in the background.
 function route() {
   const token = ++routeToken;
@@ -430,9 +380,7 @@ function route() {
   if (TABLE_VIEWS.includes(r.view)) {
     titleEl.textContent = r.view;
     dashboardEl.hidden = false;
-    logViewEl.hidden = true;
-    lastLogScope = null;
-    lastLogId = null;
+    artifactViewEl.hidden = true;
     lastView = r.view;
     // All three table views are slices of the same payload (see
     // pollTableView) -- if we already have one, draw it now instead of
@@ -445,23 +393,10 @@ function route() {
     return;
   }
 
-  // Reset the level filter on a genuine scope/id change, but not when only
-  // the call filter changed -- narrowing the same artifact's log to one call
-  // shouldn't silently un-hide levels already hidden. DEBUG starts hidden
-  // by default (LOGGING.md) -- it's protocol chatter, not what you open a
-  // log for -- but its checkbox still renders whenever DEBUG entries are
-  // present, so turning it back on is one click.
-  if (r.view !== lastLogScope || r.id !== lastLogId) {
-    hiddenLevels.clear();
-    hiddenLevels.add("DEBUG");
-    lastLogScope = r.view;
-    lastLogId = r.id;
-  }
-
-  titleEl.textContent = r.view === "run" ? "run " + r.id : r.id;
+  titleEl.textContent = r.id;
   dashboardEl.hidden = true;
-  logViewEl.hidden = false;
-  currentPoll = () => schedulePoll(() => pollLogView(r.view, r.id, r.callId, token), token);
+  artifactViewEl.hidden = false;
+  currentPoll = () => schedulePoll(() => pollArtifactView(r.id, token), token);
   currentPoll();
 }
 

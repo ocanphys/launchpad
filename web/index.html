@@ -116,15 +116,22 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
+  /* One button per row, offering the one thing worth doing to that artifact
+     (render.js's actionButton): run it, or stop it. One shape and one slot
+     for both -- only the color says which, matching the dot palette above:
+     green for run, red for stop. */
   .launch-btn {
-    width: 2.4rem; padding: .15rem 0;
+    width: 2.6rem; padding: .15rem 0;
     font: 9px/1 inherit; text-align: center;
-    border: 1px solid #1a7f37; border-radius: 3px;
-    background: transparent; color: #1a7f37;
+    border: 1px solid; border-radius: 3px;
+    background: transparent;
     cursor: pointer;
   }
-  .launch-btn:hover:not(:disabled) { background: rgba(26,127,55,.15); }
-  /* Not ready or already running: pale and frozen -- no color, no hover,
+  .launch-btn.run      { border-color: #1a7f37; color: #1a7f37; }
+  .launch-btn.cancel   { border-color: #cf222e; color: #cf222e; }
+  .launch-btn.run:hover:not(:disabled)      { background: rgba(26,127,55,.15); }
+  .launch-btn.cancel:hover:not(:disabled)   { background: rgba(207,34,46,.15); }
+  /* Nothing to do (already done): pale and frozen -- no color, no hover,
      no pointer. Still shown so its slot in the row doesn't shift once it
      does become launchable. */
   .launch-btn:disabled {
@@ -132,7 +139,7 @@
     cursor: default;
   }
   /* Just clicked, waiting on the next poll to land (render.js's
-     launchButton, app.js's justClicked) -- same blue as the "running" dot
+     actionButton, app.js's justClicked) -- same blue as the "running" dot
      elsewhere on the page, so it reads as "something's happening" rather
      than the plain gray every other disabled button gets. Comes after
      .launch-btn:disabled so it wins the tie on equal specificity. */
@@ -150,20 +157,16 @@
   details#problems td.run { width: 30%; }
   td.error { word-break: break-word; white-space: pre-wrap; opacity: .85; font-size: 11px; }
 
-  a.run-link, a.artifact-link { color: inherit; text-decoration: none; }
-  a.run-link:hover, a.artifact-link:hover { text-decoration: underline; }
+  a.artifact-link { color: inherit; text-decoration: none; }
+  a.artifact-link:hover { text-decoration: underline; }
 
-  /* --- log view -------------------------------------------------------- */
-  #logView { font-size: 12px; }
-  .log-back a { color: inherit; opacity: .6; text-decoration: none; }
-  .log-back a:hover { opacity: 1; text-decoration: underline; }
-  .log-artifacts { opacity: .7; font-size: 11px; margin: .3rem 0 1rem; word-break: break-all; }
-  .log-artifacts a { color: inherit; }
-  .log-error { color: #cf222e; font-size: 11px; }
+  /* --- one artifact's page --------------------------------------------- */
+  #artifactView { font-size: 12px; }
+  .view-back a { color: inherit; opacity: .6; text-decoration: none; }
+  .view-back a:hover { opacity: 1; text-decoration: underline; }
 
-  /* The manifest summary at the top of an artifact's drill-down page (see
-     artifactSummary in logview.js): type, own parameters, and links one
-     level down to whatever it depends on. */
+  /* An artifact's drill-down page (see artifactview.js): type, own
+     parameters, and links one level down to whatever it depends on. */
   .artifact-summary {
     border: 1px solid rgba(128,128,128,.18); border-radius: 6px;
     padding: .6rem .9rem; margin: .3rem 0 1rem;
@@ -177,51 +180,6 @@
   .summary-deps a { color: inherit; }
   .summary-deps a:hover { text-decoration: underline; }
 
-  /* A CSS grid, not a <table> -- ts/job/level need to size to their own
-     content (as tight as possible, never wrapping) while msg soaks up
-     whatever's left, and no table-layout mode does both at once: `fixed`
-     needs widths stated up front (what overlapped before), `auto` sizes
-     every column off its widest cell including msg, which would balloon
-     the whole table around one long message. `max-content` columns give
-     the first three exactly the width their own (nowrap) text needs;
-     `minmax(0, 1fr)` gives msg the rest and lets it wrap without stretching
-     the grid to fit an unbroken long word.
-     Each row is `display: contents` in logview.js -- it renders no box of
-     its own, so its four cells drop straight into this grid instead of
-     nesting a row inside a column. */
-  .log-table { display: grid; grid-template-columns: max-content max-content max-content minmax(0, 1fr); align-items: baseline; }
-  .log-row { display: contents; }
-  .log-row > * { padding: .15rem .6rem; border-top: 1px solid rgba(128,128,128,.12); }
-  .log-ts { opacity: .5; white-space: nowrap; }
-  .log-job { white-space: nowrap; }
-  .log-level { font-size: 11px; white-space: nowrap; }
-  .log-msg { white-space: pre-wrap; word-break: break-word; }
-
-  /* Dotted underline signals "hover me" -- the tooltip is the artifact_path
-     that produced this job's log line (see logview.js's jobCell). Default
-     cursor, not `help` -- a plain "?" pointer read as broken/unhelpful. */
-  .log-jobname { border-bottom: 1px dotted currentColor; opacity: .85; }
-
-  .call-badge, a.call-badge {
-    display: inline-block; padding: 0 .35rem; border-radius: 3px;
-    background: rgba(128,128,128,.15); font-size: 11px;
-    color: inherit; text-decoration: none;
-  }
-  a.call-badge:hover { text-decoration: underline; background: rgba(128,128,128,.25); }
-
-  /* Color codes the level word only -- the message stays the page's normal
-     text color regardless of level. */
-  .log-level.debug { color: rgba(128,128,128,.6); }
-  .log-level.info  { color: currentColor; }
-  .log-level.warn  { color: #e3b341; }
-  .log-level.err   { color: #cf222e; }
-
-  /* One checkbox per level actually present in the current view -- see
-     logview.js's levelFilterBar. Styled like details#problems' summary
-     above: small, monospace, opacity-dimmed, nothing heavier needed. */
-  .log-filter { opacity: .8; font-size: 11px; margin: .3rem 0 1rem; display: flex; gap: .9rem; flex-wrap: wrap; }
-  .log-filter-item { cursor: pointer; user-select: none; }
-  .log-filter-item input { vertical-align: middle; margin-right: .25rem; }
 </style>
 </head>
 <body>
@@ -272,10 +230,10 @@
 </details>
 </div>
 
-<!-- The log viewer, routed to by #/run/<id> and #/artifact/<path> -- see
-     app.js's route() and logview.js's renderLogView. Hidden and empty until
-     a route into it fires; #dashboard above is hidden in exchange. -->
-<div id="logView" hidden></div>
+<!-- One artifact's own page, routed to by #/artifact/<path> -- see app.js's
+     route() and artifactview.js. Hidden and empty until a route into it
+     fires; #dashboard above is hidden in exchange. -->
+<div id="artifactView" hidden></div>
 
 <!-- One entry point. type="module" gives us import/export with no bundler.
      Note: ES modules only load over http(s), not file:// — serve the folder

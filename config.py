@@ -4,6 +4,13 @@ STORAGE = "/storage"  # this is the container mount name for the volume.
 CONTAINER_LIFETIME = 3600  # no container lives beyond this many seconds.
 HEARTBEAT_SECONDS = 1
 FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
+STATE_REFRESH_SECONDS = 0.5  # how often leasebook's one thread re-reads the volume; /state serves what it last computed.
+
+# One call's log, inside the artifact folder that call was producing. The
+# `launchpad-call-logs` Dict holds the live copy; this folder holds the one
+# that outlives it.
+CALL_LOGS = "call_functions"
+LOG_FLUSH_SECONDS = 10  # how long a worker waits on the way out for its last line to come back from Modal
 
 # Where a notebook lives on the volume, relative to STORAGE. lab.py names
 # this folder; the `jupyter` function (main.py) roots its file browser one
@@ -19,7 +26,7 @@ LAB_IDLE_SECONDS = 900  # scale the lab container down after this much idle
 # named source files are shipped there, not the repo -- so it can't answer
 # `get_git_commit()` itself. main.py calls get_git_commit() once, locally,
 # while building lab_image, and bakes the result in under this env var name;
-# dag.artifact._head() reads it instead of shelling out when it's set.
+# artifacts.core.artifact._head() reads it instead of shelling out when it's set.
 LAB_COMMIT_ENV = "LAUNCHPAD_LAB_COMMIT"
 
 import subprocess

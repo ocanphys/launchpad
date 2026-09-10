@@ -4,35 +4,36 @@ Artifacts are folders on a Modal Volume, each owning a `manifest.json` that
 names what it is and what it's built from; state and orchestration are two
 Modal Dicts and one web container. The full model -- what an artifact and a
 job *are*, how declaration/resolution/launching fit together -- is
-[dag/spec.md](dag/spec.md); this file is the map of where things live and
-how traffic flows between them.
+[artifacts/core/spec.md](artifacts/core/spec.md); this file is the map of
+where things live and how traffic flows between them.
 
 ## Where things live
 
 - **Volume (`trainvols`)**: one folder per artifact, holding its own
-  `manifest.json`, whatever files that artifact type declares, and its
-  `logs/{call_id}/job.log` -- a lease (and so a log) is granted per
-  artifact, not per run (see `runtime.initialize_worker`). Level and
-  category conventions for what goes in these files are in
-  [docs/LOGGING.md](docs/LOGGING.md).
+  `manifest.json`, whatever files that artifact type declares, and a
+  `call_functions/` folder with one `{call_id}.log` per call ever launched for
+  it -- written by the worker that ran the call, out of what Modal captured
+  of its stdout (see [docs/LOGGING.md](docs/LOGGING.md)).
   - **Shared roots** -- `sources/`, `tokenizers/`, `datasets/`,
     `mappeddatasets/` -- hold artifacts with no `run_id` in their
     parameters: reused across runs rather than rebuilt per run. `datasets/`
     (`DataSet`, which copies bytes into its own `train.bin`/`valid.bin`) and
     `mappeddatasets/` (`MappedDataSet`, which owns no bytes of its own and
-    reads straight out of its sources' `tokens.bin`) are separate top-level
-    packages and folders -- different kinds of artifact, not variants of one
-    "dataset" concept.
+    reads straight out of its sources' `tokens.bin`) are separate sibling
+    packages (`artifacts/dataset/`, `artifacts/mappeddataset/`) and folders --
+    different kinds of artifact, not variants of one "dataset" concept.
   - **`runs/{run_id}/`** holds that run's own run-scoped artifacts --
     today, just `pretraining/`. Everything a run depends on that *isn't*
     run-scoped (its tokenizer, its dataset, the sources behind them) lives
     under a shared root instead, found by walking the dependency tree
     embedded in the run's own manifest, not nested under the run's folder.
 - **Dict `launchpad-leases`**: one entry per **artifact_path** (not per
-  run -- see dag/spec.md §8), naming the call_id currently holding that
-  artifact.
+  run -- see artifacts/core/spec.md §8), naming the call_id currently
+  holding that artifact.
 - **Dict `launchpad-beats`**: one entry per call_id, the timestamp of its
   last heartbeat -- how a reader tells a live call from a dead one.
+- **Dict `launchpad-call-logs`**: one entry per call_id, every log line the
+  call has produced so far, republished whole on each beat.
 
 ## Dashboard
 
@@ -58,9 +59,12 @@ modal secret create launchpad-lab JUPYTER_TOKEN=$(openssl rand -hex 24)
 ```
 
 The API those notebooks import is [lab.py](lab.py) -- a thin wrapper over
-`dag.resolve` that works from JupyterLab (the volume mounted) or a local
+`artifacts.core.resolve` that works from JupyterLab (the volume mounted) or a local
 notebook alike, routed by `environment` (auto-detected: "modal" or "local")
 and `target` (a choice, `lab.init(target=...)`, defaulting to `environment`):
+
+See [docs/LAB.md](docs/LAB.md) for the complete API reference and permission
+matrix.
 
 ```python
 import lab
@@ -91,18 +95,36 @@ its own, and JupyterLab's own autosave does the rest.
   (`max_containers=1`) -- it's both the dashboard and the launcher, so
   there's one copy of the traffic pattern below, not several racing each
   other.
-  - `/state`: reads the whole volume once per request -- one `leases`/
-    `beats` Dict snapshot (no mount needed), one `volume.reload()`, one walk
-    of the manifests off `leasebook`'s own **local mount** of the volume --
-    and slices the result into the runs/sources/datasets shapes the
-    dashboard's three views each want, so a shared artifact (a source
-    behind several tokenizers, say) is only inspected once per request no
-    matter how many views reference it. Fast, but only as fresh as that
-    container's last `volume.reload()`.
+  - **One thread keeps this container's picture of the volume fresh**, on a
+    `STATE_REFRESH_SECONDS` clock: `read_state()`, and nothing else -- one
+    `volume.reload()`, one `leases`/`beats` Dict snapshot (no mount needed),
+    one walk of the manifests off `leasebook`'s own **local mount**, sliced
+    into the runs/sources/datasets shapes the dashboard's three views each
+    want, so a shared artifact (a source behind several tokenizers, say) is
+    only inspected once per pass no matter how many views reference it. The
+    whole state is computed there, in that thread. It writes nothing, syncs
+    nothing, and no request waits on it.
+  - `/state`: hands back what that thread last computed -- a dict lookup, not
+    a reload. Never slower than that, never fresher than the last pass.
+    Published by a single key assignment, which the GIL makes atomic, so
+    there is nothing for a lock to protect.
+  - `/manifest/{artifact_path:path}`: reads one manifest, in the request. The
+    last thing here that touches the mount outside the refresh thread, and
+    the only one left small enough not to matter -- a reload replaces the
+    tree rather than refreshing it, so anything that *walks* the volume in a
+    request is asking to watch a file it just listed disappear
+    ([docs/QUEUES.md](docs/QUEUES.md) §3.3). Log files are why that rule
+    exists; the dashboard no longer reads any.
+  - `/logs` and `/logs/{call_id}`: the `call_logs` Dict, straight through --
+    the call ids it holds, and one call's lines. A Dict read, never a file
+    on the mount.
   - `/launch/{artifact_path:path}`: checks the lease, makes a `.remote()`
     call to `declared_artifact` (below) to confirm the artifact is
     declared and ready, then spawns `run_job` and writes the new grant --
     returns immediately, it doesn't wait for the job to finish.
+  - `/cancel/{artifact_path:path}`: releases the artifact's lease and cancels
+    the call holding it -- the lease first, so a worker between checkpoints
+    discovers it lost the artifact even if the cancel itself never lands.
 - **`declared_artifact`** and **`run_job`** are separate Modal functions,
   each with their own container and their own mount of the volume --
   `declared_artifact` reads one manifest and its status; `run_job` writes
@@ -125,28 +147,40 @@ took one.
 
 ## Jobs
 
-The full model is [dag/spec.md](dag/spec.md); this is the shape of it.
-Each artifact family (`sources/`, `tokenizers/`, `datasets/`,
-`mappeddatasets/`, `models/mock/`, ...) pairs an `Artifact` subclass
-(parameters, where it lives, what files it comprises) with exactly one
-`Job` subclass that produces it -- no `job_uid`, no per-run config file.
-A `Job` subclass declares what it produces with one class annotation
-(`artifact: Tokenizer`), and defining the class registers it as that
-type's producer automatically, at import time (`Job.__init_subclass__`
-populating `dag.job.REGISTRY`). Its inputs are derived,
+The full model is [artifacts/core/spec.md](artifacts/core/spec.md); this is
+the shape of it. Each artifact family (`artifacts/sources/`,
+`artifacts/tokenizers/bpe/`, `artifacts/dataset/`,
+`artifacts/mappeddataset/`, `artifacts/models/mock/`, ...) pairs an
+`Artifact` subclass (parameters, where it lives, what files it comprises)
+with exactly one `Job` subclass that produces it -- no `job_uid`, no per-run
+config file. A `Job` subclass declares what it produces with one class
+annotation (`artifact: Tokenizer`), and defining the class registers it as
+that type's producer automatically, at import time
+(`Job.__init_subclass__` populating `artifacts.core.job.REGISTRY`). Its inputs are derived,
 never declared separately: `artifact.deps()` -- the artifact-valued
 parameters of the one thing it produces -- so a job's dependency list can
 never drift out of sync with what its own artifact actually names.
 
 Declaring (writing `manifest.json` files ahead of the work, for a whole
 dependency tree at once) and launching (granting a lease and spawning the
-job that fills one manifest in) are separate steps -- see `dag.resolve.
-Declaration` and `main.attempt_launch`. There's no per-job `resources`
+job that fills one manifest in) are separate steps -- see
+`artifacts.core.resolve` (`resolve`/`declare`) and `main.attempt_launch`.
+There's no per-job `resources`
 block in a config file; a job's resource ask lives on its own artifact
 (`allocated_resources: Resources`, e.g. `Resources(gpu_type="A100")`),
-turned into `Function.with_options(...)` kwargs by `attempt_launch` right
+turned into `Function.with_options(...)` kwargs by `grant_and_spawn` right
 before spawning -- an artifact that declares none runs on `run_job`'s own
 default pool.
+
+## Scheduling, deferred
+
+There is no queue in the tree. Launching is per artifact and by hand:
+`/launch` starts one job, `/cancel` stops one. A scheduler that takes a whole
+plan and works through it was built, run against real containers, and taken
+back out -- the launcher underneath it wants simplifying first.
+
+What it looked like, every way it broke, and what to do differently:
+[docs/QUEUES.md](docs/QUEUES.md). The code itself is in `stash@{0}`.
 
 ## One job, traced
 
@@ -159,7 +193,7 @@ for a picture of the very same book through its own separate local mount.
 sequenceDiagram
     participant L as Launcher (cli / web)
     participant Le as Leases (Dict)
-    participant B as Beats (Dict)
+    participant B as Beats + call_logs (Dicts)
     participant D as declared_artifact (container)
     participant V as Volume (source of truth)
     participant J as Job container (run_job)
@@ -177,16 +211,16 @@ sequenceDiagram
     J->>Le: confirm ("boot")
     J->>Le: confirm ("pre run")
     J->>J: run() -- resolve producing Job, write files
-    J-->>B: PUT heartbeat (daemon thread, throughout)
+    J-->>B: PUT heartbeat; PUT logs so far (daemon thread, subscribed to its own Modal log feed)
     J->>Le: confirm ("pre vol commit")
     J->>Le: confirm ("commit")
-    J->>V: commit()
+    J->>V: write call_functions/{call_id}.log; commit()
     deactivate J
 
     Note over L,J: meanwhile, independently -- leasebook polls /state* every ~2s
     loop every ~2s
         L-->>Le: GET (batch)
-        L-->>B: GET (batch)
+        L-->>B: GET beats (batch)
         L->>V: reload() (leasebook's own local mount)
     end
 ```

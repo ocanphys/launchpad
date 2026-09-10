@@ -18,21 +18,19 @@ with no state of its own:
   just clicked). Everything else is handed data and gives back DOM.
 - **[render.js](../web/render.js)** -- the three table views (runs,
   datasets, sources) and the artifact/group row components they share.
-- **[logview.js](../web/logview.js)** -- the log viewer and the artifact
-  drill-down summary above it.
+- **[artifactview.js](../web/artifactview.js)** -- one artifact's own page:
+  its type, parameters and dependency links.
 - **[el.js](../web/el.js)** -- the one DOM-building primitive everything
   else uses (`el(tag, props, ...children)`), so text always goes through
   `textContent`, never `innerHTML`.
 
 ## Routing
 
-Hash-based, client-side, five shapes (`app.js`'s `parseRoute`):
+Hash-based, client-side, four shapes (`app.js`'s `parseRoute`):
 
 - `#/runs`, `#/datasets`, `#/sources` -- the three table views (`""` is an
   alias for `runs`).
-- `#/run/<id>` -- a run's merged log timeline.
-- `#/artifact/<path>` (optionally `?call=<call_id>`) -- one artifact's own
-  log history, plus its manifest summary.
+- `#/artifact/<path>` -- one artifact's own page.
 
 `route()` re-runs on every `hashchange` and once at load. It owns the one
 active poll loop (see below) and the nav bar's active-link highlighting;
@@ -43,14 +41,16 @@ background.
 ## The three table views
 
 All three reuse the same `<table>` markup in `index.html` and the same
-`artifactRow`/`launchButton`/`dot` components in `render.js` -- only how
+`artifactRow`/`actionButton`/`dot` components in `render.js` -- only how
 each is sliced out of the payload and grouped differs. All three come from
 one endpoint, `/state`, backed by one function, `main.py`'s `read_state`:
-it reads the volume once (one `volume.reload()`, one lease snapshot, one
-`InspectCache`) and computes each distinct artifact's state at most once,
-however many of the three views reference it, rather than each view
-re-inspecting shared artifacts (a source behind a dozen tokenizers, say)
-independently.
+it reads the volume once (one `volume.reload()`, one lease snapshot, and
+one `core_resolve.resolve` over every declared artifact on the volume) and
+computes each distinct artifact's state at most once, however many of the
+three views reference it, rather than each view re-inspecting shared
+artifacts (a source behind a dozen tokenizers, say) independently. The
+single walk is what deduplicates: a tokenizer reachable from three runs and
+two datasets is one node in one graph, visited and inspected once.
 
 | view | payload slice | shape | grouping |
 |---|---|---|---|
@@ -104,11 +104,30 @@ knowing about how it actually fires (`app.js`):
   when the tab becomes visible again, instead of waiting out however long
   the throttled timer would otherwise take to catch up.
 
-## Launch buttons
+## Row buttons
+
+One button per row, offering the one thing worth doing to that artifact
+(`render.js`'s `actionButton`). Asked in this order:
+
+| the artifact | button | route |
+|---|---|---|
+| is done | *run*, frozen | -- |
+| has a call running | **stop** | `POST /cancel/<path>` |
+| is ready | **run** | `POST /launch/<path>` |
+| is blocked | *run*, frozen | -- |
+
+`done` is asked first because it's the one answer that can't be undone.
+Everything after it is a claim about right now, and a claim can lag -- a
+lease outlives its call, and a beat is only as fresh as the last one written
+-- so an artifact already on disk never offers to stop anything, whatever
+the liveness signals still say. One shape and one slot either way, so
+nothing shifts when a row changes hands; only the color says which, matching
+the dot palette (green run, red stop).
 
 A button reflects server state (`ready`/`active`/`blocked_by`) directly --
-there's no client-side tracking of whether a launch is "in progress" in
-the sense of waiting for it to finish. The one piece of local state,
+there's no client-side tracking of
+whether a launch is "in progress" in the sense of waiting for it to
+finish. The one piece of local state,
 `justClicked`, exists only to stop a double-click before the *next* poll
 has had a chance to say anything: a clicked button turns blue and disabled
 immediately, and that mark clears the first time either becomes true on a
@@ -118,30 +137,38 @@ picks the dot's color) has changed since the click, or `MIN_CLICKED_MS`
 "we can see it did something"; the second is a floor so a launch that
 silently failed doesn't leave the button frozen forever.
 
-## The artifact drill-down page
+## The artifact page
 
-`#/artifact/<path>` fetches two things in parallel: the artifact's log
-history (`/logs/artifact/<path>`) and its manifest summary
-(`/manifest/<path>`, `main.py`'s `artifact_manifest_summary`) -- type, own
-parameters, and one link per direct dependency. Dependencies are named,
-not inlined: clicking one navigates to *its* drill-down page rather than
-the whole tree being dumped on one screen. A manifest fetch failure (the
-artifact is declared but not built yet) never blanks out logs that did
-load -- the two are independent.
+`#/artifact/<path>` fetches one thing, `/manifest/<path>`
+(`main.py`'s `artifact_manifest_summary`): type, own parameters, and one link
+per direct dependency. Dependencies are named, not inlined -- clicking one
+navigates to *its* page rather than the whole tree being dumped on one screen.
+A missing manifest (declared but not built yet) is a message on the page, not
+an error state.
+
+What a job actually said isn't here yet. The worker files it in two places
+(see [LOGGING.md](LOGGING.md)), but this container reads neither: it is the
+one that reloads the volume on a clock, and a reload cannot run while it has a
+file open -- see [QUEUES.md](QUEUES.md) §3.3 for how the previous attempt
+ended. When a log page comes, it reads the Dict entry and never the file.
 
 ## Known inefficiencies
 
-- **`attempt_launch` (`main.py`) pays a full Modal round-trip on every
-  launch**, even when called from the web route, which is already running
-  inside a volume-mounted container -- `declared_artifact.remote(...)`
-  hops to a separate container to recompute readiness that could be read
+- **The `/launch` route pays a full Modal round-trip per click.**
+  `attempt_launch` hops to `declared_artifact` to recompute readiness that
+  `leasebook`, already inside a volume-mounted container, could read
   in-process. The separation exists so the CLI entrypoint (`launch_job`,
-  which runs outside any container) can share the same code path; it's a
-  real tradeoff, not an oversight, but it likely costs every UI launch
-  click more latency than it needs to.
-- **`/state`'s `beats`/`leases` output is computed and serialized every
-  poll but never read by the frontend.** `read_state()` builds `held_by`
-  and `beats_out` by iterating every historical beat record -- and since
-  nothing prunes old ones from that `modal.Dict`, the cost grows with the
-  deployment's total call history, not its current active-call count, on
-  every single poll.
+  which runs outside any container) can share the same code path -- but it
+  costs every launch click a cold container's worth of latency for an
+  answer `read_state` already has.
+- **`/state`'s `beats` output is computed and serialized every poll and
+  nothing reads it.** `read_state()` builds `held_by` and `beats_out` by
+  iterating every historical beat record -- and since nothing prunes old
+  ones from that `modal.Dict`, the cost grows with the deployment's total
+  call history, not its current active-call count, on every single poll.
+  `leases` is in the same position: serialized every poll, read by nothing.
+- **`/manifest/<path>` is the last request that touches the mount.** One
+  small read, against a volume the refresh thread reloads on its own clock
+  (see the README). Small enough to live with; the way to close it for good
+  is to fold the summary into what that thread already computes, since it has
+  every artifact resolved in front of it already.

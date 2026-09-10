@@ -6,7 +6,8 @@
 // file never needs to know WHERE the launch call or group state live.
 //
 //   ctx = {
-//     onLaunch(artifactPath)      -> void,    // user clicked a launchable artifact
+//     onLaunch(artifactPath, state) -> void, // run it now
+//     onCancel(artifactPath, state) -> void, // stop the call working on it
 //     isJustClicked(artifactPath) -> boolean, // clicked, not yet refreshed by a poll
 //     isGroupOpen(ns, type)       -> boolean, // is this owner's type-group expanded?
 //     onToggleGroup(ns, type)     -> void,    // user clicked a group's summary row
@@ -35,7 +36,7 @@ function dim(text) {
 //   amber  (runnable) : not done, not blocked, no call in progress
 //   gray   (blocked)  : not done, not runnable -- waiting on a dependency
 //
-// Takes an artifact's own state now, not a run's -- a lease is granted per
+// Takes an artifact's own state, not a run's -- a lease is granted per
 // artifact_path (see main.py's attempt_launch), so this is the granularity
 // at which "active" actually means anything.
 //
@@ -69,13 +70,14 @@ function dot(state) {
   return el("span", { class: "dot " + cls, title });
 }
 
+
 // A type-group's own dot summarizes its members by the same palette, worst
 // (most attention-worthy) first: any failed member makes the group red even
 // if others are done; any running member makes it blue; only when every
-// member is done does it go green; otherwise amber if anything is
-// launchable right now, gray if the whole group is just blocked.
-function groupVerdict(states) {
-  const verdicts = states.map(verdict);
+// member is done does it go green; otherwise amber if anything is launchable
+// right now, gray if the whole group is just blocked. Takes the members'
+// verdicts rather than their states, since the caller has computed them.
+function groupVerdict(verdicts) {
   if (verdicts.includes("failed")) return "failed";
   if (verdicts.includes("running")) return "running";
   if (verdicts.every((v) => v === "done")) return "done";
@@ -100,61 +102,71 @@ function heartbeat(state) {
   );
 }
 
-// One payload (main.py's live_progress or durable_progress -- same shape
-// either way, whatever the job's own progress()/durable_progress returned)
-// into one line of text. step/total_steps is the one shape a real job type
-// (PretrainJob) actually produces today, so that gets a clean "n/total";
-// anything else -- a future job type reporting something different -- still
-// shows *something* rather than nothing, generically.
+// One payload -- main.py's live_progress (what a running job wrote) or
+// durable_progress (what its artifact read off the volume) -- into one compact
+// line: "phase: done/total", or just "done/total" for a payload that doesn't
+// name a phase.
+//
+// Nothing is interpreted server-side, so a payload arrives in whatever shape
+// the thing that produced it chose. Two count the same way under different
+// names -- done/total and step/total_steps -- and anything else still shows
+// generically rather than not at all. Counts are never abbreviated: the
+// difference between 4741 and 4742 is exactly what this column gets read for.
 function formatProgress(p) {
   if (!p) return null;
-  if (typeof p.step === "number" && typeof p.total_steps === "number") {
-    return p.step + "/" + p.total_steps;
+  const done = p.done ?? p.step;
+  const total = p.total ?? p.total_steps;
+  if (typeof done === "number" && typeof total === "number") {
+    return (p.phase ? p.phase + ": " : "") + done + "/" + total;
   }
   return Object.entries(p).map(([k, v]) => k + "=" + v).join(" ");
 }
 
 // live_progress first -- a currently-active call's own self-report -- falling
-// back to durable_progress (main.py's `_with_progress`: the volume-read
-// signal, the only one still meaningful once nothing's active anymore).
+// back to durable_progress (read off the volume, and the only one still
+// meaningful once nothing's active anymore).
 function progressCell(state) {
   const text = formatProgress(state.live_progress) || formatProgress(state.durable_progress);
   return text ? el("span", { text }) : dim("—");
 }
 
-// One square button per artifact. "Frozen" (shown but inert) when it isn't
-// launchable -- keeps its slot in the row from shifting once it does become
-// launchable. Frozen when this artifact already has an active call, isn't
-// ready (already done, or blocked on a dependency), or was just clicked
-// (ctx.isJustClicked) -- that last one is purely local (app.js's
-// justClicked), held for a minimum stretch of polls or until this
-// artifact's own verdict actually changes, whichever comes first. A
-// just-clicked button turns blue rather than showing a spinner.
-function launchButton(path, state, ctx) {
+// One square button per artifact, offering the one thing worth doing to it.
+// Three cases, asked in this order:
+//
+//   done                    -> run, frozen
+//   a call is running       -> stop
+//   ready                   -> run
+//   blocked                 -> run, frozen
+//
+// `done` is asked first because it's the one answer that can't be undone.
+// Everything else is a claim about right now, and a claim can lag: a lease
+// outlives its call, and a beat is only as fresh as the last one written. An
+// artifact that is on disk has nothing left worth stopping, whatever the
+// liveness signals still say.
+//
+// "Frozen" (shown but inert) rather than absent, so the slot in the row
+// doesn't shift once there is something to do. A just-clicked button
+// (ctx.isJustClicked) freezes too -- that one is purely local (app.js's
+// justClicked), held for a minimum stretch of polls or until this artifact's
+// own verdict actually changes, whichever comes first, and turns blue rather
+// than showing a spinner.
+function actionButton(path, state, ctx) {
   const justClicked = ctx.isJustClicked(path);
-  const frozen = justClicked || state.active || !state.ready;
+  const act = (kind, label, title, handler) =>
+    el("button", {
+      class: "launch-btn " + kind + (justClicked ? " clicked" : ""),
+      text: label,
+      title: justClicked ? "…" : title,
+      disabled: justClicked || !handler,
+      onclick: justClicked || !handler ? undefined : () => handler(path, state),
+    });
 
-  const title = !state.ready
-    ? state.done
-      ? "already done"
-      : "blocked on " + (state.blocked_by.join(", ") || "?")
-    : state.active
-    ? "already running"
-    : justClicked
-    ? "launching…"
-    : "launch";
-
-  return el("button", {
-    class: "launch-btn" + (justClicked ? " clicked" : ""),
-    text: "run",
-    title,
-    disabled: frozen,
-    // Passes `state` along with `path` -- app.js's launchJob snapshots
-    // this artifact's verdict at the moment of the click, to compare
-    // against on every later poll (see justClicked there).
-    onclick: frozen ? undefined : () => ctx.onLaunch(path, state),
-  });
+  if (state.done) return act("run", "run", "already done", null);
+  if (state.active) return act("cancel", "stop", "cancel this running job", ctx.onCancel);
+  if (state.ready) return act("run", "run", "launch", ctx.onLaunch);
+  return act("run", "run", "blocked on " + (state.blocked_by.join(", ") || "?"), null);
 }
+
 
 // One <tr> per declared artifact: status dot + type, path, call/heartbeat,
 // and the button that launches it. `depth` indents it further for each
@@ -178,7 +190,7 @@ function artifactRow(path, state, ctx, depth = 0) {
     el("td", { class: "call" }, callId(state)),
     el("td", {}, heartbeat(state)),
     el("td", {}, progressCell(state)),
-    el("td", {}, launchButton(path, state, ctx)),
+    el("td", {}, actionButton(path, state, ctx)),
   );
 }
 
@@ -192,13 +204,13 @@ function artifactRow(path, state, ctx, depth = 0) {
 // same as artifactRow's own -- 0 for a group sitting directly under its
 // owner, 1 for one nested one level deeper (a dataset's own dependency
 // groups, under the dataset's row).
-function groupHeaderRow(ns, type, states, open, ctx, depth = 0) {
+function groupHeaderRow(ns, type, verdicts, open, ctx, depth = 0) {
   return el("tr", { class: "group-header" + (depth > 0 ? " depth-" + depth : ""), onclick: () => ctx.onToggleGroup(ns, type) },
     el("td", { colspan: 6 },
-      el("span", { class: "dot " + groupVerdict(states) }),
+      el("span", { class: "dot " + groupVerdict(verdicts) }),
       el("span", { class: "group-arrow", text: open ? "▾" : "▸" }),
       el("span", { class: "group-type", text: type }),
-      el("span", { class: "dim", text: " (" + states.length + ")" }),
+      el("span", { class: "dim", text: " (" + verdicts.length + ")" }),
     ),
   );
 }
@@ -272,8 +284,8 @@ function typeGroupedRows(ns, artifacts, ctx, depth = 0) {
       continue;
     }
     const open = ctx.isGroupOpen(ns, type);
-    const states = groupPaths.map((path) => artifacts[path]);
-    rows.push(groupHeaderRow(ns, type, states, open, ctx, depth));
+    const verdicts = groupPaths.map((path) => verdict(artifacts[path]));
+    rows.push(groupHeaderRow(ns, type, verdicts, open, ctx, depth));
     if (open) {
       for (const path of groupPaths) rows.push(artifactRow(path, artifacts[path], ctx, depth + 1));
     }
@@ -292,7 +304,7 @@ export function runRow(id, run, ctx) {
   const artifacts = run.artifacts || {};
   const header = el("tr", { class: "run-header" },
     el("td", { colspan: 6 },
-      el("a", { class: "run-link", href: "#/run/" + id, text: id }),
+      el("span", { class: "run-name", text: id }),
       run.notebook
         ? el("a", {
             class: "lab-run-link",
