@@ -132,6 +132,29 @@
   .summary-deps a { color: inherit; }
   .summary-deps a:hover { text-decoration: underline; }
 
+  /* Every call that has ever worked on this artifact, aggregated from the
+     call_logs Dict (see artifactview.js's logs()/callLogSection()) -- one
+     bordered section per call, oldest first. */
+  .artifact-logs { margin-top: 1rem; }
+  .call-log {
+    border: 1px solid rgba(128,128,128,.18); border-radius: 6px;
+    padding: .5rem .8rem; margin: 0 0 .6rem;
+  }
+  .call-log-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; margin-bottom: .4rem;
+  }
+  .call-log-id { font-weight: 600; }
+  .call-log-when { opacity: .55; }
+  .call-log-lines {
+    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 24rem; overflow-y: auto;
+    margin: 0; padding: .4rem .5rem;
+    background: rgba(128,128,128,.06); border-radius: 4px;
+  }
+  .call-log-empty { padding: 0; }
+
 </style>
 </head>
 <body>

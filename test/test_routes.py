@@ -31,17 +31,21 @@ import main
 
 STATE = {
     "sources/tinyshakespeare": {
-        "type": "Source", "status": "done", "error": None, "depends_on": [],
+        "type": "Source", "status": "done", "error": None,
+        "depends_on": ["sources/other"], "parameters": {"name": "tinyshakespeare"},
         "blocked_by": [], "done": True, "ready": False, "call_id": None,
         "active": False, "last_heartbeat": None, "live_progress": None,
         "durable_progress": {"phase": "files", "done": 1, "total": 1},
     },
-}
-
-SUMMARY = {
-    "type": "artifacts.sources.Source",
-    "parameters": {"name": "tinyshakespeare"},
-    "depends_on": [{"artifact_path": "sources/other", "type": "Source"}],
+    # A manifest `state` couldn't read: no parameters to show, and the reason
+    # is what /manifest hands back in their place.
+    "sources/broken": {
+        "type": None, "status": "conflict", "error": "not a readable manifest",
+        "depends_on": [], "parameters": None,
+        "blocked_by": [], "done": False, "ready": False, "call_id": None,
+        "active": False, "last_heartbeat": None, "live_progress": None,
+        "durable_progress": None,
+    },
 }
 
 
@@ -57,8 +61,7 @@ def client(**overrides):
 
     calls = {"launched": [], "cancelled": []}
 
-    main.state = lambda: STATE
-    main.artifact_manifest_summary = lambda path, root: overrides.get("summary", SUMMARY)
+    main.state = lambda: overrides.get("state", STATE)
     main.attempt_launch = lambda path: (
         calls["launched"].append(path) or (True, f"granted {path}", None)
     )
@@ -66,8 +69,14 @@ def client(**overrides):
         calls["cancelled"].append(path) or (True, f"cancelled {path}")
     )
     main.jupyter = type("Stub", (), {"get_web_url": staticmethod(lambda: "https://lab.test")})()
-    # A plain dict answers `.keys()` and `.get()` the same way the Dict does.
+    # A plain dict answers `.keys()`/`.get()`/`.items()` the same way the
+    # Dict does.
     main.call_logs = {"fc-1": ["2026-09-07T12:00:00.000Z INFO boot: lease held"]}
+    main.beats = {
+        "fc-1": {"artifact_path": "runs/toy/pretraining", "last_beat_ts": 100.0},
+        "fc-0": {"artifact_path": "runs/toy/pretraining", "last_beat_ts": 50.0},
+        "fc-2": {"artifact_path": "sources/tinyshakespeare", "last_beat_ts": 75.0},
+    }
     # In the container `web/` is mounted at /web; locally it's the repo's own
     # copy, which is the same files and lets the static mount succeed.
     main.WEB_DIR = Path(__file__).resolve().parents[1] / "web"
@@ -89,6 +98,7 @@ def test_every_route_is_registered():
         "/manifest/{artifact_path:path}",
         "/logs",
         "/logs/{call_id}",
+        "/logs/artifact/{artifact_path:path}",
     ):
         assert expected in paths, f"{expected} is not registered: {sorted(paths)}"
 
@@ -129,18 +139,32 @@ def test_a_path_that_walks_out_of_the_volume_is_refused():
     assert calls["cancelled"] == [], "a bad path reached the canceller"
 
 
-def test_manifest_answers_with_the_summary():
+def test_manifest_answers_from_the_computed_state_not_the_mount():
+    """`/manifest` is a lookup into what the refresh thread computed, not a
+    read of the volume -- the read it used to do raced that thread's own
+    `volume.reload()` and made an artifact's page flicker. `Path(STORAGE)`
+    isn't mounted here, so a handler that reached for it would raise."""
     api, _ = client()
     body = api.get("/manifest/sources/tinyshakespeare").json()
+    entry = STATE["sources/tinyshakespeare"]
     assert body["artifact_path"] == "sources/tinyshakespeare"
-    assert body["type"] == SUMMARY["type"]
-    assert body["depends_on"] == SUMMARY["depends_on"]
+    assert body["type"] == entry["type"]
+    assert body["parameters"] == entry["parameters"]
+    # Dependencies are artifact paths, never nested manifests -- whatever else
+    # is true of a dependency lives on its own entry in this same map.
+    assert body["depends_on"] == ["sources/other"], body
 
 
 def test_an_unbuilt_artifact_says_so_rather_than_erroring():
-    api, _ = client(summary=None)
+    api, _ = client()
     body = api.get("/manifest/sources/nothing").json()
     assert "not built yet" in body["error"], body
+
+
+def test_an_unreadable_manifest_answers_with_its_reason():
+    api, _ = client()
+    body = api.get("/manifest/sources/broken").json()
+    assert body["error"] == "not a readable manifest", body
 
 
 def test_the_lab_link_carries_the_token():
@@ -159,6 +183,38 @@ def test_logs_come_from_the_dict_not_the_mount():
     body = api.get("/logs/fc-1").json()
     assert body["call_id"] == "fc-1" and len(body["lines"]) == 1, body
     assert api.get("/logs/fc-nope").json()["lines"] == []
+
+
+def test_artifact_logs_aggregate_every_call_oldest_first():
+    """`/logs/artifact/<path>` -- every call that has ever beaten for this
+    one artifact, not just its current holder, ordered by last heartbeat.
+    Reads only `beats`/`call_logs` (both stubbed to plain dicts here, same
+    as `test_logs_come_from_the_dict_not_the_mount`), so this never touches
+    the mount either, however many calls it aggregates.
+    """
+    api, _ = client()
+    body = api.get("/logs/artifact/runs/toy/pretraining").json()
+    assert body["artifact_path"] == "runs/toy/pretraining"
+    call_ids = [call["call_id"] for call in body["calls"]]
+    assert call_ids == ["fc-0", "fc-1"], body  # fc-0 beat first (ts=50), fc-1 later (ts=100)
+
+    # fc-0 never appears in call_logs -- an empty list, not an error.
+    by_id = {call["call_id"]: call for call in body["calls"]}
+    assert by_id["fc-0"]["lines"] == []
+    assert by_id["fc-1"]["lines"] == ["2026-09-07T12:00:00.000Z INFO boot: lease held"]
+
+    # A call that beat for a *different* artifact (fc-2, sources/tinyshakespeare)
+    # never leaks into this one's aggregation.
+    assert "fc-2" not in call_ids
+
+    # An artifact no call has ever touched: empty, not an error.
+    assert api.get("/logs/artifact/sources/never-run").json()["calls"] == []
+
+
+def test_artifact_logs_rejects_a_path_that_walks_out():
+    api, _ = client()
+    body = api.get("/logs/artifact/%2e%2e/%2e%2e/etc/passwd").json()
+    assert body["calls"] == [] and "invalid" in body["error"], body
 
 
 # --- driver ------------------------------------------------------------------

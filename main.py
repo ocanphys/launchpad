@@ -81,11 +81,17 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
         state()["runs/toy/pretraining"] -> {
             "type": "Pretraining", "status": "partial", "error": None,
             "depends_on": ["mappeddatasets/mapped-7f3c1a2b"], "blocked_by": [],
+            "parameters": {"run_id": "toy", "config": {...}},
             "done": False, "ready": True,
             "call_id": "fc-01JQ8W", "active": True, "last_heartbeat": 1757260800.1,
             "live_progress": {"step": 120, "total_steps": 500},
             "durable_progress": {"step": 100, "total_steps": 500},
         }
+
+    `parameters` is what an artifact's own page shows beyond what a row does
+    -- computed here, on the refresh thread, rather than read off the mount
+    per request, so no request handler touches the volume at all (see
+    `/manifest`).
 
     A manifest that cannot be read is an entry with status "conflict" and
     its `error`, and the scan continues. `blocked_by` is every direct
@@ -108,6 +114,7 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
             "status": "conflict",
             "error": None,
             "depends_on": [],
+            "parameters": None,
             "call_id": grant["call_id"] if grant else None,
             "active": active,
             "last_heartbeat": beat["last_beat_ts"] if beat else None,
@@ -124,6 +131,14 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
                 type=type(artifact).__name__,
                 status="done" if all(present) else "partial" if any(present) else "declared",
                 depends_on=[dep.artifact_path.as_posix() for dep in artifact.deps()],
+                # This artifact's own fields, encoded -- `to_manifest`'s
+                # parameters/dependencies split is read off the annotations, so
+                # what lands here never contains a dependency's manifest. A
+                # dependency is a path in `depends_on` and nothing more: its own
+                # entry on this same map is where anything else about it lives,
+                # so nothing is stored twice and nothing here goes stale when it
+                # changes.
+                parameters=artifact.to_manifest()["parameters"],
                 durable_progress=artifact.durable_progress(root),
             )
             loaded[path] = artifact
@@ -142,30 +157,38 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
     return entries
 
 
-def artifact_manifest_summary(artifact_path: str, root: Path) -> dict | None:
-    """The artifact declared at `artifact_path`, reduced to what a drill-down
-    page wants: its own type and parameters (`to_manifest()` already keeps
-    these separate from its dependencies) plus one line per direct dependency
-    naming where it lives. Each dependency is named, not inlined -- `deps()`
-    hands back the live Artifact objects, not their nested manifests, and a
-    link to that artifact's own page is all the summary needs.
+def artifact_call_logs(artifact_path: str) -> list[dict]:
+    """Every call that has ever beaten for `artifact_path`, oldest first,
+    each with whatever `call_logs` currently holds for it -- one call per
+    attempt at this artifact, superseded ones included, since `beats` keys
+    on call_id, not artifact_path, and nothing evicts an old entry.
 
-    None if there's no manifest yet -- declared but not built is a normal
-    state, not an error.
+    Reads only `beats`/`call_logs` -- never the volume. This is what makes
+    it safe to call from `leasebook` regardless of what its own reload clock
+    is doing: the whole reason these two Dicts exist is so the dashboard
+    never has to open a log file on a mount it also reloads (see
+    docs/LOGGING.md). Ordered by `last_beat_ts` rather than a "call started"
+    time, which no historical entry here still has (`leases` only remembers
+    the *current* grant) -- last-beat order still reads top-to-bottom as
+    attempt order, since a superseded call's last beat necessarily comes
+    before the call that replaced it.
     """
-    manifest_path = root / artifact_path / MANIFEST
-    if not manifest_path.exists():
-        return None
-    artifact = Artifact.load(artifact_path, root)
-    manifest = artifact.to_manifest()
-    return {
-        "type": manifest["artifact"],
-        "parameters": manifest["parameters"],
-        "depends_on": [
-            {"artifact_path": dep.artifact_path.as_posix(), "type": type(dep).__name__}
-            for dep in artifact.deps()
-        ],
-    }
+    calls = [
+        (call_id, beat)
+        for call_id, beat in beats.items()
+        if beat.get("artifact_path") == artifact_path
+    ]
+    calls.sort(key=lambda pair: pair[1]["last_beat_ts"])
+    return [
+        {
+            "call_id": call_id,
+            "last_heartbeat": beat["last_beat_ts"],
+            "lines": call_logs.get(call_id) or [],
+        }
+        for call_id, beat in calls
+    ]
+
+
 
 
 @app.function(
@@ -277,20 +300,48 @@ def leasebook():
         def logs_endpoint(call_id: str) -> dict:
             return {"call_id": call_id, "lines": call_logs.get(call_id) or []}
 
-        # What an artifact's own page shows: type, own parameters, and
-        # dependency links -- see artifact_manifest_summary. The one request
-        # here that reads the mount, and one small file is all it reads.
+        # Every call that has ever worked on this one artifact, aggregated --
+        # what the drill-down page shows. Same guarantee as the two routes
+        # above: `artifact_call_logs` reads only `beats`/`call_logs`, so this
+        # never touches the mount either, no matter how many calls it's
+        # aggregating.
+        @api.get("/logs/artifact/{artifact_path:path}")
+        def artifact_logs_endpoint(artifact_path: str) -> dict:
+            if not safe_relpath(artifact_path):
+                return {"artifact_path": artifact_path, "calls": [], "error": "invalid artifact_path"}
+            return {"artifact_path": artifact_path, "calls": artifact_call_logs(artifact_path)}
+
+        # What an artifact's own page shows: type, own parameters, and the
+        # paths of what it's built from. Served out of the same computed
+        # state `/state` answers from -- a dict lookup, not a mount read.
+        #
+        # It used to read the manifest off the volume per request, which is
+        # what the refresh thread above exists to avoid: that read raced the
+        # thread's own `volume.reload()` (every STATE_REFRESH_SECONDS), and a
+        # read landing mid-reload came back as "no manifest", so an artifact's
+        # page flickered between its metadata and a "not built yet" line every
+        # couple of seconds. The same collision took the other side too -- a
+        # reload can't run while this container holds a file open on the mount,
+        # so a read in flight could fail the refresh pass instead. No request
+        # handler touches the volume now, and neither can happen.
         @api.get("/manifest/{artifact_path:path}")
         def manifest_endpoint(artifact_path: str) -> dict:
             if not safe_relpath(artifact_path):
                 return {"artifact_path": artifact_path, "error": "invalid artifact_path"}
-            try:
-                summary = artifact_manifest_summary(artifact_path, Path(STORAGE))
-            except Exception as exc:
-                return {"artifact_path": artifact_path, "error": str(exc)}
-            if summary is None:
+            entry = latest_state["value"].get(artifact_path)
+            if entry is None:
                 return {"artifact_path": artifact_path, "error": "not built yet -- no manifest"}
-            return {"artifact_path": artifact_path, **summary}
+            if entry["parameters"] is None:
+                # Loaded from a manifest that wouldn't read -- `state` already
+                # has the reason, and it's the same string this route used to
+                # hand back from its own `except`.
+                return {"artifact_path": artifact_path, "error": entry["error"]}
+            return {
+                "artifact_path": artifact_path,
+                "type": entry["type"],
+                "parameters": entry["parameters"],
+                "depends_on": entry["depends_on"],
+            }
 
         # Everything else -- index.html at "/" and its same-origin JS modules
         # (app.js, el.js, render.js) -- is a static file under WEB_DIR. Mounted

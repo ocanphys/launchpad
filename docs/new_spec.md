@@ -406,10 +406,18 @@ Each entry keeps the shape the dashboard reads:
 
 ```python
 {"type": "Tokenizer", "status": "done", "error": None,
- "depends_on": ["sources/odyssey"], "blocked_by": [], "done": True, "ready": False,
+ "depends_on": ["sources/odyssey"], "parameters": {"vocab_size": 1000},
+ "blocked_by": [], "done": True, "ready": False,
  "call_id": None, "active": False, "last_heartbeat": None, "live_progress": None,
  "durable_progress": {"phase": "files", "done": 1, "total": 1}}
 ```
+
+`parameters` is the artifact's own fields only -- the same half of the
+annotation-driven split `to_manifest` puts under `"parameters"`, so a
+dependency never appears here as a nested manifest. A dependency is a path in
+`depends_on` and nothing more; whatever else is true of it lives on its own
+entry in this same map, which is what keeps one artifact's record from going
+stale when another's changes.
 
 `blocked_by` is every direct dependency not `done` on this same map, a
 dependency with no manifest included; `ready` is not done, not blocked, and
@@ -431,6 +439,33 @@ every other path continues.
 
 A state result is an observation over a scan interval, not a transactional
 snapshot: rebuild it on refresh, publish the completed map at once.
+
+### The launcher reads the volume in exactly one place
+
+`state()` is the only volume read in the launcher container. Every request
+handler answers from what the refresh loop last computed (`/state`,
+`/manifest`) or from a Dict (`/logs`, `/logs/artifact/<path>`). No handler
+opens a file on the mount, and none may.
+
+This is not a layering preference. The refresh loop calls `volume.reload()` on
+its own clock, and a reload and a read cannot both be in flight on the same
+mount. The collision breaks in both directions:
+
+- A read landing mid-reload sees a path that is briefly absent, so the handler
+  reports a declared artifact as missing.
+- A file descriptor still open when a reload starts fails the reload instead,
+  so the refresh pass every other route depends on dies and the whole map goes
+  stale.
+
+Both are timing-dependent, so neither presents as an error: the first shows up
+as a page whose contents appear and disappear on the poll interval, the second
+as a dashboard that quietly stops updating. `/manifest` had exactly the first
+failure while it read the manifest per request.
+
+Whatever a page needs from the volume is therefore computed on the refresh
+pass and published with the map -- an artifact's own parameters alongside its
+status. Adding a volume read back into a request handler reintroduces the race
+no matter how small the read is.
 
 ### Minimal execution contract
 

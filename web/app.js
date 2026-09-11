@@ -176,18 +176,26 @@ async function pollTable(token) {
 
 // --- artifact view poll --------------------------------------------------------
 
-// One artifact's drill-down: its manifest summary, and nothing else. A job's
-// own output isn't fetched here or anywhere in this app yet -- the worker
-// files it, and `leasebook` opens no log files at all (see artifactview.js).
+// One artifact's drill-down: its manifest summary, plus every call that has
+// ever worked on it, aggregated -- `logs/artifact/<path>` (see main.py's
+// artifact_call_logs), a Dict read same as everywhere else here, never a
+// file (see artifactview.js). Two fetches, in parallel: the manifest can
+// 404-shaped-error (not built yet) independently of whether any call has
+// ever touched this artifact, so one failing is never a reason to hide the
+// other.
 //
 // `token` guards against a stale poll the same way pollTable's does -- see
 // its comment for why this matters, same race, same fix.
 async function pollArtifactView(path, token) {
   try {
-    const res = await fetch(`manifest/${path}`, { cache: "no-store" });
-    const manifest = await res.json();
+    const [manifestRes, logsRes] = await Promise.all([
+      fetch(`manifest/${path}`, { cache: "no-store" }),
+      fetch(`logs/artifact/${path}`, { cache: "no-store" }),
+    ]);
+    const manifest = await manifestRes.json();
+    const logs = await logsRes.json();
     if (token !== routeToken) return; // superseded by a newer navigation
-    renderArtifactView(artifactViewEl, manifest);
+    renderArtifactView(artifactViewEl, manifest, logs);
     setConn("live", "ok");
   } catch (err) {
     if (token !== routeToken) return;
