@@ -95,6 +95,21 @@ function logs(logsPayload) {
   );
 }
 
+// What the page shows between a click and its first answer: the back link,
+// and which artifact is on its way. `route()` calls this the moment it
+// switches to an artifact, because `container` still holds the *previous*
+// artifact's nodes until a fetch resolves and replaceChildren swaps them --
+// and the title has already changed by then, so leaving them up shows one
+// artifact's metadata under another's name. Only ever called on navigation,
+// never on a repoll: an artifact already on screen keeps what it has until
+// its own next answer lands.
+export function renderArtifactPending(container, artifactPath) {
+  container.replaceChildren(
+    el("p", { class: "view-back" }, el("a", { href: "#/", text: "← dashboard" })),
+    el("p", { class: "empty", text: "loading " + artifactPath + "…" }),
+  );
+}
+
 export function renderArtifactView(container, manifest, logsPayload) {
   const nodes = [el("p", { class: "view-back" }, el("a", { href: "#/", text: "← dashboard" }))];
 

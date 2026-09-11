@@ -444,8 +444,9 @@ snapshot: rebuild it on refresh, publish the completed map at once.
 
 `state()` is the only volume read in the launcher container. Every request
 handler answers from what the refresh loop last computed (`/state`,
-`/manifest`) or from a Dict (`/logs`, `/logs/artifact/<path>`). No handler
-opens a file on the mount, and none may.
+`/manifest`, and the call index behind `/logs/artifact/<path>`) or from a
+Dict (`/logs`, and the log lines themselves). No handler opens a file on the
+mount, and none may.
 
 This is not a layering preference. The refresh loop calls `volume.reload()` on
 its own clock, and a reload and a read cannot both be in flight on the same
@@ -466,6 +467,15 @@ Whatever a page needs from the volume is therefore computed on the refresh
 pass and published with the map -- an artifact's own parameters alongside its
 status. Adding a volume read back into a request handler reintroduces the race
 no matter how small the read is.
+
+The same rule extends past the volume to any unbounded scan. The refresh pass
+publishes a second view off the one `beats` snapshot it already takes: which
+calls have beaten for each artifact path, so `/logs/artifact/<path>` is a
+lookup rather than its own scan of a Dict that grows with every call ever run.
+What stays on the request path is bounded by the one artifact being looked at
+-- its own calls' log lines, fetched per request because they are large and
+change constantly. A scan whose cost grows with history belongs on the clock;
+a read whose cost is fixed by what was asked for belongs in the handler.
 
 ### Minimal execution contract
 

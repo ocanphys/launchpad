@@ -73,10 +73,16 @@ lab_image = (
 )
 
 
-def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
+def state(root: Path = Path(STORAGE), beat_records: dict | None = None) -> dict[str, dict]:
     """The current state of every declared artifact under `root`, keyed by
     artifact path: one glob, one manifest read and one status apiece, and one
     lease and heartbeat snapshot for the whole scan.
+
+    `beat_records` is that heartbeat snapshot, for a caller that already has
+    one and wants this map derived from the same instant as whatever else it
+    derived from it (the refresh thread builds `calls_by_artifact` off the
+    same read). Left out, this takes its own -- every other caller wants one
+    scan and doesn't care when it happened.
 
         state()["runs/toy/pretraining"] -> {
             "type": "Pretraining", "status": "partial", "error": None,
@@ -100,7 +106,9 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
     """
     if root == Path(STORAGE):
         volume.reload()
-    grants, beat_records, now = dict(leases.items()), dict(beats.items()), time.time()
+    if beat_records is None:
+        beat_records = dict(beats.items())
+    grants, now = dict(leases.items()), time.time()
 
     loaded: dict[str, Artifact] = {}
     entries: dict[str, dict] = {}
@@ -157,36 +165,48 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
     return entries
 
 
-def artifact_call_logs(artifact_path: str) -> list[dict]:
-    """Every call that has ever beaten for `artifact_path`, oldest first,
-    each with whatever `call_logs` currently holds for it -- one call per
-    attempt at this artifact, superseded ones included, since `beats` keys
-    on call_id, not artifact_path, and nothing evicts an old entry.
+def calls_by_artifact(beat_records: dict) -> dict[str, list[dict]]:
+    """Which calls have beaten for each artifact_path, oldest first -- one
+    entry per attempt, superseded ones included, since `beats` keys on
+    call_id and nothing evicts an old entry.
 
-    Reads only `beats`/`call_logs` -- never the volume. This is what makes
-    it safe to call from `leasebook` regardless of what its own reload clock
-    is doing: the whole reason these two Dicts exist is so the dashboard
-    never has to open a log file on a mount it also reloads (see
-    docs/LOGGING.md). Ordered by `last_beat_ts` rather than a "call started"
-    time, which no historical entry here still has (`leases` only remembers
-    the *current* grant) -- last-beat order still reads top-to-bottom as
-    attempt order, since a superseded call's last beat necessarily comes
-    before the call that replaced it.
+    Built on the refresh pass, off the snapshot `state` is built from, so
+    `/logs/artifact/<path>` is a lookup rather than its own scan of the whole
+    `beats` Dict per request. That scan was on the request path and grows
+    with every call ever run, which is exactly the shape of work that belongs
+    on the clock instead (§7: whatever a page needs is computed on the
+    refresh pass).
+
+    Ordered by `last_beat_ts` rather than a "call started" time, which no
+    historical entry here still has (`leases` only remembers the *current*
+    grant) -- last-beat order still reads top-to-bottom as attempt order,
+    since a superseded call's last beat necessarily comes before the call
+    that replaced it.
     """
-    calls = [
-        (call_id, beat)
-        for call_id, beat in beats.items()
-        if beat.get("artifact_path") == artifact_path
-    ]
-    calls.sort(key=lambda pair: pair[1]["last_beat_ts"])
-    return [
-        {
-            "call_id": call_id,
-            "last_heartbeat": beat["last_beat_ts"],
-            "lines": call_logs.get(call_id) or [],
-        }
-        for call_id, beat in calls
-    ]
+    index: dict[str, list[dict]] = {}
+    for call_id, beat in beat_records.items():
+        artifact_path = beat.get("artifact_path")
+        if artifact_path is None:
+            continue
+        index.setdefault(artifact_path, []).append(
+            {"call_id": call_id, "last_heartbeat": beat["last_beat_ts"]}
+        )
+    for calls in index.values():
+        calls.sort(key=lambda call: call["last_heartbeat"])
+    return index
+
+
+def artifact_call_logs(calls: list[dict]) -> list[dict]:
+    """`calls` (one artifact's, from `calls_by_artifact`) with each one's
+    lines attached.
+
+    The lines are fetched here rather than indexed on the refresh pass: they
+    are the large, constantly-changing half, and only the one artifact
+    someone is looking at needs them. That is one targeted `call_logs.get`
+    per attempt at that artifact -- bounded by its own history, not by the
+    size of the Dict.
+    """
+    return [{**call, "lines": call_logs.get(call["call_id"]) or []} for call in calls]
 
 
 
@@ -225,18 +245,29 @@ def leasebook():
         log.info("leasebook container started")
 
         # One thread, one job: keep this container's picture of the volume
-        # fresh. `state()` is all of it -- one `volume.reload()`, one glob of
-        # the manifests, one lease/beat snapshot, the whole map computed here
-        # rather than in whatever request happens to arrive next. It writes
-        # nothing and syncs nothing, so no request ever waits on it and it
-        # never has to be told what someone is looking at.
-        latest_state = {"value": state()}
+        # fresh. One `volume.reload()`, one glob of the manifests, one
+        # lease/beat snapshot, and both views computed off it here rather
+        # than in whatever request happens to arrive next -- `artifacts` for
+        # the table and an artifact's own page, `calls` for its logs. It
+        # writes nothing and syncs nothing, so no request ever waits on it
+        # and it never has to be told what someone is looking at.
+        def compute() -> dict:
+            # One `beats` read, both views derived from it, so a call in
+            # `calls` is never one the matching `artifacts` entry hasn't
+            # heard of yet.
+            beat_records = dict(beats.items())
+            return {
+                "artifacts": state(beat_records=beat_records),
+                "calls": calls_by_artifact(beat_records),
+            }
+
+        latest = {"value": compute()}
 
         def refresh_state() -> None:
             while True:
                 time.sleep(STATE_REFRESH_SECONDS)
                 try:
-                    computed = state()
+                    computed = compute()
                 except Exception:
                     # This thread is the dashboard's only clock; letting it die
                     # would freeze /state with nothing saying why. The last
@@ -244,9 +275,10 @@ def leasebook():
                     log.exception("state refresh failed, keeping last good state")
                     continue
                 # One assignment of one key, which the GIL makes atomic: a
-                # reader gets the whole previous state or the whole new one,
-                # never a mix, so there is nothing here for a lock to protect.
-                latest_state["value"] = computed
+                # reader gets the whole previous pass or the whole new one,
+                # never a mix of the two views, so there is nothing here for
+                # a lock to protect.
+                latest["value"] = computed
 
         threading.Thread(target=refresh_state, daemon=True).start()
 
@@ -258,7 +290,7 @@ def leasebook():
         # fresher than the last pass.
         @api.get("/state")
         def state_route() -> dict:
-            return latest_state["value"]
+            return latest["value"]["artifacts"]
 
         # The header's "lab" link. A redirect rather than a URL the page fetches:
         # the lab lives on its own subdomain, and the token that gets it past the
@@ -309,7 +341,8 @@ def leasebook():
         def artifact_logs_endpoint(artifact_path: str) -> dict:
             if not safe_relpath(artifact_path):
                 return {"artifact_path": artifact_path, "calls": [], "error": "invalid artifact_path"}
-            return {"artifact_path": artifact_path, "calls": artifact_call_logs(artifact_path)}
+            calls = latest["value"]["calls"].get(artifact_path, [])
+            return {"artifact_path": artifact_path, "calls": artifact_call_logs(calls)}
 
         # What an artifact's own page shows: type, own parameters, and the
         # paths of what it's built from. Served out of the same computed
@@ -328,7 +361,7 @@ def leasebook():
         def manifest_endpoint(artifact_path: str) -> dict:
             if not safe_relpath(artifact_path):
                 return {"artifact_path": artifact_path, "error": "invalid artifact_path"}
-            entry = latest_state["value"].get(artifact_path)
+            entry = latest["value"]["artifacts"].get(artifact_path)
             if entry is None:
                 return {"artifact_path": artifact_path, "error": "not built yet -- no manifest"}
             if entry["parameters"] is None:

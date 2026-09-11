@@ -4,7 +4,7 @@
 // is delegated to render.js and artifactview.js; DOM building to el.js.
 
 import { artifactRow, problemRow, verdict } from "./render.js";
-import { renderArtifactView } from "./artifactview.js";
+import { renderArtifactPending, renderArtifactView } from "./artifactview.js";
 
 // --- config -----------------------------------------------------------------
 
@@ -276,6 +276,11 @@ function route() {
   titleEl.textContent = r.id;
   dashboardEl.hidden = true;
   artifactViewEl.hidden = false;
+  // Clear whatever artifact was on screen before this one. The table branch
+  // above can draw its last payload while it waits, because that payload is
+  // this view's own data one poll old; here it would be a *different*
+  // artifact's, sitting under the name of the one just clicked.
+  renderArtifactPending(artifactViewEl, r.id);
   currentPoll = () => schedulePoll(() => pollArtifactView(r.id, token), token);
   currentPoll();
 }

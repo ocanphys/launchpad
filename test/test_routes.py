@@ -61,7 +61,11 @@ def client(**overrides):
 
     calls = {"launched": [], "cancelled": []}
 
-    main.state = lambda: overrides.get("state", STATE)
+    # `**_` because the refresh thread passes the `beats` snapshot it shares
+    # with `calls_by_artifact`; this stub answers the same either way. It
+    # accepts keywords only: a caller in main.py that passes `beat_records`
+    # positionally breaks every test here, not just the one that exercises it.
+    main.state = lambda **_: overrides.get("state", STATE)
     main.attempt_launch = lambda path: (
         calls["launched"].append(path) or (True, f"granted {path}", None)
     )
@@ -209,6 +213,28 @@ def test_artifact_logs_aggregate_every_call_oldest_first():
 
     # An artifact no call has ever touched: empty, not an error.
     assert api.get("/logs/artifact/sources/never-run").json()["calls"] == []
+
+
+def test_artifact_logs_read_the_index_not_the_beats_dict():
+    """`/logs/artifact/<path>` looks its calls up in what the refresh pass
+    indexed, never scanning `beats` itself -- that scan was on the request
+    path and grows with every call ever run (§7). A `beats` that raises on
+    `.items()` proves it: the index was already built at startup, so the
+    route still answers, while a handler that scanned would raise.
+    """
+    api, _ = client()
+    fixture = main.beats
+
+    class Scanned:
+        def items(self):
+            raise AssertionError("/logs/artifact scanned the beats Dict per request")
+
+    main.beats = Scanned()  # the refresh thread swallows this and keeps its last pass
+    try:
+        body = api.get("/logs/artifact/runs/toy/pretraining").json()
+        assert [call["call_id"] for call in body["calls"]] == ["fc-0", "fc-1"], body
+    finally:
+        main.beats = fixture
 
 
 def test_artifact_logs_rejects_a_path_that_walks_out():
