@@ -1,22 +1,20 @@
-"""BPE: the jobs that fill a Tokenizer's folder in, and that run a trained
-one over a source. Split from __init__.py (which holds the artifacts
-themselves) because the two are one family read in one sitting, but
-PAT/mergebpairs -- the pretokenizer regex and the merge step -- are shared
-between training here and encoding there, which is exactly the pair that
-must not drift apart.
+"""BPE: the job that fills a Tokenizer's folder in. Split from __init__.py
+(which holds the artifact itself) because the two are one family read in one
+sitting, but PAT/mergebpairs -- the pretokenizer regex and the merge step --
+are shared between training here and encoding there, which is exactly the
+pair that must not drift apart.
 """
 
 import heapq
 import json
 import os
-from array import array
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import regex as re
 
 from artifacts.core.job import Job
-from artifacts.tokenizers.bpe import PAT, TokenizedSource, Tokenizer, mergebpairs
+from artifacts.tokenizers.bpe import PAT, Tokenizer, mergebpairs
 
 if TYPE_CHECKING:
     from system.runtime import Worker
@@ -281,25 +279,3 @@ class TokenizerJob(Job):
             )
         )
 
-
-class TokenizeSourceJob(Job):
-    artifact: TokenizedSource
-
-    def __init__(self, artifact: TokenizedSource):
-        super().__init__(artifact)
-        self.tokenizer = artifact.tokenizer
-        self.source = artifact.source
-
-    def run(self, root: Path, worker: "Worker") -> None:
-        (root / self.artifact.artifact_path).mkdir(parents=True, exist_ok=True)
-        worker.log.info(f"tokenizing {self.source.name}")
-
-        tokenizer = self.tokenizer.bind(root)  # reads the tokenizer.json its job wrote
-        text = self.source.paths(root)["raw text"].read_text()
-        token_ids = tokenizer.encode(text)
-        # uint16: every id this family produces is below vocab_size, and
-        # vocab_size is expected to stay under 2**16 -- two bytes, no header,
-        # so DataSetJob can concatenate several of these with a plain byte copy.
-        self.artifact.paths(root)["tokens"].write_bytes(array("H", token_ids).tobytes())
-
-        worker.log.info(f"wrote {len(token_ids)} tokens for {self.source.name}")

@@ -9,11 +9,12 @@ from typing import ClassVar
 
 from artifacts.core.artifact import Artifact
 from artifacts.core.resolve import resolve
-from artifacts.sources import Source
-from artifacts.tokenizers.bpe import TokenizedSource, Tokenizer
+from artifacts.sources import Source, SourceURL
+from artifacts.tokenized import TokenizedSource
+from artifacts.tokenizers.bpe import Tokenizer
 
-ODYSSEY = Source(name="odyssey", url="https://example.org/odyssey.txt")
-ILIAD = Source(name="iliad", url="https://example.org/iliad.txt")
+ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
+ILIAD = SourceURL(name="iliad", url="https://example.org/iliad.txt")
 
 
 def tokenizer(*sources: Source) -> Tokenizer:
@@ -58,15 +59,15 @@ class ResolveTests(unittest.TestCase):
         )
 
     def test_a_shared_dependency_resolves_once_keeping_the_first_object(self):
-        direct = Source(name="odyssey", url=ODYSSEY.url, commit="direct")
-        nested = Source(name="odyssey", url=ODYSSEY.url, commit="nested")
+        direct = SourceURL(name="odyssey", url=ODYSSEY.url, commit="direct")
+        nested = SourceURL(name="odyssey", url=ODYSSEY.url, commit="nested")
         tokens = TokenizedSource(tokenizer=tokenizer(nested), source=direct)
         sources = [a for a in resolve(tokens) if isinstance(a, Source)]
         self.assertEqual(len(sources), 1)
         self.assertIs(sources[0], direct)  # `source` is walked before `tokenizer`
 
     def test_a_conflicting_leaf_behind_a_shared_path_is_found(self):
-        elsewhere = Source(name="odyssey", url="https://example.org/other.txt")
+        elsewhere = SourceURL(name="odyssey", url="https://example.org/other.txt")
         # tokenizer(elsewhere) computes the same path as tokenizer(ODYSSEY):
         # the uid digests source names, not URLs. Only the leaf disagrees.
         tokens = TokenizedSource(tokenizer=tokenizer(elsewhere), source=ODYSSEY)

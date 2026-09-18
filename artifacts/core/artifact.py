@@ -1,6 +1,7 @@
 """The base artifact model: parameters plugged together with the artifacts
 they're built from, a folder each artifact owns, and a manifest that rebuilds
-it. Concrete types live in sources/, tokenizers/, dataset/, models/*.
+it. Concrete types live in sources/, tokenizers/, tokenized/, dataset/,
+mappeddataset/, models/*.
 
 An artifact has three lives, and this class carries all three:
 
@@ -117,7 +118,7 @@ class Artifact(ABC):
     )
 
     # The dotted path of the Job class that produces this artifact --
-    # "artifacts.sources.jobs.SourceJob" -- or None for an artifact nothing
+    # "artifacts.sources.jobs.SourceURLJob" -- or None for an artifact nothing
     # produces, whose completion is its dependencies' files.
     #
     # A string, and never anything more, is the point: an artifact knowing its
@@ -128,12 +129,14 @@ class Artifact(ABC):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        producer = getattr(cls, "producer", NotImplemented)
+        # a base other classes fill in (sources.Source) sets nothing; a class
+        # that does set it must set a string or None
+        producer = cls.__dict__.get("producer")
         if producer is not None and not isinstance(producer, str):
             raise TypeError(
                 f"{cls.__name__} must set `producer` to the dotted path of the Job "
                 f'class that produces it -- producer: ClassVar[str] = "artifacts.'
-                f'sources.jobs.SourceJob" -- or to None if nothing does'
+                f'sources.jobs.SourceURLJob" -- or to None if nothing does'
             )
 
     def __post_init__(self) -> None:
@@ -144,6 +147,11 @@ class Artifact(ABC):
         members that disagree while sharing a folder. A subclass with its own
         __post_init__ must call super().
         """
+        if not hasattr(type(self), "producer"):
+            raise TypeError(
+                f"{type(self).__name__} must set `producer` to the dotted path of "
+                f"the Job class that produces it, or to None if nothing does"
+            )
         for name, container in manifest.dependencies(type(self)).items():
             if container is not frozenset:
                 continue

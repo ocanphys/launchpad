@@ -1,6 +1,6 @@
-# Artifact Framework Backbone Spec: Astra Version
+# Artifact Framework Backbone Spec
 
-Experimental target design, based on the [original backbone spec](artifact_framework_backbone_spec.md). This specifies the intended contract; implementation may differ today.
+The contract every artifact, job, and the code that declares, resolves, launches and binds them is written against. [README.md](../../README.md) is the map of where things live.
 
 ## 1. Purpose
 
@@ -30,6 +30,8 @@ tokenizer = Tokenizer(
 )
 tokens = TokenizedSource(tokenizer=tokenizer, source=source)
 ```
+
+Each concrete type belongs to a family: a package under `artifacts/` holding the artifact class and, in a sibling `jobs.py`, the one job that produces it. Families never import functions or constants from one another; the only thing one family takes from another is an artifact class to name as a dependency type.
 
 A concrete type defines:
 
@@ -75,12 +77,12 @@ root/
   tokenizers/<tokenizer-uid>/
     manifest.json
     tokenizer.json
-    bin/odyssey/
-      manifest.json
-      tokens.bin
+  tokenized/<tokenizer-uid>/odyssey/
+    manifest.json
+    tokens.bin
 ```
 
-`TokenizedSource.artifact_path` is `tokenizer.artifact_path / "bin" / source.uid`. A parent's outputs never include its children's files. Leases use exact artifact paths; owning a directory does not grant ownership of artifacts beneath it.
+`TokenizedSource.artifact_path` is `tokenized/<tokenizer-uid>/<source-uid>`: its own root, grouped by tokenizer, never inside the tokenizer's folder. Leases use exact artifact paths; owning a directory does not grant ownership of artifacts beneath it.
 
 Path encodings are a storage compatibility contract. Changing them requires an explicit migration. Readable names and short hashes may collide; consistency checks detect conflicting definitions at a shared path rather than assuming the encoding is collision-free.
 
@@ -90,7 +92,7 @@ Every declared artifact owns `root / artifact_path / "manifest.json"`. Its manif
 
 ```json
 {
-  "artifact": "artifacts.sources.Source",
+  "artifact": "artifacts.sources.SourceURL",
   "commit": "<defining-revision>",
   "allocated_resources": {},
   "parameters": {
@@ -117,7 +119,7 @@ A tokenizer trained on that source embeds its full manifest under `dependencies.
   "dependencies": {
     "sources": [
       {
-        "artifact": "artifacts.sources.Source",
+        "artifact": "artifacts.sources.SourceURL",
         "commit": "<defining-revision>",
         "allocated_resources": {},
         "parameters": {
@@ -262,7 +264,7 @@ for artifact in artifacts:
 # Displayed paths only; <tokenizer-uid> stands for the computed UID:
 # sources/odyssey
 # tokenizers/<tokenizer-uid>
-# tokenizers/<tokenizer-uid>/bin/odyssey
+# tokenized/<tokenizer-uid>/odyssey
 ```
 
 The source occurs once even though both the tokenizer and tokenized source reference it.
@@ -322,7 +324,7 @@ declared and built (the tokenizer's manifest recorded an older commit than
 >>> report = lab.declare(tokens)   # preview -- commit defaults to False
 sources/odyssey                                      done
 tokenizers/bpe-1.0k-feeeeefa90                        done   (drift: a1b2c3d -> e4f5a6b)
-tokenizers/bpe-1.0k-feeeeefa90/bin/odyssey            new
+tokenized/bpe-1.0k-feeeeefa90/odyssey            new
 
 2 done, 1 new
 ok -- 1 to declare
@@ -332,15 +334,15 @@ ok -- 1 to declare
   "differences": {}, "created": False},
  {"path": "tokenizers/bpe-1.0k-feeeeefa90", "state": "done", "drift": True,
   "differences": {}, "created": False},
- {"path": "tokenizers/bpe-1.0k-feeeeefa90/bin/odyssey", "state": "new",
+ {"path": "tokenized/bpe-1.0k-feeeeefa90/odyssey", "state": "new",
   "drift": False, "differences": {}, "created": False}]
 
 >>> lab.declare(tokens, commit=True)   # same rows; the new one gets published
 sources/odyssey                                      done
 tokenizers/bpe-1.0k-feeeeefa90                        done   (drift: a1b2c3d -> e4f5a6b)
-tokenizers/bpe-1.0k-feeeeefa90/bin/odyssey            done   (created)
+tokenized/bpe-1.0k-feeeeefa90/odyssey            done   (created)
 
-1 manifest published: tokenizers/bpe-1.0k-feeeeefa90/bin/odyssey
+1 manifest published: tokenized/bpe-1.0k-feeeeefa90/odyssey
 ```
 
 `drift` alone never blocks (only `strict_commit=True` would); `verbose=False`
@@ -351,17 +353,7 @@ still shows drift, since it isn't a blocker reason, only `conflict` and
 
 Preview never creates folders or temporary files. Definition and completion checks remain part of the artifact contract.
 
-### Implementation plan
-
-Five stages, each testable before the next.
-
-1. **`artifacts/core/artifact.py` — the definition contract.** Read dependency fields off their annotations, so an empty container stays a dependency and a set-valued one is coerced and checked for colliding paths in `__post_init__`. Rename `manifest()` to `to_manifest()` and give the canonical encoding its own function (two-space indent, trailing newline, `allow_nan=False`). Change `load(path)` to `load(artifact_path, root=None)`, absorbing the path-agreement check. Delete `Artifact.at` and `Artifact.declare`. Add `status(root=None) -> Footprint`, folding in `exists()`. Give `bind()` the stored-declaration read and definition check it currently lacks. Allow `producer = None`. Leave `__eq__`/`__hash__` exactly as they are — the generated definition comparison is the contract (§2).
-2. **`artifacts/core/resolve.py` — shrink to one pure function.** `resolve(artifact) -> list[Artifact]`, with definition agreement checked on every repeated path. Delete `Node`, `Dag`, `_check`, `plan`, and `declared`; move `declare(dag)` and `conflict_diff` out.
-3. **`lab.py` — one declaration operation.** `lab.declare` holds what `_check` and `declare(dag)` used to do: resolve once, inspect all paths, reject blockers with `DeclarationError`, publish missing manifests in dependency order, return a `DeclarationReport`. Volume reload and commit happen inside it, only when `root` is `STORAGE`. Delete `environment`, `target`, `_PERMISSIONS`, `init`, `_root_for`, `root`, `ls`, `refresh`, `publish`, `bind`, `plan`, the run-notebook seeding, and `visualize`; `config.LOCAL_STORAGE` goes with them.
-4. **`state()` — one glob, one entry per path.** Replace `read_state`'s three-prefix discovery and its `resolve` over every root. Keep the per-artifact shape, the lease and heartbeat snapshot, and both progress kinds; drop the runs/sources/datasets grouping and the `/lab/run` deep link with it, and move the per-view slicing into the dashboard. `declared_artifact` becomes one lookup in the map.
-5. **Callers.** `MappedDataSet.producer = None` and delete `artifacts/mappeddataset/jobs.py`, whose body was a no-op. Delete the visualizer: its only caller was `lab.declare`'s `visualize` flag. Delete the notebooks that tested the old session model (`lab_test_uniform`) and the stray copy; rewrite `notebook.ipynb` and `notebooks/resolve_demo.ipynb` against `lab.declare`, `resolve`, `status` and `bind`, each taking an explicit `ROOT`.
-
-The final API has one `declare` function, one `resolve` function, one `state` function, and no session configuration.
+The API is one `declare` function, one `resolve` function, one `state` function, and no session configuration.
 
 ### Publication
 

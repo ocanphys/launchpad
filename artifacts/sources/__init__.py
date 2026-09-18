@@ -7,10 +7,10 @@ from artifacts.core.artifact import Artifact
 
 @dataclass(frozen=True)
 class Source(Artifact):
-    producer: ClassVar[str] = "artifacts.sources.jobs.SourceJob"
+    """A named body of raw text at sources/<name>/body.txt. Subclasses say
+    where the text comes from; everything downstream reads only the file."""
 
     name: str
-    url: str
 
     @property
     def uid(self) -> str:
@@ -23,3 +23,11 @@ class Source(Artifact):
     @property
     def files(self) -> dict[str, str]:
         return {"raw text": "body.txt"}
+
+
+@dataclass(frozen=True)
+class SourceURL(Source):
+    producer: ClassVar[str] = "artifacts.sources.jobs.SourceURLJob"
+
+    url: str
+

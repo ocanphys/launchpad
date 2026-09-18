@@ -7,6 +7,7 @@ second family's dotted paths and not just the transformer's own.
 """
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,14 +34,13 @@ class MambaPretrainJob(Job):
         folder.mkdir(parents=True, exist_ok=True)
 
         model_parameters = self.artifact.model_parameters
-        schedule = self.training_parameters.lr_schedule
         # not run for real -- resolved here anyway, same as
         # models/transformer/jobs.py, so this actually exercises locate()
         # against this family's own dotted paths instead of only the
         # transformer's.
         dtype = locate(model_parameters.dtype)
         optimizer_cls = locate(self.training_parameters.optimizer)
-        schedule_fn = locate(schedule.fn)
+        schedule_fn = locate(self.training_parameters.lr_schedule_fn)
 
         every = self.loop_config.checkpoint_every
         total_steps = self.training_parameters.total_steps
@@ -57,13 +57,7 @@ class MambaPretrainJob(Job):
 
         loss, done = 10.0, 0
         for step in steps:
-            lr = schedule_fn(
-                step,
-                max_learning_rate=schedule.max_learning_rate,
-                min_learning_rate=schedule.min_learning_rate,
-                warmup_iters=schedule.warmup_iters,
-                cosine_cycle_iters=schedule.cosine_cycle_iters,
-            )
+            lr = schedule_fn(step, **asdict(self.training_parameters.lr_schedule))
             for _ in range(step - done):
                 loss *= 0.99  # mock decay, not a real training loop
             done = step

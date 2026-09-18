@@ -3,17 +3,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from artifacts.core.job import Job
-from artifacts.sources import Source
+from artifacts.sources import SourceURL
 
 if TYPE_CHECKING:
     from system.runtime import Worker
 
 
-class SourceJob(Job):
-    artifact: Source  # no dependencies: a source is downloaded, not derived
+class SourceURLJob(Job):
+    artifact: SourceURL  # no dependencies: a source is downloaded, not derived
 
     def run(self, root: Path, worker: "Worker") -> None:
-        (root / self.artifact.artifact_path).mkdir(parents=True, exist_ok=True)
         worker.log.info(f"downloading {self.artifact.name} from {self.artifact.url}")
 
         request = urllib.request.Request(
@@ -33,3 +32,4 @@ class SourceJob(Job):
 
         self.artifact.paths(root)["raw text"].write_text(body)
         worker.log.info(f"wrote {len(body)} chars for {self.artifact.name}")
+

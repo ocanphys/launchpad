@@ -14,12 +14,15 @@ where things live and how traffic flows between them.
   `call_functions/` folder with one `{call_id}.log` per call ever launched for
   it -- written by the worker that ran the call, out of what Modal captured
   of its stdout (see [docs/LOGGING.md](docs/LOGGING.md)).
-  - **Shared roots** -- `sources/`, `tokenizers/`, `datasets/`,
+  - **Shared roots** -- `sources/`, `tokenizers/`, `tokenized/`, `datasets/`,
     `mappeddatasets/` -- hold artifacts with no `run_id` in their
-    parameters: reused across runs rather than rebuilt per run. `datasets/`
-    (`DataSet`, which copies bytes into its own `train.bin`/`valid.bin`) and
-    `mappeddatasets/` (`MappedDataSet`, which owns no bytes of its own and
-    reads straight out of its sources' `tokens.bin`) are separate sibling
+    parameters: reused across runs rather than rebuilt per run.
+    `tokenized/{tokenizer-uid}/{source-uid}/` holds a `TokenizedSource`
+    (`artifacts/tokenized/`): one source run through one tokenizer, as
+    `tokens.bin`, shared by every dataset that names that pair. `datasets/`
+    (`DataSet`, which copies those bins into its own `train.bin`/`valid.bin`)
+    and `mappeddatasets/` (`MappedDataSet`, which owns no bytes of its own and
+    reads straight out of the `tokens.bin` files) are separate sibling
     packages (`artifacts/dataset/`, `artifacts/mappeddataset/`) and folders --
     different kinds of artifact, not variants of one "dataset" concept.
   - **`runs/{run_id}/`** holds that run's own run-scoped artifacts --
@@ -28,7 +31,7 @@ where things live and how traffic flows between them.
     under a shared root instead, found by walking the dependency tree
     embedded in the run's own manifest, not nested under the run's folder.
 - **Dict `launchpad-leases`**: one entry per **artifact_path** (not per
-  run -- see artifacts/core/spec.md §8), naming the call_id currently
+  run -- see artifacts/core/spec.md §7), naming the call_id currently
   holding that artifact.
 - **Dict `launchpad-beats`**: one entry per call_id, the timestamp of its
   last heartbeat -- how a reader tells a live call from a dead one.
@@ -135,7 +138,7 @@ took one.
 
 The full model is [artifacts/core/spec.md](artifacts/core/spec.md); this is
 the shape of it. Each artifact family (`artifacts/sources/`,
-`artifacts/tokenizers/bpe/`, `artifacts/dataset/`,
+`artifacts/tokenizers/bpe/`, `artifacts/tokenized/`, `artifacts/dataset/`,
 `artifacts/mappeddataset/`, `artifacts/models/mock/`, ...) pairs an
 `Artifact` subclass (parameters, where it lives, what files it comprises)
 with exactly one `Job` subclass that produces it -- no `job_uid`, no per-run

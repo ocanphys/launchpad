@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from artifacts.core.job import Job
-from artifacts.dataset import DataSet
+from artifacts.dataset import END_OF_TEXT, DataSet
 
 if TYPE_CHECKING:
     from system.runtime import Worker
@@ -27,10 +27,15 @@ class DataSetJob(Job):
             worker.log.info(
                 f"building {name} set from {len(tokenized_sources)} source(s)"
             )
-            # each tokens.bin is already raw uint16 (TokenizeSourceJob), so
-            # merging is a byte concatenation in the order given -- no parsing
+            separator = []
+            if len(tokenized_sources) > 1:
+                tokenizer = tokenized_sources[0].tokenizer.bind(root)
+                separator = tokenizer.encode(END_OF_TEXT)
+            # Each tokens.bin is raw uint16, including the inserted separator.
             merged = array("H")
-            for tokenized_source in tokenized_sources:
+            for index, tokenized_source in enumerate(tokenized_sources):
+                if index:
+                    merged.extend(separator)
                 merged.frombytes(tokenized_source.paths(root)["tokens"].read_bytes())
             path.write_bytes(merged.tobytes())
         worker.log.info("done")

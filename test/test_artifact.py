@@ -14,7 +14,7 @@ from typing import ClassVar
 
 from artifacts.core.artifact import MANIFEST, Artifact, Resources
 from artifacts.core.manifest import manifest_json
-from artifacts.sources import Source
+from artifacts.sources import Source, SourceURL
 from artifacts.tokenizers.bpe import Tokenizer
 
 
@@ -56,8 +56,8 @@ def build(artifact: Artifact, root: Path) -> None:
         path.touch()
 
 
-ODYSSEY = Source(name="odyssey", url="https://example.org/odyssey.txt")
-ILIAD = Source(name="iliad", url="https://example.org/iliad.txt")
+ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
+ILIAD = SourceURL(name="iliad", url="https://example.org/iliad.txt")
 
 
 def tokenizer(sources) -> Tokenizer:
@@ -81,7 +81,7 @@ class DefinitionTests(unittest.TestCase):
 
     def test_two_definitions_at_one_path_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "more than one definition"):
-            tokenizer((ODYSSEY, Source(name="odyssey", url="elsewhere")))
+            tokenizer((ODYSSEY, SourceURL(name="odyssey", url="elsewhere")))
 
     def test_an_empty_set_is_still_a_dependency(self):
         manifest = tokenizer(()).to_manifest()
@@ -207,7 +207,7 @@ class BindTests(unittest.TestCase):
     def test_bind_returns_the_stored_declaration_and_leaves_the_original(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            stored = Source(name="odyssey", url=ODYSSEY.url, commit="old")
+            stored = SourceURL(name="odyssey", url=ODYSSEY.url, commit="old")
             declare(stored, root)
             build(stored, root)
 
@@ -223,7 +223,7 @@ class BindTests(unittest.TestCase):
             declare(ODYSSEY, root)
             build(ODYSSEY, root)
             with self.assertRaisesRegex(ValueError, "different definition"):
-                Source(name="odyssey", url="elsewhere").bind(root)
+                SourceURL(name="odyssey", url="elsewhere").bind(root)
 
     def test_bind_refuses_an_undeclared_or_unbuilt_artifact(self):
         with TemporaryDirectory() as directory:

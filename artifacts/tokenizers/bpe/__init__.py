@@ -3,9 +3,10 @@ takes to use one once it's trained. The training loop that produces one lives
 in jobs.py; the two share this module's PAT/mergebpairs, which is exactly the
 pair that must not drift apart.
 
-`Tokenizer` is a core Artifact first: parameters (vocab_size, special_tokens,
-which sources), a uid derived from them, and the folder it owns. That much can
-be written down, hashed and declared before anything has been trained.
+`Tokenizer` is an artifacts.tokenizers.Tokenizer first: parameters
+(vocab_size, special_tokens, which sources), a uid derived from them, and the
+folder it owns. That much can be written down, hashed and declared before
+anything has been trained.
 
 It is also the thing you tokenize text with. The vocab and merges a training
 run produces are not parameters -- they're what the job wrote into the folder
@@ -23,7 +24,8 @@ from typing import ClassVar
 
 import regex as re
 
-from artifacts.core.artifact import Artifact, _digest
+from artifacts import tokenizers
+from artifacts.core.artifact import _digest
 from artifacts.sources import Source
 
 # lifting pretokenizer regex from tiktoken
@@ -102,11 +104,9 @@ def _read_state(data: dict) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]
 
 
 @dataclass(frozen=True)
-class Tokenizer(Artifact):
+class Tokenizer(tokenizers.Tokenizer):
     producer: ClassVar[str] = "artifacts.tokenizers.bpe.jobs.TokenizerJob"
 
-    vocab_size: int
-    special_tokens: tuple[str, ...]
     sources: frozenset[Source]  # a set: which sources trained it, not in what order
 
     @property
@@ -121,10 +121,6 @@ class Tokenizer(Artifact):
         )
         digest = _digest(self.vocab_size, self.special_tokens, sorted(s.uid for s in self.sources))
         return f"bpe-{vocab_label}-{digest}"
-
-    @property
-    def artifact_path(self) -> Path:
-        return Path("tokenizers") / self.uid
 
     @property
     def files(self) -> dict[str, str]:
@@ -199,7 +195,7 @@ class Tokenizer(Artifact):
 
     # -- tokenizing --------------------------------------------------------
 
-    def encode(self, text_input: str) -> list[int]:
+    def encode(self, text: str) -> list[int]:
         self._require("encoding")
         # sort by length - if a special token contains another one as a prefix,
         # we do not parse it short
@@ -211,7 +207,7 @@ class Tokenizer(Artifact):
             + ")"
         )
         segments = (
-            re.split(pattern, text_input) if self.special_tokens else [text_input]
+            re.split(pattern, text) if self.special_tokens else [text]
         )
         ids = []
         for segment in segments:
@@ -251,26 +247,4 @@ class Tokenizer(Artifact):
     def decode(self, ids: list[int]) -> str:
         self._require("decoding")
         return b"".join(self._vocab[id] for id in ids).decode("utf-8", errors="replace")
-
-
-@dataclass(frozen=True)
-class TokenizedSource(Artifact):
-    producer: ClassVar[str] = "artifacts.tokenizers.bpe.jobs.TokenizeSourceJob"
-
-    tokenizer: Tokenizer
-    source: Source
-
-    @property
-    def uid(self) -> str:
-        return f"{self.tokenizer.uid}-{self.source.uid}"
-
-    @property
-    def artifact_path(self) -> Path:
-        # nested under the tokenizer that produced it -- one `ls` shows every
-        # source a given tokenizer has been run over
-        return self.tokenizer.artifact_path / "bin" / self.source.uid
-
-    @property
-    def files(self) -> dict[str, str]:
-        return {"tokens": "tokens.bin"}
 

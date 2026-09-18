@@ -8,10 +8,11 @@ from tempfile import TemporaryDirectory
 
 import lab
 from artifacts.core.artifact import MANIFEST, Resources
-from artifacts.sources import Source
-from artifacts.tokenizers.bpe import TokenizedSource, Tokenizer
+from artifacts.sources import SourceURL
+from artifacts.tokenized import TokenizedSource
+from artifacts.tokenizers.bpe import Tokenizer
 
-ODYSSEY = Source(name="odyssey", url="https://example.org/odyssey.txt")
+ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
 TOKENIZER = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(ODYSSEY,))
 TOKENS = TokenizedSource(tokenizer=TOKENIZER, source=ODYSSEY)
 
@@ -58,11 +59,11 @@ class DeclareTests(unittest.TestCase):
             self.assertTrue((self.root / row["path"] / MANIFEST).is_file())
 
     def test_redeclaring_keeps_the_existing_manifest_and_reports_drift(self):
-        declare(Source(name="odyssey", url=ODYSSEY.url, commit="old"), self.root, commit=True)
+        declare(SourceURL(name="odyssey", url=ODYSSEY.url, commit="old"), self.root, commit=True)
         path = self.root / "sources/odyssey" / MANIFEST
         before = path.read_text()
 
-        requested = Source(name="odyssey", url=ODYSSEY.url, commit="new")
+        requested = SourceURL(name="odyssey", url=ODYSSEY.url, commit="new")
         report = declare(requested, self.root, commit=True)
         self.assertEqual(states(report), {"sources/odyssey": "declared"})
         self.assertTrue(report.rows[0]["drift"])
@@ -75,7 +76,7 @@ class DeclareTests(unittest.TestCase):
 
     def test_a_different_definition_at_a_published_path_is_a_conflict(self):
         declare(ODYSSEY, self.root, commit=True)
-        elsewhere = Source(name="odyssey", url="https://example.org/other.txt")
+        elsewhere = SourceURL(name="odyssey", url="https://example.org/other.txt")
 
         report = declare(elsewhere, self.root)  # preview: a report, not an error
         self.assertEqual(states(report), {"sources/odyssey": "conflict"})
@@ -89,7 +90,7 @@ class DeclareTests(unittest.TestCase):
 
     def test_a_conflicting_leaf_stops_the_whole_commit(self):
         declare(ODYSSEY, self.root, commit=True)
-        elsewhere = Source(name="odyssey", url="https://example.org/other.txt")
+        elsewhere = SourceURL(name="odyssey", url="https://example.org/other.txt")
         tokens = TokenizedSource(
             tokenizer=Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(elsewhere,)),
             source=elsewhere,
@@ -117,7 +118,7 @@ class DeclareTests(unittest.TestCase):
 
     def test_resource_differences_are_reported_without_blocking(self):
         declare(ODYSSEY, self.root, commit=True)
-        wanted = Source(name="odyssey", url=ODYSSEY.url, allocated_resources=Resources(cpu=4.0))
+        wanted = SourceURL(name="odyssey", url=ODYSSEY.url, allocated_resources=Resources(cpu=4.0))
         report = declare(wanted, self.root, commit=True)
         self.assertFalse(report.blockers)
         self.assertEqual(

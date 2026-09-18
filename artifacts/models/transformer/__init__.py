@@ -12,7 +12,7 @@ from artifacts.core.artifact import Artifact, _digest
 from artifacts.core.SGD.training import LoopConfig, TrainingParameters
 from artifacts.dataset import DataSet
 from artifacts.mappeddataset import MappedDataSet
-from artifacts.tokenizers.bpe import Tokenizer
+from artifacts.tokenizers import Tokenizer
 
 
 @dataclass(frozen=True)
@@ -104,13 +104,8 @@ class Pretraining(Artifact):
 
     @property
     def files(self) -> dict[str, str]:
-        # The final model and optimizer are this leg's durable artifact
-        # outputs. Failsafe checkpoints live under checkpoints/{step}/ and
-        # are intentionally undeclared: recovery state is job-owned and may
-        # differ after an interrupted run.
-        #
-        # progress is written last, after both final outputs are durable.
-        return {
-            "model": "model.obj",
-            "optimizer": "optimizer.obj",
-        }
+        # Model and optimizer state_dicts at end_step, in one file, are this
+        # leg's durable artifact output. Failsafe checkpoints live under
+        # checkpoints/{step}.pt and are intentionally undeclared: recovery
+        # state is job-owned and may differ after an interrupted run.
+        return {"model": "model.pt"}

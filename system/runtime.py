@@ -99,35 +99,37 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
             except Exception as exc:
                 logger.warning(f"heartbeat: history not fetched ({exc})")
 
+            # Ends itself at the sentinel rather than being cancelled: cancelling
+            # Modal's stream mid-wait trips its own teardown (aclose on a running
+            # generator), which surfaces as unretrieved task exceptions in the
+            # next call's log.
             async def follow():
                 async for entry in call.logs.stream.aio():
                     line = entry.message.rstrip("\r\n")
                     if line == sentinel:
                         caught_up.set()
-                    elif (entry.timestamp, entry.message) not in seen:
+                        return
+                    if (entry.timestamp, entry.message) not in seen:
                         lines.append(line)
 
-            following = asyncio.ensure_future(follow())
-            try:
-                while not finished.is_set():
-                    await asyncio.sleep(HEARTBEAT_SECONDS)
-                    try:
-                        await beats.put.aio(
-                            call_id,
-                            {
-                                "artifact_path": artifact_path,
-                                "last_beat_ts": time.time(),
-                                "progress": dict(worker.progress) or None,
-                            },
-                        )
-                    except Exception as exc:
-                        logger.warning(f"heartbeat: not recorded ({exc})")
-                    try:
-                        await call_logs.put.aio(call_id, list(lines))
-                    except Exception as exc:
-                        logger.warning(f"heartbeat: logs not published ({exc})")
-            finally:
-                following.cancel()
+            asyncio.ensure_future(follow())
+            while not finished.is_set():
+                await asyncio.sleep(HEARTBEAT_SECONDS)
+                try:
+                    await beats.put.aio(
+                        call_id,
+                        {
+                            "artifact_path": artifact_path,
+                            "last_beat_ts": time.time(),
+                            "progress": dict(worker.progress) or None,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(f"heartbeat: not recorded ({exc})")
+                try:
+                    await call_logs.put.aio(call_id, list(lines))
+                except Exception as exc:
+                    logger.warning(f"heartbeat: logs not published ({exc})")
 
         try:
             asyncio.run(main())

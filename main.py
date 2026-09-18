@@ -62,9 +62,9 @@ web_image = (
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
 
-worker_image = base_image.pip_install("numpy").add_local_python_source(
-    *CALL_SOURCE, *ARTIFACTS_SOURCE,
-)
+worker_image = base_image.pip_install(
+    "numpy", "torch", "einops"
+).add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 
 lab_image = (
     base_image.pip_install("numpy", "torch", "einops", "matplotlib", "jupyterlab")

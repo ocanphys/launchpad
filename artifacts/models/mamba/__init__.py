@@ -21,7 +21,7 @@ from artifacts.core.artifact import Artifact
 from artifacts.core.SGD.training import LoopConfig, TrainingParameters
 from artifacts.dataset import DataSet
 from artifacts.mappeddataset import MappedDataSet
-from artifacts.tokenizers.bpe import Tokenizer
+from artifacts.tokenizers import Tokenizer
 
 
 @dataclass(frozen=True)

@@ -8,11 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from artifacts.core.job import Job
-from artifacts.tokenizers.template import (
-    UNKNOWN,
-    TemplateTokenizedSource,
-    TemplateTokenizer,
-)
+from artifacts.tokenizers.template import UNKNOWN, TemplateTokenizer
 
 if TYPE_CHECKING:
     from system.runtime import Worker
@@ -75,23 +71,3 @@ class TemplateTokenizerJob(Job):
             )
         )
 
-
-class TemplateTokenizeSourceJob(Job):
-    artifact: TemplateTokenizedSource
-
-    def __init__(self, artifact: TemplateTokenizedSource):
-        super().__init__(artifact)
-        self.tokenizer = artifact.tokenizer
-        self.source = artifact.source
-
-    def run(self, root: Path, worker: "Worker") -> None:
-        worker.log.info(f"tokenizing {self.source.name}")
-
-        tokenizer = self.tokenizer.bind(root)  # reads the tokenizer.json its job wrote
-        text = self.source.paths(root)["raw text"].read_text()
-        token_ids = tokenizer.encode(text)
-        self.artifact.paths(root)["tokens"].write_text(
-            " ".join(map(str, token_ids))
-        )  # mock binary encoding as whitespace-joined ids
-
-        worker.log.info(f"wrote {len(token_ids)} tokens for {self.source.name}")

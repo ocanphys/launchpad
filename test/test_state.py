@@ -11,10 +11,11 @@ from typing import ClassVar
 import lab
 import main
 from artifacts.core.artifact import MANIFEST, Artifact
-from artifacts.sources import Source
-from artifacts.tokenizers.bpe import TokenizedSource, Tokenizer
+from artifacts.sources import Source, SourceURL
+from artifacts.tokenized import TokenizedSource
+from artifacts.tokenizers.bpe import Tokenizer
 
-ODYSSEY = Source(name="odyssey", url="https://example.org/odyssey.txt")
+ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
 TOKENIZER = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(ODYSSEY,))
 TOKENS = TokenizedSource(tokenizer=TOKENIZER, source=ODYSSEY)
 

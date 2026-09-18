@@ -28,7 +28,6 @@ class LRSchedule:
     min_learning_rate: float
     warmup_iters: int
     cosine_cycle_iters: int
-    fn: str = "artifacts.core.lr_schedule.lr_cosine_schedule"  # resolved worker-side via artifacts.core.locate.locate
 
 
 @dataclass(frozen=True)
@@ -36,14 +35,19 @@ class TrainingParameters:
     """What changes the optimization trajectory, including its seed and
     duration -- as opposed to LoopConfig, which controls observation and
     recovery cadence.
+
+    ``optimizer`` and ``lr_schedule_fn`` are dotted paths, resolved worker-side
+    via artifacts.core.locate.locate; ``optimizer_parameters`` and
+    ``lr_schedule`` are exactly the keyword arguments each is called with.
     """
 
     total_steps: int
     batch_size: int
     max_norm: int
     lr_schedule: LRSchedule
-    optimizer: str  # dotted path to a torch.optim.Optimizer subclass; resolved worker-side via artifacts.core.locate.locate
+    optimizer: str  # a torch.optim.Optimizer subclass
     optimizer_parameters: OptimizerParameters
+    lr_schedule_fn: str = "artifacts.core.SGD.lr_schedule.lr_cosine_schedule"
     seed: int = 0
 
 

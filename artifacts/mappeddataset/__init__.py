@@ -6,36 +6,40 @@ from typing import TYPE_CHECKING, ClassVar
 
 from artifacts.core.artifact import Artifact, _digest
 from artifacts.sources import Source
-from artifacts.tokenizers.bpe import TokenizedSource, Tokenizer
+from artifacts.tokenized import TokenizedSource
+from artifacts.tokenizers import Tokenizer
 
 if TYPE_CHECKING:
     from artifacts.mappeddataset.tokenstream import TokenStream
 
+END_OF_TEXT = "<|endoftext|>"
+
+
+def require_separator(name: str, sources: tuple[TokenizedSource, ...]) -> None:
+    """Raises unless every tokenizer in a multi-source split can produce the
+    separator that goes between its sources."""
+    if len(sources) > 1 and any(
+        END_OF_TEXT not in source.tokenizer.special_tokens for source in sources
+    ):
+        raise ValueError(
+            f"MappedDataSet.{name} with multiple sources requires {END_OF_TEXT!r} "
+            "in each tokenizer's special_tokens"
+        )
+
 
 @dataclass(frozen=True)
 class MappedDataSet(Artifact):
-    """A training set that owns no bytes of its own and no folder of its
-    own outputs either: it's done exactly when the TokenizedSources it
-    depends on are (see `completion_paths` below), and its bound object is
-    a TokenStream per split (artifacts/mappeddataset/tokenstream.py) that
-    serves windows straight out of each source's own tokens.bin via memmap.
+    """A training set that owns no bytes: it is done exactly when the
+    TokenizedSources it depends on are (`completion_paths`), and its bound
+    object is a TokenStream per split (artifacts/mappeddataset/tokenstream.py)
+    that reads like one memmap over every source's own tokens.bin, with
+    <|endoftext|> between sources. `from_sources` builds one from a tokenizer
+    and raw sources.
 
-    A different kind of artifact from artifacts.dataset.DataSet, not just
-    a variant of it -- one physically copies tokens, this one never writes
-    anything, so each lives in its own sibling package the way tokenizers/
-    and sources/ are separate from each other.
-
-    It still gets a folder (`mappeddatasets/<uid>`) and still gets declared
-    the same way as everything else -- that's what lets `Artifact.load`,
-    resolution, and every notebook that already knows how to find an
-    artifact by path find this one too. The folder just never holds
-    anything a job wrote; its manifest is the only file in it.
-
-    Shared, like DataSet -- no run_id, identity a digest over the tokenizer
-    and source lists, the same pattern as Tokenizer/TokenizedSource. The
-    difference from DataSet is only whether the bytes get copied: DataSet
-    still writes its own train.bin/valid.bin (shared across runs, but a real
-    file); this one never writes anything at all.
+    Its folder (`mappeddatasets/<uid>`) holds only the manifest, which is what
+    lets `Artifact.load`, resolution and the notebooks find it like anything
+    else. Shared like DataSet: no run_id, identity a digest over the ordered
+    source lists.
     """
 
     producer: ClassVar[None] = None  # nothing to write: done when its sources are
@@ -43,12 +47,17 @@ class MappedDataSet(Artifact):
     train_set: tuple[TokenizedSource, ...]
     valid_set: tuple[TokenizedSource, ...]
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        require_separator("train_set", self.train_set)
+        require_separator("valid_set", self.valid_set)
+
     @classmethod
     def from_sources(
         cls,
         tokenizer: Tokenizer,
-        train_sources: list[Source],
-        valid_sources: list[Source],
+        train_sources: tuple[Source, ...],
+        valid_sources: tuple[Source, ...],
     ) -> MappedDataSet:
         return cls(
             train_set=tuple(TokenizedSource(tokenizer, s) for s in train_sources),
@@ -59,11 +68,14 @@ class MappedDataSet(Artifact):
     def uid(self) -> str:
         # order is identifying here -- unlike Tokenizer.sources ("order
         # doesn't identify it"), the same sources in a different order stitch
-        # into a different virtual stream at every position past the first
-        # source, so this must NOT sort train_set/valid_set away.
+        # into a different stream at every position past the first source,
+        # so this must NOT sort train_set/valid_set away.
         digest = _digest(
             [ts.uid for ts in self.train_set], [ts.uid for ts in self.valid_set]
         )
+        if len(self.train_set) > 1 or len(self.valid_set) > 1:
+            # The separator changes the stream and therefore its identity.
+            digest = _digest(digest, END_OF_TEXT)
         return f"mapped-{digest}"
 
     @property
@@ -82,31 +94,24 @@ class MappedDataSet(Artifact):
         return [ts.paths(root)["tokens"] for ts in (*self.train_set, *self.valid_set)]
 
     # -- the bound view ------------------------------------------------------
-    #
-    # _load builds the view directly from self.train_set/self.valid_set
-    # (always present, whether this artifact came from a manifest or a
-    # fresh construction) plus each TokenizedSource's own
-    # paths(root)["tokens"] -- there is nothing of this artifact's own left
-    # to read back, by design.
 
     def _load(self, root: Path) -> None:
+        """Artifact._load's hook: one TokenStream per split, offsets worked out
+        from the bin files' lengths. The separator id comes from the split's
+        tokenizer, whose tokenizer.json every tokens.bin was written from."""
         # local import: numpy only loads when something actually binds this
         from artifacts.mappeddataset.tokenstream import TokenStream
 
-        # object.__setattr__ because the dataclass is frozen -- but `self`
-        # here is the object Artifact.bind read from the stored manifest,
-        # never the one bind() was called on, so this is invisible to whoever
-        # is still holding the unbound original.
-        object.__setattr__(
-            self,
-            "_train_tokens",
-            TokenStream([ts.paths(root)["tokens"] for ts in self.train_set]),
-        )
-        object.__setattr__(
-            self,
-            "_valid_tokens",
-            TokenStream([ts.paths(root)["tokens"] for ts in self.valid_set]),
-        )
+        for name, sources in (("_train_tokens", self.train_set), ("_valid_tokens", self.valid_set)):
+            separator = None
+            if len(sources) > 1:
+                [separator] = sources[0].tokenizer.bind(root).encode(END_OF_TEXT)
+            stream = TokenStream([ts.paths(root)["tokens"] for ts in sources], separator)
+            # object.__setattr__ because the dataclass is frozen -- `self` here
+            # is the object Artifact.bind read from the stored manifest, never
+            # the one bind() was called on, so this is invisible to whoever is
+            # still holding the unbound original.
+            object.__setattr__(self, name, stream)
 
     @property
     def bound(self) -> bool:
