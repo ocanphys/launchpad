@@ -164,7 +164,7 @@ New definitions capture the process's defining revision lazily: local HEAD, or t
 
 `commit` describes the definition. It neither selects execution code nor proves which code produced the outputs. Execution uses deployed code. Resources configure that execution; unspecified dimensions are omitted so Modal supplies its platform defaults.
 
-Once written, a manifest is immutable. A matching redeclaration retains its existing commit and resources. The manifest at an artifact's own path is authoritative for execution; an embedded copy in a parent's manifest cannot override it. General annotations, mutable labels, and execution histories are outside this manifest schema.
+Once written, a manifest's definition and commit are immutable. A matching redeclaration retains both; only its resources follow the latest committed declaration, since they configure the next execution and nothing else. The manifest at an artifact's own path is authoritative for execution; an embedded copy in a parent's manifest cannot override it. General annotations, mutable labels, and execution histories are outside this manifest schema.
 
 ## 4. Storage, status, and binding
 
@@ -273,6 +273,10 @@ The source occurs once even though both the tokenizer and tokenized source refer
 
 `lab` is the notebook API, imported with `import lab`. It has one entry point: declaration. Construction, loading, and binding stay on the artifact classes and instances — `Tokenizer(...)`, `Artifact.load(path)`, `tokenizer.bind()` — and all read `STORAGE` directly (§4). There is nothing to initialize.
 
+A committed declaration whose requested artifact belongs to a run (a `Training`, with a `run_id`) and was created by that commit also copies the notebook it ran from to `runs/<run_id>/declare-<uid>.ipynb`, before the commit, so the copy and the manifests land together. The notebook is the kernel's own file (`lab.current_notebook()`, from jupyter_server's `JPY_SESSION_NAME`); `local.declare_on_volume` reads it on the laptop and ships it along. Preview, a redeclaration, and a shared artifact write no copy.
+
+`lab.refresh()` reloads the volume and `lab.save()` commits it, the two mount operations a notebook in the lab container needs by hand: see files a job wrote elsewhere, and make a saved notebook outlive the container. Both are refused outside a container with the mount.
+
 The one other name it exports is `lab.worker`, a stand-in execution context for running a single job by hand from a cell, `job.run(root, lab.worker)`: no lease, no heartbeat, logging to the console. It is not configuration, and nothing in `lab` reads it.
 
 ```python
@@ -300,21 +304,24 @@ lab.declare(
     commit=False,
     strict_commit=False,
     verbose=False,
+    notebook=None,
 ) -> DeclarationReport
 ```
 
 `verbose` controls how the result is printed; it does not change resolution,
 inspection, or writes. `root` is for tests and manual scripts — a notebook
-never passes it, and gets `STORAGE`.
+never passes it, and gets `STORAGE`. `notebook` is the bytes of the declaring
+notebook when the caller has them and no kernel; a notebook never passes it
+either.
 
 The algorithm performs one operation against its root:
 
 1. Resolve the requested graph.
 2. Inspect each path once and compare existing manifests using definition agreement.
-3. Record commit drift per retained graph node. It blocks only with `strict_commit=True`. Report resource differences without blocking; stored resources continue to apply.
+3. Record commit drift and resource differences per retained graph node. Drift blocks only with `strict_commit=True`; resource differences never block.
 4. Collect one row per path with state, drift, and differences. Preview returns these observations in a report without writes.
-5. With `commit=True`, refuse before writing if any row blocks. Otherwise publish manifests for `new` artifacts in dependency order, retaining every existing matching manifest. Reload the volume before inspection and commit successful writes before returning — the one place this contract touches volume mechanics, internal to this function, not exposed as a separate call.
-6. Return a report recording created manifests and the resulting observed states. Reuse the resolved artifact list and recheck changed paths as needed; do not resolve the graph again.
+5. With `commit=True`, refuse before writing if any row blocks. Otherwise publish manifests for `new` artifacts in dependency order, and rewrite an existing matching manifest whose resources differ with the requested resources, its definition and commit kept. Reload the volume before inspection and commit successful writes before returning — the one place this contract touches volume mechanics, internal to this function, not exposed as a separate call.
+6. Return a report recording created and updated manifests and the resulting observed states. Reuse the resolved artifact list and recheck changed paths as needed; do not resolve the graph again.
 
 Example: `sources/odyssey` and `tokenizers/bpe-1.0k-feeeeefa90` are already
 declared and built (the tokenizer's manifest recorded an older commit than
@@ -329,31 +336,40 @@ tokenized/bpe-1.0k-feeeeefa90/odyssey            new
 2 done, 1 new
 ok -- 1 to declare
 
->>> report.rows
+>>> report.rows   # commit and resources are [stored, requested] pairs
 [{"path": "sources/odyssey", "state": "done", "drift": False,
-  "differences": {}, "created": False},
+  "differences": {}, "created": False, "updated": False, ...},
  {"path": "tokenizers/bpe-1.0k-feeeeefa90", "state": "done", "drift": True,
-  "differences": {}, "created": False},
+  "differences": {}, "created": False, "updated": False, ...},
  {"path": "tokenized/bpe-1.0k-feeeeefa90/odyssey", "state": "new",
-  "drift": False, "differences": {}, "created": False}]
+  "drift": False, "differences": {}, "created": False, "updated": False, ...}]
 
 >>> lab.declare(tokens, commit=True)   # same rows; the new one gets published
 sources/odyssey                                      done
 tokenizers/bpe-1.0k-feeeeefa90                        done   (drift: a1b2c3d -> e4f5a6b)
 tokenized/bpe-1.0k-feeeeefa90/odyssey            done   (created)
 
-1 manifest published: tokenized/bpe-1.0k-feeeeefa90/odyssey
+1 manifest written: tokenized/bpe-1.0k-feeeeefa90/odyssey
+```
+
+Requesting the tokenizer again with `allocated_resources=Resources(cpu=4.0)`
+reports the difference in preview and writes it on commit:
+
+```python
+tokenizers/bpe-1.0k-feeeeefa90                        done   (drift: a1b2c3d -> e4f5a6b; resources differ, requested apply on commit: {} -> {"cpu": 4.0})
+...
+tokenizers/bpe-1.0k-feeeeefa90                        done   (drift: a1b2c3d -> e4f5a6b; resources updated: {} -> {"cpu": 4.0})
 ```
 
 `drift` alone never blocks (only `strict_commit=True` would); `verbose=False`
 still shows drift, since it isn't a blocker reason, only `conflict` and
 `undeclared` rows hide their detail without `verbose`.
 
-`DeclarationReport` is serializable data: rows include path, state, drift, differences, and whether a manifest was created. Counts and the verdict are derived from the rows. `declare` prints a concise summary; `verbose` expands details. Storage conflicts return a report in preview and raise with that report attached when committing. Structurally invalid input graphs raise before a report exists. Infrastructure failures propagate with the affected operation and path.
+`DeclarationReport` is serializable data: rows include path, state, drift, differences, the stored and requested commit and resources, and whether a manifest was created or updated. Counts and the verdict are derived from the rows. `declare` prints a concise summary; `verbose` expands details. Storage conflicts return a report in preview and raise with that report attached when committing. Structurally invalid input graphs raise before a report exists. Infrastructure failures propagate with the affected operation and path.
 
 Preview never creates folders or temporary files. Definition and completion checks remain part of the artifact contract.
 
-The API is one `declare` function, one `resolve` function, one `state` function, and no session configuration.
+The API is one `declare` function, one `resolve` function, one `state` function, the two volume verbs `refresh` and `save`, and no session configuration.
 
 ### Publication
 

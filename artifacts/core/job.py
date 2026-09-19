@@ -1,7 +1,7 @@
 """The base job model -- what a job IS, in general: it produces exactly one
 artifact, which is all it is given. No concrete job lives here; see
 artifacts/sources/, artifacts/tokenizers/, artifacts/tokenized/,
-artifacts/dataset/, artifacts/models/* for those (spec.md, section 4).
+artifacts/dataset/, artifacts/stages/* for those (spec.md, section 4).
 
 One job, one artifact. That artifact may comprise several files, but they
 all live in its folder, and the resolver has already created that folder

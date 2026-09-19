@@ -4,12 +4,19 @@
     report = lab.declare(tokenizer)               # preview, writes nothing
     report = lab.declare(tokenizer, commit=True)  # publish missing manifests
 
+A committed declaration of a run also copies the notebook it ran from to
+`runs/<run_id>/declare-<uid>.ipynb`, so the volume keeps what declared it.
+
 Construction, loading and binding stay on the artifact classes --
 `Tokenizer(...)`, `Artifact.load(path)`, `tokenizer.bind()` -- and every one
 of them reads STORAGE unless handed another root. Nothing to initialize.
 
-`worker` is a stand-in execution context for running one job by hand from a
-cell, `job.run(root, lab.worker)`: no lease, no heartbeat, log to the console.
+Two volume verbs for the lab container: `refresh()` reloads the mount so
+files written elsewhere (a job's outputs, a notebook saved in another lab)
+appear; `save()` commits it so a notebook saved in JupyterLab outlives the
+container. `worker` is a stand-in execution context for running one job by
+hand from a cell, `job.run(root, lab.worker)`: no lease, no heartbeat, log to
+the console.
 """
 
 from __future__ import annotations
@@ -19,7 +26,7 @@ import logging
 import os
 import tempfile
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import modal
@@ -27,6 +34,7 @@ import modal
 from artifacts.core.artifact import MANIFEST, Artifact
 from artifacts.core.manifest import manifest_json
 from artifacts.core.resolve import resolve
+from artifacts.core.SGD.training import Training
 from config import STORAGE, VOLUME_NAME
 from system.runtime import Worker
 
@@ -52,7 +60,8 @@ class DeclarationError(ValueError):
 @dataclass
 class DeclarationReport:
     """One row per resolved path: path, state, drift, differences, created,
-    and the stored and requested commits. Counts and the verdict are derived."""
+    updated, and the stored and requested commits and resources. Counts and
+    the verdict are derived."""
 
     rows: list[dict]
     strict_commit: bool = False
@@ -75,8 +84,10 @@ class DeclarationReport:
             if row["drift"]:
                 stored, requested = row["commit"]
                 notes.append(f"drift: {stored[:7]} -> {requested[:7]}")
-            if "allocated_resources" in row["differences"]:
-                notes.append("resources differ, stored apply")
+            stored, requested = row["resources"]
+            if stored is not None and stored != requested:
+                verb = "updated" if row["updated"] else "differ, requested apply on commit"
+                notes.append(f"resources {verb}: {_set(stored)} -> {_set(requested)}")
             if row["created"]:
                 notes.append("created")
             line = f"{row['path']:<{width}}{row['state']:<10}"
@@ -89,19 +100,24 @@ class DeclarationReport:
                     )
         counts = Counter(row["state"] for row in self.rows)
         summary = ", ".join(f"{n} {state}" for state, n in sorted(counts.items()))
-        created = [row["path"] for row in self.rows if row["created"]]
+        written = [row["path"] for row in self.rows if row["created"] or row["updated"]]
         if self.blockers:
             verdict = f"BLOCKED -- {len(self.blockers)} to resolve"
             if not verbose:
                 verdict += " (verbose=True to see why)"
-        elif created:
-            plural = "s" if len(created) != 1 else ""
-            verdict = f"{len(created)} manifest{plural} published: {', '.join(created)}"
+        elif written:
+            plural = "s" if len(written) != 1 else ""
+            verdict = f"{len(written)} manifest{plural} written: {', '.join(written)}"
         else:
             verdict = f"ok -- {counts['new']} to declare"
         return "\n".join([*lines, "", summary, verdict])
 
     __str__ = render
+
+
+def _set(resources: dict) -> str:
+    """The dimensions a Resources dict sets, as JSON: `{"gpu_type": "A100"}`."""
+    return json.dumps({k: v for k, v in resources.items() if v is not None})
 
 
 def _leaves(value: object, prefix: str = "") -> dict[str, object]:
@@ -132,7 +148,9 @@ def _inspect(artifact: Artifact, root: Path) -> dict:
         "drift": False,
         "differences": {},
         "created": False,
+        "updated": False,
         "commit": [None, artifact.commit],
+        "resources": [None, asdict(artifact.allocated_resources)],
     }
     if not footprint.manifest:
         present = [desc for desc, there in footprint.outputs.items() if there]
@@ -148,6 +166,7 @@ def _inspect(artifact: Artifact, root: Path) -> dict:
         return row
     row["commit"] = [stored.commit, artifact.commit]
     row["drift"] = stored.commit != artifact.commit
+    row["resources"] = [asdict(stored.allocated_resources), asdict(artifact.allocated_resources)]
     if stored != artifact:
         row["state"] = "conflict"
         on_disk, wanted = _leaves(stored.to_manifest()), _leaves(artifact.to_manifest())
@@ -157,13 +176,6 @@ def _inspect(artifact: Artifact, root: Path) -> dict:
             if on_disk.get(key) != wanted.get(key)
         }
         return row
-    if stored.allocated_resources != artifact.allocated_resources:
-        row["differences"] = {
-            "allocated_resources": [
-                asdict(stored.allocated_resources),
-                asdict(artifact.allocated_resources),
-            ]
-        }
     present = list(footprint.completion.values())
     row["state"] = "done" if all(present) else "partial" if any(present) else "declared"
     return row
@@ -189,6 +201,42 @@ def _outside_volume(op):
         os.chdir(cwd)
 
 
+def refresh() -> None:
+    """Reloads the volume, so files written outside this container appear.
+    Only a container with the volume mounted can do this; Modal refuses
+    anywhere else."""
+    _outside_volume(_volume().reload)
+
+
+def save() -> None:
+    """Commits the volume, so what is on disk here outlives this container:
+    save the notebook in JupyterLab first, then `lab.save()`. Only a
+    container with the volume mounted can do this; Modal refuses anywhere
+    else."""
+    _outside_volume(_volume().commit)
+
+
+def current_notebook() -> bytes | None:
+    """The notebook file this kernel runs, or None outside a notebook.
+
+    jupyter_server starts every kernel with JPY_SESSION_NAME set to its
+    notebook's path; VS Code leaves `__vsc_ipynb_file__` in the namespace
+    instead. A notebook renamed since its kernel started is a missing file
+    here, which raises rather than being skipped.
+    """
+    path = os.environ.get("JPY_SESSION_NAME")
+    if path is None:
+        try:
+            from IPython import get_ipython
+        except ImportError:  # a worker image: no notebook, by construction
+            return None
+        kernel = get_ipython()
+        path = kernel.user_ns.get("__vsc_ipynb_file__") if kernel else None
+    if path is None:
+        return None
+    return (Path(STORAGE) / path).read_bytes()  # absolute `path` wins the join
+
+
 def declare(
     artifact: Artifact,
     *,
@@ -196,38 +244,61 @@ def declare(
     commit: bool = False,
     strict_commit: bool = False,
     verbose: bool = False,
+    notebook: bytes | None = None,
 ) -> DeclarationReport:
     """The declaration report for `artifact` and everything it is built from,
-    printed and returned; with `commit`, missing manifests are published first.
+    printed and returned; with `commit`, missing manifests are published first
+    and existing ones whose resources differ from those requested take the
+    requested ones, everything else in them kept.
 
     Preview writes nothing and returns blockers as rows. Commit refuses over
     any blocker -- a conflict, an undeclared folder, or drift under
     `strict_commit` -- and raises DeclarationError with the report attached
-    before touching disk. Existing manifests are never rewritten. `root` is
+    before touching disk. `root` is
     for tests and scripts; a notebook gets STORAGE. The volume is reloaded
     before inspection and committed after writes only when this runs inside
     a container and `root` is its mount: anywhere else `/storage` is a plain
     folder with nothing behind it to reload.
+
+    A commit that creates a run's artifact (one with a `run_id`) also writes
+    the declaring notebook to `runs/<run_id>/declare-<uid>.ipynb`: the
+    kernel's own by default, or the bytes handed in as `notebook` by a
+    caller that has them and no kernel (`local.declare_on_volume`).
     """
     root = Path(root)
     on_volume = root == Path(STORAGE) and not modal.is_local()
     graph = resolve(artifact)
+    if commit and notebook is None:
+        notebook = current_notebook()
     if on_volume:
-        _outside_volume(_volume().reload)
+        refresh()
     rows = [_inspect(node, root) for node in graph]
     report = DeclarationReport(rows, strict_commit)
     if commit:
         if report.blockers:
             raise DeclarationError(report, verbose)
         for node, row in zip(graph, rows):
-            if row["state"] != "new":
+            stored, requested = row["resources"]
+            if row["state"] == "new":
+                manifest = node.to_manifest()
+            elif stored != requested:
+                on_disk = Artifact.load(node.artifact_path, root)
+                manifest = replace(on_disk, allocated_resources=node.allocated_resources).to_manifest()
+            else:
                 continue
             path = root / node.artifact_path / MANIFEST
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(manifest_json(node.to_manifest()))
-            row.update(_inspect(node, root), created=True)
+            path.write_text(manifest_json(manifest))
+            if row["state"] == "new":
+                row.update(_inspect(node, root), created=True)
+            else:  # keep the pair, so the report shows what changed to what
+                row.update(_inspect(node, root), updated=True, resources=[stored, requested])
+        if rows[-1]["created"] and notebook is not None and isinstance(artifact, Training):
+            copy = root / "runs" / artifact.run_id / f"declare-{artifact.uid}.ipynb"
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(notebook)
         if on_volume:
-            _outside_volume(_volume().commit)
+            save()
     print(report.render(verbose))
     return report
 
