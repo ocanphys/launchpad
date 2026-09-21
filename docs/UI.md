@@ -110,12 +110,11 @@ silently failed doesn't leave the button frozen forever.
 
 ## The artifact page
 
-`#/artifact/<path>` fetches one thing, `/manifest/<path>`
-(`main.py`'s `artifact_manifest_summary`): type, own parameters, and one link
-per direct dependency. Dependencies are named, not inlined -- clicking one
-navigates to *its* page rather than the whole tree being dumped on one screen.
-A missing manifest (declared but not built yet) is a message on the page, not
-an error state.
+`#/artifact/<path>` reads its own entry out of the same `/state` map the
+table draws from: type, own parameters, and one link per direct dependency.
+Dependencies are named, not inlined -- clicking one navigates to *its* page
+rather than the whole tree being dumped on one screen. A path with no entry
+(declared but not built yet) is a message on the page, not an error state.
 
 Below that, what every call that ever worked on the artifact said, as one
 stream in time order, each line tagged with its call (short id, full on
@@ -142,8 +141,3 @@ reload cannot run while it has a file open -- see [QUEUES.md](QUEUES.md)
   Nothing prunes old ones from that `modal.Dict`, so the snapshot's cost
   grows with the deployment's total call history, not its current
   active-call count.
-- **`/manifest/<path>` is the last request that touches the mount.** One
-  small read, against a volume the refresh thread reloads on its own clock
-  (see the README). Small enough to live with; the way to close it for good
-  is to fold the summary into what that thread already computes, since it has
-  every artifact loaded in front of it already.

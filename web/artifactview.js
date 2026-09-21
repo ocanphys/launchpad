@@ -2,9 +2,10 @@
 // was built from, its training curves if it has any, and what every call
 // that ever worked on it said.
 //
-// No state and no network of its own: app.js fetches `/manifest/<path>` and
+// No state and no network of its own: app.js fetches `/state` and
 // `/logs/artifact/<path>` in parallel and calls renderArtifactView(container,
-// manifest, logs). The worker files its own output in a jsonl beside the
+// entry, logs), `entry` being this artifact's own entry in the state map,
+// or undefined for one with no manifest. The worker files its own output in a jsonl beside the
 // artifact and in the `call_logs` Dict (docs/LOGGING.md); `logs` here is
 // `/logs/artifact/<path>`'s response, straight from that Dict -- the one
 // container serving this dashboard opens no log file while it runs, because
@@ -21,8 +22,8 @@ let expandedParams = false;
 
 // A parameter's value: primitives print plain, anything richer (a list, a
 // nested config) prints as JSON, compact or indented. Dependency values
-// never reach here -- manifest_endpoint's own parameters/dependencies split
-// already keeps those out of `parameters`.
+// never reach here -- state()'s own parameters/dependencies split already
+// keeps those out of `parameters`.
 function paramValue(value) {
   if (value === null || typeof value !== "object") return String(value);
   return JSON.stringify(value, null, expandedParams ? 2 : 0);
@@ -33,9 +34,9 @@ function paramValue(value) {
 // manifests, so drilling further is a click to that artifact's own page
 // (where its own type and parameters live) rather than the whole tree being
 // dumped on this one.
-function summary(manifest) {
-  const params = Object.entries(manifest.parameters || {});
-  const deps = manifest.depends_on || [];
+function summary(entry) {
+  const params = Object.entries(entry.parameters || {});
+  const deps = entry.depends_on || [];
   const nested = params.some(([, value]) => value !== null && typeof value === "object");
   const list = el("div", { class: "summary-params" });
   const render = () =>
@@ -49,7 +50,7 @@ function summary(manifest) {
 
   return el("div", { class: "artifact-summary" },
     el("div", { class: "summary-type" },
-      manifest.type,
+      entry.type,
       nested
         ? el("label", { class: "log-filter" },
             el("input", {
@@ -295,16 +296,18 @@ export function renderArtifactPending(container, artifactPath) {
   );
 }
 
-export function renderArtifactView(container, manifest, logsPayload) {
+export function renderArtifactView(container, entry, logsPayload) {
   const nodes = [el("p", { class: "view-back" }, el("a", { href: "#/", text: "← dashboard" }))];
 
-  // `error` covers both "no manifest yet" (declared, not built -- a normal
-  // state) and a manifest that wouldn't load, which read the same to a reader
-  // of this page: there is nothing to show and the reason is the message.
-  if (!manifest || manifest.error) {
-    nodes.push(el("p", { class: "empty", text: (manifest && manifest.error) || "loading…" }));
+  // No entry (declared, not built -- a normal state) and a manifest that
+  // wouldn't load read the same to a reader of this page: there is nothing
+  // to show and the reason is the message.
+  if (!entry) {
+    nodes.push(el("p", { class: "empty", text: "not built yet -- no manifest" }));
+  } else if (entry.error) {
+    nodes.push(el("p", { class: "empty", text: entry.error }));
   } else {
-    nodes.push(summary(manifest));
+    nodes.push(summary(entry));
   }
 
   // Logs render independently of whether the manifest loaded -- a call can

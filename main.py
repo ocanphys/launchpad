@@ -113,8 +113,7 @@ def state(root: Path = Path(STORAGE), beat_records: dict | None = None) -> dict[
 
     `parameters` is what an artifact's own page shows beyond what a row does
     -- computed here, on the refresh thread, rather than read off the mount
-    per request, so no request handler touches the volume at all (see
-    `/manifest`).
+    per request, so no request handler touches the volume at all.
 
     A manifest that cannot be read is an entry with status "conflict" and
     its `error`, and the scan continues. `blocked_by` is every direct
@@ -387,38 +386,6 @@ def leasebook():
             if name not in dicts:
                 return {"error": f"no Dict {name!r}; one of {sorted(dicts)}"}
             return dict(dicts[name].items())
-
-        # What an artifact's own page shows: type, own parameters, and the
-        # paths of what it's built from. Served out of the same computed
-        # state `/state` answers from -- a dict lookup, not a mount read.
-        #
-        # It used to read the manifest off the volume per request, which is
-        # what the refresh thread above exists to avoid: that read raced the
-        # thread's own `volume.reload()` (every STATE_REFRESH_SECONDS), and a
-        # read landing mid-reload came back as "no manifest", so an artifact's
-        # page flickered between its metadata and a "not built yet" line every
-        # couple of seconds. The same collision took the other side too -- a
-        # reload can't run while this container holds a file open on the mount,
-        # so a read in flight could fail the refresh pass instead. No request
-        # handler touches the volume now, and neither can happen.
-        @api.get("/manifest/{artifact_path:path}")
-        def manifest_endpoint(artifact_path: str) -> dict:
-            if not safe_relpath(artifact_path):
-                return {"artifact_path": artifact_path, "error": "invalid artifact_path"}
-            entry = latest["value"]["artifacts"].get(artifact_path)
-            if entry is None:
-                return {"artifact_path": artifact_path, "error": "not built yet -- no manifest"}
-            if entry["parameters"] is None:
-                # Loaded from a manifest that wouldn't read -- `state` already
-                # has the reason, and it's the same string this route used to
-                # hand back from its own `except`.
-                return {"artifact_path": artifact_path, "error": entry["error"]}
-            return {
-                "artifact_path": artifact_path,
-                "type": entry["type"],
-                "parameters": entry["parameters"],
-                "depends_on": entry["depends_on"],
-            }
 
         # Everything else -- index.html at "/" and its same-origin JS modules
         # (app.js, el.js, render.js) -- is a static file under WEB_DIR. Mounted

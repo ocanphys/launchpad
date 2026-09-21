@@ -108,9 +108,8 @@ its own, and JupyterLab's own autosave does the rest.
     a reload. Never slower than that, never fresher than the last pass.
     Published by a single key assignment, which the GIL makes atomic, so
     there is nothing for a lock to protect.
-  - `/manifest/{artifact_path:path}`: reads one manifest, in the request. The
-    last thing here that touches the mount outside the refresh thread, and
-    the only one left small enough not to matter -- a reload replaces the
+    An artifact's own page reads its type, parameters and dependencies out
+    of this same map; no request touches the mount. A reload replaces the
     tree rather than refreshing it, so anything that *walks* the volume in a
     request is asking to watch a file it just listed disappear
     ([docs/QUEUES.md](docs/QUEUES.md) §3.3). Log files are why that rule

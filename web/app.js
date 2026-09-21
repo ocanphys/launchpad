@@ -176,26 +176,27 @@ async function pollTable(token) {
 
 // --- artifact view poll --------------------------------------------------------
 
-// One artifact's drill-down: its manifest summary, plus every call that has
-// ever worked on it, aggregated -- `logs/artifact/<path>` (see main.py's
-// artifact_call_logs), a Dict read same as everywhere else here, never a
-// file (see artifactview.js). Two fetches, in parallel: the manifest can
-// 404-shaped-error (not built yet) independently of whether any call has
-// ever touched this artifact, so one failing is never a reason to hide the
-// other.
+// One artifact's drill-down: its entry in the same `state` map the table
+// draws from (type, own parameters, what it depends on), plus every call
+// that has ever worked on it, aggregated -- `logs/artifact/<path>` (see
+// main.py's artifact_call_logs), a Dict read same as everywhere else here,
+// never a file (see artifactview.js). Two fetches, in parallel. The state
+// map is kept as lastPayload too, so going back to the table is instant.
 //
 // `token` guards against a stale poll the same way pollTable's does -- see
 // its comment for why this matters, same race, same fix.
 async function pollArtifactView(path, token) {
   try {
-    const [manifestRes, logsRes] = await Promise.all([
-      fetch(`manifest/${path}`, { cache: "no-store" }),
+    const [stateRes, logsRes] = await Promise.all([
+      fetch("state", { cache: "no-store" }),
       fetch(`logs/artifact/${path}`, { cache: "no-store" }),
     ]);
-    const manifest = await manifestRes.json();
+    if (!stateRes.ok) throw new Error("HTTP " + stateRes.status);
+    const states = await stateRes.json();
     const logs = await logsRes.json();
     if (token !== routeToken) return; // superseded by a newer navigation
-    renderArtifactView(artifactViewEl, manifest, logs);
+    lastPayload = states;
+    renderArtifactView(artifactViewEl, states[path], logs);
     setConn("live", "ok");
   } catch (err) {
     if (token !== routeToken) return;

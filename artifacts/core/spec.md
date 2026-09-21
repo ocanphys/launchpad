@@ -451,8 +451,8 @@ snapshot: rebuild it on refresh, publish the completed map at once.
 ### The launcher reads the volume in exactly one place
 
 `state()` is the only volume read in the launcher container. Every request
-handler answers from what the refresh loop last computed (`/state`,
-`/manifest`, and the call index behind `/logs/artifact/<path>`) or from a
+handler answers from what the refresh loop last computed (`/state`, and the
+call index behind `/logs/artifact/<path>`) or from a
 Dict (`/logs`, and the log lines themselves). No handler opens a file on the
 mount, and none may.
 
@@ -468,8 +468,8 @@ mount. The collision breaks in both directions:
 
 Both are timing-dependent, so neither presents as an error: the first shows up
 as a page whose contents appear and disappear on the poll interval, the second
-as a dashboard that quietly stops updating. `/manifest` had exactly the first
-failure while it read the manifest per request.
+as a dashboard that quietly stops updating. A per-request manifest read for
+the artifact page had exactly the first failure.
 
 Whatever a page needs from the volume is therefore computed on the refresh
 pass and published with the map -- an artifact's own parameters alongside its

@@ -4,8 +4,8 @@
 inside `leasebook()`, which only runs when a container starts, and a handler's
 body only runs when a request arrives. So a deleted route, a name that no
 longer exists, or a handler that raises are all invisible to an import -- and
-one deletion that took `/launch`, `/cancel` and `/manifest` with it
-is why this file exists.
+one deletion that took `/launch` and `/cancel` with it is why this file
+exists.
 
 Nothing here talks to Modal. `leasebook`'s raw function is built against stubs:
 `state` returns a fixed map, the volume-reading helpers return fixed
@@ -38,7 +38,7 @@ STATE = {
         "durable_progress": {"phase": "files", "done": 1, "total": 1},
     },
     # A manifest `state` couldn't read: no parameters to show, and the reason
-    # is what /manifest hands back in their place.
+    # is what the artifact's page shows in their place.
     "sources/broken": {
         "type": None, "status": "conflict", "error": "not a readable manifest",
         "depends_on": [], "parameters": None,
@@ -115,7 +115,6 @@ def test_every_route_is_registered():
         "/lab",
         "/launch/{artifact_path:path}",
         "/cancel/{artifact_path:path}",
-        "/manifest/{artifact_path:path}",
         "/logs/artifact/{artifact_path:path}",
     ):
         assert expected in paths, f"{expected} is not registered: {sorted(paths)}"
@@ -153,36 +152,7 @@ def test_a_path_that_walks_out_of_the_volume_is_refused():
     api, calls = client()
     cancelled = api.post("/cancel/%2e%2e/%2e%2e/etc/passwd").json()
     assert cancelled["cancelled"] is False and "invalid" in cancelled["message"], cancelled
-    assert api.get("/manifest/%2e%2e/etc/passwd").json()["error"] == "invalid artifact_path"
     assert calls["cancelled"] == [], "a bad path reached the canceller"
-
-
-def test_manifest_answers_from_the_computed_state_not_the_mount():
-    """`/manifest` is a lookup into what the refresh thread computed, not a
-    read of the volume -- the read it used to do raced that thread's own
-    `volume.reload()` and made an artifact's page flicker. `Path(STORAGE)`
-    isn't mounted here, so a handler that reached for it would raise."""
-    api, _ = client()
-    body = api.get("/manifest/sources/tinyshakespeare").json()
-    entry = STATE["sources/tinyshakespeare"]
-    assert body["artifact_path"] == "sources/tinyshakespeare"
-    assert body["type"] == entry["type"]
-    assert body["parameters"] == entry["parameters"]
-    # Dependencies are artifact paths, never nested manifests -- whatever else
-    # is true of a dependency lives on its own entry in this same map.
-    assert body["depends_on"] == ["sources/other"], body
-
-
-def test_an_unbuilt_artifact_says_so_rather_than_erroring():
-    api, _ = client()
-    body = api.get("/manifest/sources/nothing").json()
-    assert "not built yet" in body["error"], body
-
-
-def test_an_unreadable_manifest_answers_with_its_reason():
-    api, _ = client()
-    body = api.get("/manifest/sources/broken").json()
-    assert body["error"] == "not a readable manifest", body
 
 
 def test_the_lab_link_carries_the_token():
