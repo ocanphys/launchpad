@@ -8,25 +8,28 @@ log file, and never calls `commit`:
         worker.confirm_lease("before write")   # raises LeaseLost if superseded
         (root / self.artifact.artifact_path / "count.txt").write_text("3")
 
-The log is taken from Modal's capture of the call rather than a handler, so it
-holds stderr, tqdm and every library that never heard of `worker.log`.
+The log is the root logger's records for this call, kept by the
+`BufferHandler` in `system.logs` and published whole on every heartbeat as
+`call_logs["{call_id}:container"]`; leasebook is what files it on the volume,
+so the worker never holds its log open on the mount. Anything that goes
+through `logging` is in it, and anything that bypasses it (a bare `print`,
+tqdm on stderr) reaches only Modal's own capture.
 """
 
-import asyncio
+import contextvars
 import logging
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
 
 import modal
 
-from config import HEARTBEAT_SECONDS, LOG_FLUSH_SECONDS, STORAGE
+from config import HEARTBEAT_SECONDS
 from system.lease_protocol import Lease, LeaseLost, beats, call_logs
-from system.logs import archive_path, setup_logging
+from system.logs import BufferHandler, current_call_id, setup_logging
 
 
 @dataclass(frozen=True)
@@ -46,24 +49,31 @@ class Worker:
 
 @contextmanager
 def initialize_worker(artifact_path: str, volume: modal.Volume):
-    """Set up this call's logging and lease; on the way out, archive the log
-    and commit.
+    """Set up this call's logging and lease; on the way out, commit.
 
-    The commit is unconditional: a call that raised is the one whose log is
-    worth keeping, and the log only reaches the volume when something commits.
+    The buffer and the heartbeat exist before anything touches the mount, so
+    a call that dies on the reload itself still beats once and publishes the
+    error as its log. The commit is unconditional: it is what lands the
+    job's files, and a call that raised may have written some.
     """
-    call_id = modal.current_function_call_id() or "local"
-    started = datetime.now(UTC)  # floor for the history fetch below
-    volume.reload()
+    call_id = current_call_id()
 
     setup_logging()
-    # The heartbeat streams this container's stdout back in; a client that
-    # narrates its own RPCs at INFO would multiply every beat.
-    for noisy in ("modal", "grpc", "urllib3"):
+    for noisy in ("modal", "grpc", "urllib3"):  # the heartbeat's own RPCs stay out of the log
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    root = logging.getLogger()
+    buffer = BufferHandler(call_id)
+    root.addHandler(buffer)
     logger = logging.getLogger("job")
     logger.setLevel(logging.DEBUG)  # everything; filtering is the reader's job
     lease = Lease(artifact_path, call_id, logger)
+
+    def publish(what: str, put: Callable[[], None]) -> None:
+        try:
+            put()
+        except Exception as exc:
+            logger.warning(f"heartbeat: {what} not published ({exc})")
+
     worker = Worker(
         artifact_path=artifact_path,
         call_id=call_id,
@@ -76,86 +86,51 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
     # only died with the process would keep a finished call's beat alive.
     finished = threading.Event()
 
-    # Every line Modal has captured of this call so far.
-    lines: list[str] = []
-    # Printed by the `finally`; the feed is ordered, so once the subscription
-    # sees it, everything before it is in `lines`. Dropped, not kept.
-    sentinel = f"--- end of log {call_id} ---"
-    caught_up = threading.Event()
-
     def heartbeat():
-        # `beats` and `call_logs` key on call_id: this is the only writer of
-        # both keys, so there is no read-modify-write.
-        #
-        # The subscription blocks and keeps its cursor internally, so it is
-        # entered once, as a task; the beat is the loop body, on its own clock.
-        async def main():
-            call = modal.FunctionCall.from_id(call_id)
-            seen = set()
-            try:
-                async for entry in call.logs.fetch.aio(since=started):
-                    seen.add((entry.timestamp, entry.message))
-                    lines.append(entry.message.rstrip("\r\n"))
-            except Exception as exc:
-                logger.warning(f"heartbeat: history not fetched ({exc})")
+        # This call is the only writer of every key it puts, so there is no
+        # read-modify-write. The pass that sees `finished` still publishes,
+        # so the rows logged on the way out land.
+        while True:
+            stop = finished.wait(HEARTBEAT_SECONDS)
+            publish(
+                "beat",
+                lambda: beats.put(
+                    call_id,
+                    {
+                        "artifact_path": artifact_path,
+                        "last_beat_ts": time.time(),
+                        "progress": dict(worker.progress) or None,
+                    },
+                ),
+            )
+            publish("log", lambda: call_logs.put(f"{call_id}:container", list(buffer.rows)))
+            if stop:
+                return
 
-            # Ends itself at the sentinel rather than being cancelled: cancelling
-            # Modal's stream mid-wait trips its own teardown (aclose on a running
-            # generator), which surfaces as unretrieved task exceptions in the
-            # next call's log.
-            async def follow():
-                async for entry in call.logs.stream.aio():
-                    line = entry.message.rstrip("\r\n")
-                    if line == sentinel:
-                        caught_up.set()
-                        return
-                    if (entry.timestamp, entry.message) not in seen:
-                        lines.append(line)
-
-            asyncio.ensure_future(follow())
-            while not finished.is_set():
-                await asyncio.sleep(HEARTBEAT_SECONDS)
-                try:
-                    await beats.put.aio(
-                        call_id,
-                        {
-                            "artifact_path": artifact_path,
-                            "last_beat_ts": time.time(),
-                            "progress": dict(worker.progress) or None,
-                        },
-                    )
-                except Exception as exc:
-                    logger.warning(f"heartbeat: not recorded ({exc})")
-                try:
-                    await call_logs.put.aio(call_id, list(lines))
-                except Exception as exc:
-                    logger.warning(f"heartbeat: logs not published ({exc})")
-
-        try:
-            asyncio.run(main())
-        except Exception:
-            logger.exception("heartbeat thread died")
-
+    # Under a copy of this call's context: the call id the handlers filter on
+    # is a contextvar, which a bare thread would not carry.
+    thread = threading.Thread(target=contextvars.copy_context().run, args=(heartbeat,), daemon=True)
+    thread.start()
     try:
-        threading.Thread(target=heartbeat, daemon=True).start()
+        volume.reload()
         lease.confirm("boot")
         yield worker
         lease.confirm("commit")
-    except LeaseLost as exc:
-        logger.error(f"{exc} -- stopping; the holder's writes will overtake ours")
-        raise
-    except BaseException:
-        logger.exception("failed under a held lease")
+    except BaseException as exc:
+        if isinstance(exc, LeaseLost):
+            logger.error(f"{exc} -- stopping; the holder's writes will overtake ours")
+        else:
+            logger.exception("failed under a held lease")
+        # The traceback pins every frame it unwound through, and their locals
+        # with them: a memmap over the volume in one of those frames keeps the
+        # mapping open for as long as the runtime holds the exception, and the
+        # next call on this container fails its reload (LESSONS.md).
+        traceback.clear_frames(exc.__traceback__)
         raise
     else:
         logger.info("done")
     finally:
-        print(sentinel, flush=True)
-        if not caught_up.wait(LOG_FLUSH_SECONDS):
-            logger.warning("log flush: the last lines did not come back in time")
-
-        path = archive_path(Path(STORAGE), artifact_path, call_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines) + "\n")
+        root.removeHandler(buffer)
         volume.commit()
         finished.set()  # after the commit: committing is still working
+        thread.join()

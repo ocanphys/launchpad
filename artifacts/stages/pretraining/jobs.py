@@ -74,7 +74,7 @@ class PretrainJob(TrainingJob):
         (folder / "checkpoints").mkdir(parents=True, exist_ok=True)
         # resume from initial model or most recent failsafe checkpoint.
         model, optimizer, step = self.resume(root, worker)
-        log = StepLog(folder / "train.jsonl")
+        log = StepLog(root, self.artifact.artifact_path.as_posix())
         # the artifact run_job hands a job is the declaration only; bind maps
         # the train/valid token files its own job wrote onto it
         dataset = self.dataset.bind(root)

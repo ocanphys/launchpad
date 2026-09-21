@@ -18,13 +18,28 @@ from config import (
     LAB_IDLE_SECONDS,
     LAB_PORT,
     LAB_SECRET,
+    PERSIST_LOGS_EVERY,
     STATE_REFRESH_SECONDS,
     STORAGE,
     VOLUME_NAME,
     get_git_commit,
 )
-from system.lease_protocol import beats, call_logs, leases, new_grant
-from system.logs import setup_logging
+from system.lease_protocol import (
+    beats,
+    call_history,
+    call_logs,
+    leases,
+    new_grant,
+    train,
+)
+from system.logs import (
+    CHANNELS,
+    launcher_log,
+    load_snapshot_from_volume,
+    save_snapshot_to_volume,
+    setup_logging,
+    sync_volume_train,
+)
 from system.runtime import initialize_worker
 
 app = modal.App(APP_NAME)
@@ -35,7 +50,9 @@ base_image = modal.Image.debian_slim(python_version="3.12").pip_install("regex",
 # groups of python packages from this repo - these are added to images which specify
 # the python environments of the containers.
 CALL_SOURCE = ("config", "system")
-ARTIFACTS_SOURCE = ("artifacts",)
+# models/ rides along wherever manifests are decoded: a leg's model_parameters
+# are rebuilt from the model package it names, torch-free at import
+ARTIFACTS_SOURCE = ("artifacts", "models")
 
 
 def safe_relpath(path: str) -> bool:
@@ -166,47 +183,47 @@ def state(root: Path = Path(STORAGE), beat_records: dict | None = None) -> dict[
 
 
 def calls_by_artifact(beat_records: dict) -> dict[str, list[dict]]:
-    """Which calls have beaten for each artifact_path, oldest first -- one
-    entry per attempt, superseded ones included, since `beats` keys on
-    call_id and nothing evicts an old entry.
+    """Every call ever granted for each artifact_path, oldest grant first,
+    each with the last beat it left: `call_history` (the launcher's record,
+    one entry per grant) joined with `beat_records`. A call that never ran
+    is listed with `last_heartbeat` None; a grant `load_snapshot_from_volume`
+    made up for a log file has `granted_ts` None and sorts first.
 
     Built on the refresh pass, off the snapshot `state` is built from, so
-    `/logs/artifact/<path>` is a lookup rather than its own scan of the whole
-    `beats` Dict per request. That scan was on the request path and grows
-    with every call ever run, which is exactly the shape of work that belongs
-    on the clock instead (§7: whatever a page needs is computed on the
-    refresh pass).
-
-    Ordered by `last_beat_ts` rather than a "call started" time, which no
-    historical entry here still has (`leases` only remembers the *current*
-    grant) -- last-beat order still reads top-to-bottom as attempt order,
-    since a superseded call's last beat necessarily comes before the call
-    that replaced it.
+    `/logs/artifact/<path>` is a lookup rather than a Dict read per request.
     """
-    index: dict[str, list[dict]] = {}
-    for call_id, beat in beat_records.items():
-        artifact_path = beat.get("artifact_path")
-        if artifact_path is None:
-            continue
-        index.setdefault(artifact_path, []).append(
-            {"call_id": call_id, "last_heartbeat": beat["last_beat_ts"]}
-        )
-    for calls in index.values():
-        calls.sort(key=lambda call: call["last_heartbeat"])
-    return index
+    return {
+        artifact_path: [
+            {
+                "call_id": grant["call_id"],
+                "granted_ts": grant["granted_ts"],
+                "last_heartbeat": (beat_records.get(grant["call_id"]) or {}).get("last_beat_ts"),
+            }
+            for grant in grants
+        ]
+        for artifact_path, grants in call_history.items()
+    }
 
 
 def artifact_call_logs(calls: list[dict]) -> list[dict]:
     """`calls` (one artifact's, from `calls_by_artifact`) with each one's
-    lines attached.
+    rows attached, all three channels: `launcher`, `container` and `volume`.
 
-    The lines are fetched here rather than indexed on the refresh pass: they
-    are the large, constantly-changing half, and only the one artifact
-    someone is looking at needs them. That is one targeted `call_logs.get`
-    per attempt at that artifact -- bounded by its own history, not by the
-    size of the Dict.
+    Fetched here rather than indexed on the refresh pass: the rows are the
+    large, constantly-changing half, and only the one artifact someone is
+    looking at needs them. Three targeted `call_logs.get`s per attempt at
+    that artifact -- bounded by its own history, not by the size of the Dict.
     """
-    return [{**call, "lines": call_logs.get(call["call_id"]) or []} for call in calls]
+    return [
+        {
+            **call,
+            **{
+                channel: call_logs.get(f"{call['call_id']}:{channel}") or []
+                for channel in (*CHANNELS, "volume")
+            },
+        }
+        for call in calls
+    ]
 
 
 
@@ -244,13 +261,22 @@ def leasebook():
         log = logging.getLogger("leasebook")
         log.info("leasebook container started")
 
-        # One thread, one job: keep this container's picture of the volume
-        # fresh. One `volume.reload()`, one glob of the manifests, one
-        # lease/beat snapshot, and both views computed off it here rather
-        # than in whatever request happens to arrive next -- `artifacts` for
-        # the table and an artifact's own page, `calls` for its logs. It
-        # writes nothing and syncs nothing, so no request ever waits on it
-        # and it never has to be told what someone is looking at.
+        # The one read of log and step files this container ever does: before
+        # the clock below exists, so no reload can land while a file is open.
+        root = Path(STORAGE)
+        volume.reload()
+        persisted = load_snapshot_from_volume(root)
+        legs = sync_volume_train(root)
+        log.info(f"synced {len({call_id for call_id, _ in persisted})} call logs and {legs} step logs off the volume")
+
+        # One thread, one clock, and the only thing in this container that
+        # touches the mount: every pass is one `volume.reload()`, one glob
+        # of the manifests, one lease/beat snapshot, and both views computed
+        # off it here rather than in whatever request happens to arrive next
+        # -- `artifacts` for the table and an artifact's own page, `calls`
+        # for its logs. Every PERSIST_LOGS_EVERY seconds the same pass also
+        # appends the Dicts' new log rows to the files on the volume: on
+        # this thread, so a reload never runs while it holds a file open.
         def compute() -> dict:
             # One `beats` read, both views derived from it, so a call in
             # `calls` is never one the matching `artifacts` entry hasn't
@@ -264,21 +290,33 @@ def leasebook():
         latest = {"value": compute()}
 
         def refresh_state() -> None:
+            last_persist = time.time()
             while True:
                 time.sleep(STATE_REFRESH_SECONDS)
                 try:
-                    computed = compute()
+                    # One assignment of one key, which the GIL makes atomic:
+                    # a reader gets the whole previous pass or the whole new
+                    # one, never a mix of the two views, so there is nothing
+                    # here for a lock to protect.
+                    latest["value"] = compute()
+                    if time.time() - last_persist >= PERSIST_LOGS_EVERY:
+                        # A container's last rows land on its last beat, so
+                        # one interval of slack past the previous pass
+                        # covers a call that stopped between the two.
+                        since = last_persist - PERSIST_LOGS_EVERY
+                        beating = {
+                            call["call_id"]
+                            for calls in latest["value"]["calls"].values()
+                            for call in calls
+                            if (call["last_heartbeat"] or 0) >= since
+                        }
+                        save_snapshot_to_volume(root, volume, persisted, beating)
+                        last_persist = time.time()
                 except Exception:
                     # This thread is the dashboard's only clock; letting it die
                     # would freeze /state with nothing saying why. The last
                     # good state stays up and the next pass tries again.
-                    log.exception("state refresh failed, keeping last good state")
-                    continue
-                # One assignment of one key, which the GIL makes atomic: a
-                # reader gets the whole previous pass or the whole new one,
-                # never a mix of the two views, so there is nothing here for
-                # a lock to protect.
-                latest["value"] = computed
+                    log.exception("refresh pass failed, keeping last good state")
 
         threading.Thread(target=refresh_state, daemon=True).start()
 
@@ -321,28 +359,34 @@ def leasebook():
             log.info(f"cancel {artifact_path}: {message}")
             return {"cancelled": cancelled, "message": message}
 
-        # The `call_logs` Dict, straight through: which calls have a log, and
-        # one call's lines. A Dict read, not a file -- this container reloads
-        # the mount on a clock and opens no log file on it (docs/LOGGING.md).
-        @api.get("/logs")
-        def logs_index() -> dict:
-            return {"call_ids": sorted(call_logs.keys())}
-
-        @api.get("/logs/{call_id}")
-        def logs_endpoint(call_id: str) -> dict:
-            return {"call_id": call_id, "lines": call_logs.get(call_id) or []}
-
-        # Every call that has ever worked on this one artifact, aggregated --
-        # what the drill-down page shows. Same guarantee as the two routes
-        # above: `artifact_call_logs` reads only `beats`/`call_logs`, so this
-        # never touches the mount either, no matter how many calls it's
-        # aggregating.
+        # Every call ever granted for this one artifact, each with all three
+        # channels of its log, and both copies of its step log if its job
+        # writes one -- what the drill-down page shows. Dict reads only, so
+        # this never opens a file on the mount this container reloads on a
+        # clock (docs/LOGGING.md), however many calls it aggregates.
         @api.get("/logs/artifact/{artifact_path:path}")
         def artifact_logs_endpoint(artifact_path: str) -> dict:
             if not safe_relpath(artifact_path):
                 return {"artifact_path": artifact_path, "calls": [], "error": "invalid artifact_path"}
             calls = latest["value"]["calls"].get(artifact_path, [])
-            return {"artifact_path": artifact_path, "calls": artifact_call_logs(calls)}
+            return {
+                "artifact_path": artifact_path,
+                "calls": artifact_call_logs(calls),
+                "train": {
+                    "live": train.get(f"{artifact_path}:live") or [],
+                    "volume": train.get(f"{artifact_path}:volume") or [],
+                },
+            }
+
+        # TEMPORARY: any of the Dicts whole, for inspection. Remove once
+        # the logging rework has been checked on a real deployment.
+        dicts = {"call_logs": call_logs, "call_history": call_history, "beats": beats, "leases": leases}
+
+        @api.get("/debug/{name}")
+        def dict_dump(name: str) -> dict:
+            if name not in dicts:
+                return {"error": f"no Dict {name!r}; one of {sorted(dicts)}"}
+            return dict(dicts[name].items())
 
         # What an artifact's own page shows: type, own parameters, and the
         # paths of what it's built from. Served out of the same computed
@@ -463,7 +507,8 @@ def jupyter():
     flushes writes on its own, and JupyterLab's own autosave writes a
     notebook to disk on its own clock too. Unlike `run_job`, nothing is
     waiting on a precise moment to see the lab's writes, so background
-    commits are enough -- no reason to force one.
+    commits are enough -- no reason to force one. A person who wants one now
+    calls `lab.save()` from a cell; `lab.refresh()` is the reload.
     """
     # Default-on autocomplete and editor niceties: ONE overrides.json, in
     # JupyterLab's application settings directory -- not the per-user
@@ -607,9 +652,16 @@ def attempt_launch(
     options = resource_options(artifact.allocated_resources)
     fn = run_job.with_options(**options) if options else run_job
     call = fn.spawn(artifact_path)
-    leases.put(artifact_path, new_grant(call.object_id, type(artifact).__name__))
+    grant = new_grant(call.object_id, type(artifact).__name__)
+    leases.put(artifact_path, grant)
+    # The launcher's own record of the call, before the container has said
+    # anything: what lists it under the artifact and what its log starts
+    # with, so a call whose container never runs is still a call that was made.
+    call_history.put(artifact_path, [*(call_history.get(artifact_path) or []), grant])
+    message = f"granted lease for {artifact_path} -> {call.object_id}"
+    launcher_log(call.object_id, message + (f" with {options}" if options else ""))
 
-    return True, f"granted lease for {artifact_path} -> {call.object_id}", call
+    return True, message, call
 
 
 def cancel_call(artifact_path: str) -> tuple[bool, str]:
@@ -626,7 +678,9 @@ def cancel_call(artifact_path: str) -> tuple[bool, str]:
     if grant is None:
         return False, f"{artifact_path}: no active call to cancel"
     modal.FunctionCall.from_id(grant["call_id"]).cancel()
-    return True, f"cancelled {artifact_path} -> {grant['call_id']}"
+    message = f"cancelled {artifact_path} -> {grant['call_id']}"
+    launcher_log(grant["call_id"], message)
+    return True, message
 
 
 @app.local_entrypoint()

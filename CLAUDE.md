@@ -9,6 +9,11 @@ The map of where things live and how traffic flows is [README.md](README.md).
 
 Design rationale goes in `spec.md`. This file is how to write code here.
 
+Subtleties learned the hard way go in [LESSONS.md](LESSONS.md): what is true,
+how it was found, what to do about it. Read it before touching checkpoints,
+resume, manifests or dataclass inheritance; add to it whenever a bug or a review
+turns up something the code cannot say for itself.
+
 ## Abstraction
 
 **A helper needs two call sites, or it isn't a helper.** One caller means inline it. The

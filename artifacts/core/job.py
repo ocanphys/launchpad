@@ -56,15 +56,10 @@ class Job(ABC):
         """Do the work, writing self.artifact's files under root.
 
         `worker` is what main.py's run_job holds for the call this job is
-        running under (see system.runtime.Worker) -- its `.log` is the file that
-        call's whole story lands in, boot/heartbeat/done lines included, so
-        a job's own narration belongs there too, not in a print() logs.py
-        already won't capture.
-
-        This job's own class name is not repeated into each message: it's
-        resolved server-side from the artifact's manifest (see main.py's
-        artifact_job_name) and shown as its own column when the log is read
-        back, so messages here should just be plain narration.
+        running under (see system.runtime.Worker) -- its `.log` is the logger
+        whose records are filed under this call, boot/heartbeat/done lines
+        included, so a job's own narration belongs there too, not in a
+        print() nothing files.
 
         A job that reports incremental progress writes it to `worker.progress`
         here, in whatever shape says what it means -- the dashboard shows it

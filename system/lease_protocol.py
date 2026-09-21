@@ -4,17 +4,21 @@ import modal
 
 from config import APP_NAME, VOLUME_NAME
 
-# Three Dicts, not one shared store with prefixed keys: an artifact_path is
-# already a unique key in `leases`, a call_id is already a unique key in `beats`
-# and in `call_logs`, and they never need to tell each other's keys apart
-# because they are never in the same Dict. Every key any of this ever touches is
-# a top-level key -- no blob, no read-modify-write, no chance of one write
-# clobbering an unrelated entry. `call_logs` is its own Dict rather than a field
-# of the beat so that a log too big to store can fail without taking the
-# heartbeat down with it.
+# Five Dicts, not one shared store with prefixed keys: an artifact_path is
+# already a unique key in `leases` and `call_history`, a call_id is already a
+# unique key in `beats`, `call_logs` holds three channels per call
+# (`:launcher`, `:container`, `:volume`, one writer each) and `train` two per
+# artifact (`:live`, `:volume`). They never need to tell each other's keys
+# apart because they are never in the same Dict. Every key is a top-level
+# key, and every key has one writer: the worker never touches what the
+# launcher writes and the other way round. `call_logs` and `train` are their
+# own Dicts rather than fields of the beat so that a copy too big to store
+# can fail without taking the heartbeat down with it.
 leases = modal.Dict.from_name(f"{APP_NAME}-leases", create_if_missing=True)
 beats = modal.Dict.from_name(f"{APP_NAME}-beats", create_if_missing=True)
 call_logs = modal.Dict.from_name(f"{APP_NAME}-call-logs", create_if_missing=True)
+call_history = modal.Dict.from_name(f"{APP_NAME}-call-history", create_if_missing=True)
+train = modal.Dict.from_name(f"{APP_NAME}-train", create_if_missing=True)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 LEASE_RETRIES = 5  # how many times an indeterminate lease read is worth re-asking

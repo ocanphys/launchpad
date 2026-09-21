@@ -5,12 +5,23 @@ CONTAINER_LIFETIME = 3600  # no container lives beyond this many seconds.
 HEARTBEAT_SECONDS = 1
 FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
 STATE_REFRESH_SECONDS = 0.5  # how often leasebook's one thread re-reads the volume; /state serves what it last computed.
+PERSIST_LOGS_EVERY = 10  # seconds between leasebook's passes appending the Dict's log rows to the volume.
 
-# One call's log, inside the artifact folder that call was producing. The
-# `launchpad-call-logs` Dict holds the live copy; this folder holds the one
-# that outlives it.
-CALL_LOGS = "call_functions"
-LOG_FLUSH_SECONDS = 10  # how long a worker waits on the way out for its last line to come back from Modal
+# One call's log, `{call_id}.jsonl` inside this folder of the artifact that
+# call was producing, written by leasebook alone. The `launchpad-call-logs`
+# Dict holds three channels per call: `{call_id}:launcher` (the launcher's
+# own rows), `{call_id}:container` (the worker's, republished whole on every
+# heartbeat) and `{call_id}:volume` (the file's rows, read at leasebook
+# startup and extended as it appends).
+LOGS = "logs"
+# Every call ever granted, per artifact_path: the `launchpad-call-history`
+# Dict, written to this file at the volume root on every persist pass and
+# read back into the Dict when leasebook starts.
+CALL_HISTORY = "call_history.json"
+# A leg's per-step record, in its artifact folder. The `launchpad-train` Dict
+# holds the same two copies, keyed `{artifact_path}:live` and
+# `{artifact_path}:volume`.
+TRAIN_LOG = "train.jsonl"
 
 LAB_PORT = 8888
 LAB_SECRET = "launchpad-lab"  # supplies JUPYTER_TOKEN to both the lab and the dashboard

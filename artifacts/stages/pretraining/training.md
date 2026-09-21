@@ -118,6 +118,8 @@ flushes and `evaluate`'s `.item()` calls. Every
 attempt appends: after a crash, the steps redone from the last failsafe
 appear twice, under different attempts, which is what lets the file be split
 back into continuous executions.
+Each flush also publishes this attempt's rows so far to the `train` Dict,
+for the dashboard's curves (see docs/LOGGING.md).
 
 ## TBD
 

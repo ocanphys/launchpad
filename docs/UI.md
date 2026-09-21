@@ -18,7 +18,10 @@ with no state of its own:
   is handed data and gives back DOM.
 - **[render.js](../web/render.js)** -- the artifact row and its cells.
 - **[artifactview.js](../web/artifactview.js)** -- one artifact's own page:
-  its type, parameters and dependency links.
+  its type, parameters and dependency links, its training curves when its
+  job keeps a step log (one inline SVG per metric, one line per attempt; the
+  rows come out of the `train` Dict, both copies, deduped and bucketed to a
+  point budget in the browser), and every call's log.
 - **[el.js](../web/el.js)** -- the one DOM-building primitive everything
   else uses (`el(tag, props, ...children)`), so text always goes through
   `textContent`, never `innerHTML`.
@@ -114,11 +117,17 @@ navigates to *its* page rather than the whole tree being dumped on one screen.
 A missing manifest (declared but not built yet) is a message on the page, not
 an error state.
 
-What a job actually said isn't here yet. The worker files it in two places
-(see [LOGGING.md](LOGGING.md)), but this container reads neither: it is the
-one that reloads the volume on a clock, and a reload cannot run while it has a
-file open -- see [QUEUES.md](QUEUES.md) §3.3 for how the previous attempt
-ended. When a log page comes, it reads the Dict entry and never the file.
+Below that, what every call that ever worked on the artifact said, as one
+stream in time order, each line tagged with its call (short id, full on
+hover) and its level, timestamps as `DD/MM/YY-HH:mm:ss` in the reader's zone
+with the full instant on hover. A call's last heartbeat is a line in the
+stream too. The heading holds one checkbox per level present; DEBUG starts
+off, and the choice survives repolls. Each call arrives with both copies of
+its log (`live` and `volume`, see [LOGGING.md](LOGGING.md)) and
+`artifactview.js` unions them, one row counted once. The container serving this
+opens no log file while it runs: it reloads the volume on a clock, and a
+reload cannot run while it has a file open -- see [QUEUES.md](QUEUES.md)
+§3.3 for how the previous attempt ended.
 
 ## Known inefficiencies
 

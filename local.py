@@ -14,7 +14,7 @@ import modal
 
 import main
 from artifacts.core.artifact import Artifact
-from lab import DeclarationReport
+from lab import DeclarationReport, current_notebook
 
 app = modal.App("launchpad-declare")
 
@@ -39,10 +39,18 @@ def declare_on_volume(
     strict_commit: bool = False,
     verbose: bool = False,
 ) -> DeclarationReport:
-    """`lab.declare(artifact, ...)` against the volume, from anywhere."""
+    """`lab.declare(artifact, ...)` against the volume, from anywhere.
+
+    The notebook copy a committed run declaration writes is read here, where
+    the kernel is, and shipped along: the container has no notebook of its own.
+    """
     with app.run():
         report = _declare.remote(
-            artifact, commit=commit, strict_commit=strict_commit, verbose=verbose
+            artifact,
+            commit=commit,
+            strict_commit=strict_commit,
+            verbose=verbose,
+            notebook=current_notebook() if commit else None,
         )
     print(report.render(verbose))
     return report

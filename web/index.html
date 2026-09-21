@@ -125,35 +125,59 @@
   }
   .summary-type { font-weight: 600; font-size: 12px; margin-bottom: .3rem; }
   .summary-params { display: flex; flex-direction: column; gap: .1rem; }
-  .summary-param { display: flex; gap: .5rem; font-size: 11px; }
+  .summary-param { display: flex; gap: .5rem; font-size: 11px; align-items: baseline; }
   .summary-key { opacity: .55; min-width: 8rem; }
-  .summary-value { word-break: break-word; }
+  .summary-value { word-break: break-word; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .summary-deps { font-size: 11px; opacity: .8; margin: .5rem 0 0; word-break: break-all; }
   .summary-deps a { color: inherit; }
   .summary-deps a:hover { text-decoration: underline; }
 
-  /* Every call that has ever worked on this artifact, aggregated from the
-     call_logs Dict (see artifactview.js's logs()/callLogSection()) -- one
-     bordered section per call, oldest first. */
+  /* Every call that has ever worked on this artifact, as one stream (see
+     artifactview.js's logs()): a level filter in the heading, then one line
+     per row -- time, call, level, message. */
   .artifact-logs { margin-top: 1rem; }
-  .call-log {
-    border: 1px solid rgba(128,128,128,.18); border-radius: 6px;
-    padding: .5rem .8rem; margin: 0 0 .6rem;
-  }
-  .call-log-header {
-    display: flex; justify-content: space-between; align-items: baseline;
-    font-size: 11px; margin-bottom: .4rem;
-  }
-  .call-log-id { font-weight: 600; }
-  .call-log-when { opacity: .55; }
-  .call-log-lines {
+  /* A checkbox in a section heading: log levels, expanded parameters. */
+  .log-filter { font-weight: 400; font-size: 11px; margin-left: .8rem; cursor: pointer; }
+  .log-filter input { vertical-align: -1px; margin-right: .25rem; }
+  .log-lines {
     font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    white-space: pre-wrap; word-break: break-word;
-    max-height: 24rem; overflow-y: auto;
-    margin: 0; padding: .4rem .5rem;
+    padding: .4rem .5rem;
     background: rgba(128,128,128,.06); border-radius: 4px;
   }
-  .call-log-empty { padding: 0; }
+  /* One grid per line with fixed columns, so every line's cells sit under
+     the previous line's: widths in ch, exact in the monospace font above
+     (DD/MM/YY-HH:mm:ss, an 8-char call id, "container", "CRITICAL"). */
+  .log-line {
+    display: grid; grid-template-columns: 17ch 8ch 9ch 8ch 1fr;
+    column-gap: 1ch; align-items: baseline; padding: .15rem 0;
+  }
+  .log-line + .log-line { border-top: 1px solid rgba(128,128,128,.15); }
+  .log-ts { opacity: .55; }
+  .log-call { opacity: .7; }
+  .log-source { opacity: .7; }
+  .log-level { font-weight: 600; }
+  .log-msg { white-space: pre-wrap; word-break: break-word; }
+  /* Level and message take the level's color; time, call and source stay muted.
+     INFO is the page's own text color (white on dark, black on light). */
+  .level-DEBUG    .log-level, .level-DEBUG    .log-msg { color: #8b949e; }
+  .level-WARNING  .log-level, .level-WARNING  .log-msg { color: #d4a72c; }
+  .level-ERROR    .log-level, .level-ERROR    .log-msg { color: #e8710a; }
+  .level-CRITICAL .log-level, .level-CRITICAL .log-msg { color: #cf222e; }
+
+  /* A leg's training curves (see artifactview.js's curvesSection()): one
+     small chart per metric, one line per attempt, on the logs payload. */
+  .artifact-curves { margin-top: 1rem; }
+  .curve-legend { font-weight: 400; font-size: 11px; margin-left: .8rem; }
+  .curve-row { display: flex; flex-wrap: wrap; gap: .6rem; }
+  .curve {
+    flex: 1 1 18rem; max-width: 26rem;
+    border: 1px solid rgba(128,128,128,.18); border-radius: 6px; padding: .4rem .6rem;
+  }
+  .curve-title { font-size: 11px; opacity: .7; margin-bottom: .2rem; }
+  .curve-svg { width: 100%; height: auto; display: block; }
+  .curve-axis { fill: none; stroke: currentColor; stroke-opacity: .3; stroke-width: 1; }
+  .curve-line { fill: none; stroke-width: 1.2; }
+  .curve-label { fill: currentColor; fill-opacity: .55; font-size: 9px; }
 
 </style>
 </head>
