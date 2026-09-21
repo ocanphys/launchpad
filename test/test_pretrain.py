@@ -13,7 +13,6 @@ import numpy as np
 import torch
 
 from artifacts.core.artifact import MANIFEST, Artifact
-from artifacts.core.SGD import steplog
 from artifacts.core.SGD.lr_schedule import lr_cosine_schedule
 from artifacts.core.SGD.training import (
     LoopConfig,
@@ -93,7 +92,6 @@ class PretrainJobTests(unittest.TestCase):
         self.dataset = build_dataset(self.root)
         self.leg = leg(self.dataset)
         self.folder = self.root / self.leg.artifact_path
-        self.train = self.enterContext(patch.object(steplog, "train"))  # the Dict a flush publishes to
 
     def tearDown(self):
         self.directory.cleanup()
@@ -227,9 +225,6 @@ class PretrainJobTests(unittest.TestCase):
         self.assertEqual([(r["attempt"], r["step"]) for r in rows], [(1, 1), (1, 2), (2, 3), (2, 4)])
         self.assertEqual(set(rows[0]), {"step", "attempt", "loss", "grad_norm", "learning_rate"})
         self.assertTrue(all(isinstance(r["loss"], float) for r in rows))
-        # each flush publishes what its own attempt has written, nothing read back
-        key, published = self.train.put.call_args.args
-        self.assertEqual((key, published), (f"{self.leg.artifact_path.as_posix()}:live", rows[2:]))
 
     def test_a_model_vocab_that_disagrees_with_its_tokenizer_is_refused(self):
         with self.assertRaisesRegex(ValueError, "vocab_size"):

@@ -2,13 +2,13 @@
 //
 // Each function takes state and returns a DOM node. Nothing here reaches into
 // app state or fetches anything: to add a column or a new cell you edit one
-// small function, not the poll loop. Interaction is injected via `ctx` so this
+// small function, not the fetch. Interaction is injected via `ctx` so this
 // file never needs to know WHERE the launch call or group state live.
 //
 //   ctx = {
-//     onLaunch(artifactPath, state) -> void, // run it now
-//     onCancel(artifactPath, state) -> void, // stop the call working on it
-//     isJustClicked(artifactPath) -> boolean, // clicked, not yet refreshed by a poll
+//     onLaunch(artifactPath) -> void, // run it now
+//     onCancel(artifactPath) -> void, // stop the call working on it
+//     pending(artifactPath) -> string | undefined, // "starting"/"stopping" until the next refresh
 //   }
 
 import { el } from "./el.js";
@@ -33,11 +33,7 @@ function dim(text) {
 // Takes an artifact's own state, not a run's -- a lease is granted per
 // artifact_path (see main.py's attempt_launch), so this is the granularity
 // at which "active" actually means anything.
-//
-// Exported: app.js also uses this (not just dot()) to tell whether a
-// just-clicked artifact's status has actually changed since the click, in
-// which case its "just clicked" mark clears early -- see justClicked there.
-export function verdict(state) {
+function verdict(state) {
   if (state.done) return "done";
   if (state.active) return "running";
   if (state.status === "conflict") return "failed";
@@ -125,20 +121,18 @@ function progressCell(state) {
 // liveness signals still say.
 //
 // "Frozen" (shown but inert) rather than absent, so the slot in the row
-// doesn't shift once there is something to do. A just-clicked button
-// (ctx.isJustClicked) freezes too -- that one is purely local (app.js's
-// justClicked), held for a minimum stretch of polls or until this artifact's
-// own verdict actually changes, whichever comes first, and turns blue rather
-// than showing a spinner.
+// doesn't shift once there is something to do. A button the page has
+// already asked something of (ctx.pending) freezes too, blue rather than
+// gray and saying what was asked, until a refresh brings a map that knows.
 function actionButton(path, state, ctx) {
-  const justClicked = ctx.isJustClicked(path);
+  const pending = ctx.pending(path);
   const act = (kind, label, title, handler) =>
     el("button", {
-      class: "launch-btn " + kind + (justClicked ? " clicked" : ""),
-      text: label,
-      title: justClicked ? "…" : title,
-      disabled: justClicked || !handler,
-      onclick: justClicked || !handler ? undefined : () => handler(path, state),
+      class: "launch-btn " + kind + (pending ? " clicked" : ""),
+      text: pending || label,
+      title: pending ? "until the next refresh" : title,
+      disabled: Boolean(pending) || !handler,
+      onclick: pending || !handler ? undefined : () => handler(path),
     });
 
   if (state.done) return act("run", "run", "already done", null);

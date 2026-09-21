@@ -118,7 +118,7 @@ published: its beats, its rows, the file it streamed. A failure before any
 of that existed, which is where the reload above landed, left a lease
 pointing at a call id with no beat, no rows and no file: the launcher's
 "granted" was the last word about it anywhere but Modal's own output, and
-`calls_by_artifact`, which inverted the beats, never listed it.
+the call index, which inverted the beats, never listed it.
 
 Two things fix it and both are structural. The launcher records the call
 itself, in `call_history` and the `:launcher` channel, at grant time, so a
@@ -126,5 +126,5 @@ call is listed by the thing that made it, not by whether it ever ran. And
 `initialize_worker` attaches the buffer and starts the heartbeat before it
 touches the mount, so the reload runs inside the same `try` as the job and
 its failure is the call's first container row. The worker holds no log
-file at all; leasebook appends the Dict's rows to the file on its own
-clock, between two of its reloads.
+file at all; `persist_logs` appends the Dict's rows to the file on its
+schedule.

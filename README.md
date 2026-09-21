@@ -1,8 +1,8 @@
 # launchpad
 
 Artifacts are folders on a Modal Volume, each owning a `manifest.json` that
-names what it is and what it's built from; state and orchestration are two
-Modal Dicts and one web container. The full model -- what an artifact and a
+names what it is and what it's built from; state and orchestration are four
+Modal Dicts, one web container and one scheduled function. The full model -- what an artifact and a
 job *are*, how declaration/resolution/launching fit together -- is
 [artifacts/core/spec.md](artifacts/core/spec.md); this file is the map of
 where things live and how traffic flows between them.
@@ -12,10 +12,11 @@ where things live and how traffic flows between them.
 - **Volume (`trainvols`)**: one folder per artifact, holding its own
   `manifest.json`, whatever files that artifact type declares, and a
   `logs/` folder with one `{call_id}.jsonl` per call ever launched for
-  it -- appended by leasebook out of the Dicts on a clock, one JSON row per
-  log record (see [docs/LOGGING.md](docs/LOGGING.md)). At the root,
-  `call_history.json`: every grant ever made, per artifact_path, written on
-  the same clock.
+  it -- appended by `persist_logs` out of the Dicts on its schedule, one
+  JSON row per log record (see [docs/LOGGING.md](docs/LOGGING.md)). At
+  the root, `call_history.json`: every grant ever made, per artifact_path,
+  written on the same pass. A leg's `train.jsonl` is the worker's own
+  file, one row per step, visible once the worker commits under its lease.
   - **Shared roots** -- `sources/`, `tokenizers/`, `tokenized/`, `datasets/`,
     `mappeddatasets/` -- hold artifacts with no `run_id` in their
     parameters: reused across runs rather than rebuilt per run.
@@ -44,10 +45,7 @@ where things live and how traffic flows between them.
   each: `{call_id}:launcher` (the launcher's own rows: the grant, a
   cancel), `{call_id}:container` (every log row the call has produced so
   far, republished whole on each beat) and `{call_id}:volume` (the file's
-  rows, read when the dashboard starts and extended as it appends).
-- **Dict `launchpad-train`**: two entries per **artifact_path** for a leg's
-  `train.jsonl`, `:live` (the worker's) and `:volume` (read at startup), one
-  row per training step per attempt.
+  rows, read when the dashboard starts and on every persist pass).
 
 ## Dashboard
 
@@ -97,31 +95,31 @@ its own, and JupyterLab's own autosave does the rest.
   (`max_containers=1`) -- it's both the dashboard and the launcher, so
   there's one copy of the traffic pattern below, not several racing each
   other.
-  - **One thread keeps this container's picture of the volume fresh**, on a
-    `STATE_REFRESH_SECONDS` clock: `state()`, and nothing else -- one
-    `volume.reload()`, one `leases`/`beats` Dict snapshot (no mount needed),
-    one glob of the manifests off `leasebook`'s own **local mount**, one flat
-    map of every artifact on the volume. The whole state is computed there,
-    in that thread. It writes nothing, syncs
-    nothing, and no request waits on it.
-  - `/state`: hands back what that thread last computed -- a dict lookup, not
-    a reload. Never slower than that, never fresher than the last pass.
-    Published by a single key assignment, which the GIL makes atomic, so
-    there is nothing for a lock to protect.
-    An artifact's own page reads its type, parameters and dependencies out
-    of this same map; no request touches the mount. A reload replaces the
-    tree rather than refreshing it, so anything that *walks* the volume in a
-    request is asking to watch a file it just listed disappear
-    ([docs/QUEUES.md](docs/QUEUES.md) §3.3). Log files are why that rule
-    exists; the dashboard reads them, and `train.jsonl`, once at startup
-    (`load_snapshot_from_volume`, `sync_volume_train`), and appends to
-    them only from the refresh thread itself, between two of its reloads
-    (`save_snapshot_to_volume`, every `PERSIST_LOGS_EVERY` seconds).
-  - `/logs/artifact/{artifact_path:path}`: every call ever granted for the
-    artifact (`call_history`), each with all three channels of its log out
-    of the `call_logs` Dict (`{call_id}:launcher`, `:container`, `:volume`),
-    and both copies of the artifact's step log out of the `train` Dict.
-    Dict reads, never a file on the mount; the page dedupes.
+  - **One `state` map in memory, computed at startup and on `POST
+    /refresh`.** `state()` is one `volume.reload()`, one `leases`/`beats`
+    Dict snapshot and one glob of the manifests off the **local mount**:
+    what launching and the table need, and nothing more. That reload is
+    the only one this container ever does, so a file read off the mount
+    afterwards is that reload's image of it. No clock. Modal hands
+    `leasebook` one input at a time (no `@modal.concurrent`), so a refresh
+    never reloads while another request holds a file open. It writes
+    nothing to the volume; at startup it runs `load_snapshot_from_volume`
+    once so the Dicts and the files agree after any gap.
+  - `/refresh`: what the page's refresh button POSTs. Reloads and
+    recomputes the map.
+  - `/state`: that map, one flat map of every artifact on the volume. An
+    artifact's own page reads its type, parameters and dependencies out of
+    this same map.
+  - `/artifact/{artifact_path:path}`: the artifact as this container's
+    disk holds it, as the last refresh left it -- its `manifest.json`
+    minus the dependency manifests nested in it, and its `train.jsonl` --
+    read through `open_json`/`open_jsonl` so every descriptor is closed
+    before the request returns.
+  - `/logs/{artifact_path:path}`: live -- every call ever granted for the
+    artifact (`call_history`), each with all three channels of its log
+    read from the `call_logs` Dict now (`{call_id}:launcher`, `:container`,
+    `:volume`; the page dedupes). Dict reads only, never the mount, which
+    is what lets an open artifact page poll it.
   - `/launch/{artifact_path:path}`: checks the lease, makes a `.remote()`
     call to `declared_artifact` (below) to confirm the artifact is
     declared and ready, then spawns `run_job` and writes the new grant --
@@ -129,6 +127,13 @@ its own, and JupyterLab's own autosave does the rest.
   - `/cancel/{artifact_path:path}`: releases the artifact's lease and cancels
     the call holding it -- the lease first, so a worker between checkpoints
     discovers it lost the artifact even if the cancel itself never lands.
+- **`persist_logs`** is a scheduled function (`modal.Period`, every
+  `PERSIST_LOGS_EVERY` seconds) in its own container with its own mount:
+  the only writer of log files and `call_history.json`. Each pass is
+  stateless -- reload, rebuild the row-count cursor from the files
+  (`load_snapshot_from_volume`), append every call's new Dict rows
+  (`save_snapshot_to_volume`), commit. Schedules only fire on a deployed
+  app (`modal deploy`), not under `modal serve`.
 - **`declared_artifact`** and **`run_job`** are separate Modal functions,
   each with their own container and their own mount of the volume --
   `declared_artifact` computes `state()` and picks one entry; `run_job` writes
@@ -189,9 +194,10 @@ What it looked like, every way it broke, and what to do differently:
 ## One job, traced
 
 One artifact's job, spawned, run to completion, and exited -- against the
-two Dicts and the volume it reads and writes along the way. Running the
-whole time alongside it, on its own clock: `leasebook`, polling `/state*`
-for a picture of the very same book through its own separate local mount.
+Dicts and the volume it reads and writes along the way. Alongside it,
+`leasebook` answering each `/state` request with a fresh picture of the very
+same book through its own separate local mount, and `persist_logs` filing
+the Dicts' rows on its schedule.
 
 ```mermaid
 sequenceDiagram
@@ -222,12 +228,14 @@ sequenceDiagram
     J->>V: commit()
     deactivate J
 
-    Note over L,J: meanwhile, independently -- leasebook's one thread
-    loop every STATE_REFRESH_SECONDS
-        L-->>Le: GET (batch)
-        L-->>B: GET beats, call_history (batch)
+    Note over L,J: meanwhile, independently
+    loop every POST /refresh
         L->>V: reload() (leasebook's own local mount)
-        Note over L,V: every PERSIST_LOGS_EVERY: append new launcher + container rows to logs/{call_id}.jsonl, write call_history.json, commit()
+        L-->>Le: GET (batch)
+        L-->>B: GET beats (batch)
+    end
+    loop persist_logs, every PERSIST_LOGS_EVERY
+        Note over B,V: reload(); append new launcher + container rows to logs/{call_id}.jsonl, write call_history.json, commit()
     end
 ```
 
@@ -241,9 +249,9 @@ discovers it as early as the next checkpoint, not only at the very end.
 A job's writes are private until `commit()` publishes them to the volume --
 its output files live only on that one container's own disk until then; its
 log never touches that disk at all, and reaches the volume through the
-Dict, on leasebook's clock. `leasebook` keeps a separate copy of its
-own, refreshed by its own `reload()` whenever something polls `/state*` --
-so the dashboard's view is never more than one poll behind whatever's been
-committed, and never less than one commit behind whatever the job is
-actually doing. Neither container's disk is the other's cache; the volume
-is the only thing both of them agree on.
+Dict, on `persist_logs`'s schedule. `leasebook` keeps a separate copy of
+its own, refreshed by its own `reload()` when the page asks -- so the
+dashboard's view is exactly as old as its last refresh, and never less
+than one commit behind whatever the job is actually doing. Neither
+container's disk is the other's cache; the volume is the only thing both
+of them agree on.

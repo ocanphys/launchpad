@@ -22,7 +22,13 @@
   #labLink { font-size: 12px; color: inherit; opacity: .55; text-decoration: none; }
   #labLink:hover { opacity: .85; }
 
-  #conn { font-size: 11px; padding: .1rem .55rem; border: 1px solid; border-radius: 999px; white-space: nowrap; }
+  /* The one way the page asks the server again (app.js's refresh): green
+     after a good answer, red with the error after a bad one. */
+  #refresh {
+    font: 11px/1.6 inherit; padding: .1rem .55rem; border: 1px solid; border-radius: 999px;
+    white-space: nowrap; background: transparent; cursor: pointer; color: inherit; opacity: .7;
+  }
+  #refresh:disabled { cursor: default; }
   .ok  { color: #1a7f37; border-color: #1a7f37; }
   .bad { color: #cf222e; border-color: #cf222e; }
   #meta { opacity: .55; font-size: 11px; margin-bottom: 1rem; min-height: 1.2em; }
@@ -73,7 +79,7 @@
      for both -- only the color says which, matching the dot palette above:
      green for run, red for stop. */
   .launch-btn {
-    width: 2.6rem; padding: .15rem 0;
+    min-width: 2.6rem; padding: .15rem .3rem;
     font: 9px/1 inherit; text-align: center;
     border: 1px solid; border-radius: 3px;
     background: transparent;
@@ -90,8 +96,8 @@
     border-color: rgba(128,128,128,.3); color: rgba(128,128,128,.5);
     cursor: default;
   }
-  /* Just clicked, waiting on the next poll to land (render.js's
-     actionButton, app.js's justClicked) -- same blue as the "running" dot
+  /* Asked something since the last refresh (render.js's actionButton,
+     app.js's pending) -- same blue as the "running" dot
      elsewhere on the page, so it reads as "something's happening" rather
      than the plain gray every other disabled button gets. Comes after
      .launch-btn:disabled so it wins the tie on equal specificity. */
@@ -186,7 +192,7 @@
 <header>
   <h1 id="title">artifacts</h1>
   <a id="labLink" href="/lab" target="_blank" rel="noopener">lab ↗</a>
-  <span id="conn" class="bad">loading</span>
+  <button id="refresh" type="button" disabled>loading…</button>
 </header>
 <div id="meta"></div>
 

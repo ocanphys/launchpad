@@ -2,40 +2,41 @@
 // was built from, its training curves if it has any, and what every call
 // that ever worked on it said.
 //
-// No state and no network of its own: app.js fetches `/state` and
-// `/logs/artifact/<path>` in parallel and calls renderArtifactView(container,
-// entry, logs), `entry` being this artifact's own entry in the state map,
-// or undefined for one with no manifest. The worker files its own output in a jsonl beside the
-// artifact and in the `call_logs` Dict (docs/LOGGING.md); `logs` here is
-// `/logs/artifact/<path>`'s response, straight from that Dict -- the one
-// container serving this dashboard opens no log file while it runs, because
-// reading files on a mount it also reloads is how a reload loses a race
-// with a walk (docs/LOGGING.md). Its `train` (the step log, both copies)
-// comes out of a Dict the same way, so that holds for the curves too.
+// No state and no network of its own: app.js calls
+// renderArtifactView(container, entry, page, calls), `entry` being this
+// artifact's own entry in the table's state map (or undefined for one with
+// no manifest), `page` what the server's disk holds for it
+// (`/artifact/<path>`: `manifest`, minus the dependency manifests nested
+// in it, and `train`, the leg's step log, only what a worker committed)
+// and `calls` every call that has ever worked on it with its three log
+// channels out of the `call_logs` Dict (`/logs/<path>`, polled while the
+// page is open; see docs/LOGGING.md).
 
 import { el } from "./el.js";
 
 // Whether nested parameter values print indented or on one line. Page
-// state rather than DOM state: every poll rebuilds the view, and the choice
+// state rather than DOM state: every fetch rebuilds the view, and the choice
 // has to outlive that.
 let expandedParams = false;
 
 // A parameter's value: primitives print plain, anything richer (a list, a
 // nested config) prints as JSON, compact or indented. Dependency values
-// never reach here -- state()'s own parameters/dependencies split already
-// keeps those out of `parameters`.
+// never reach here -- the manifest's own parameters/dependencies split
+// keeps those out of `parameters`, and the server drops `dependencies`.
 function paramValue(value) {
   if (value === null || typeof value !== "object") return String(value);
   return JSON.stringify(value, null, expandedParams ? 2 : 0);
 }
 
-// Type, own parameters, and one link per direct dependency. A dependency is
-// just its artifact_path -- main.py's computed state holds no nested
-// manifests, so drilling further is a click to that artifact's own page
-// (where its own type and parameters live) rather than the whole tree being
+// Type, then one row each for the manifest's commit and allocated
+// resources and its own parameters, and one link per direct dependency.
+// The rows are the manifest as the disk holds it; a dependency is just its
+// artifact_path (the state map's `depends_on`), so drilling further is a
+// click to that artifact's own page rather than the whole tree being
 // dumped on this one.
-function summary(entry) {
-  const params = Object.entries(entry.parameters || {});
+function summary(entry, manifest) {
+  const { artifact, parameters, ...about } = manifest; // about: commit, allocated_resources
+  const params = [...Object.entries(about), ...Object.entries(parameters || {})];
   const deps = entry.depends_on || [];
   const nested = params.some(([, value]) => value !== null && typeof value === "object");
   const list = el("div", { class: "summary-params" });
@@ -50,7 +51,7 @@ function summary(entry) {
 
   return el("div", { class: "artifact-summary" },
     el("div", { class: "summary-type" },
-      entry.type,
+      artifact.split(".").pop(),
       nested
         ? el("label", { class: "log-filter" },
             el("input", {
@@ -83,10 +84,9 @@ function shortCallId(id) {
 }
 
 // The rows out of every copy of a record -- a call's `launcher`, `container`
-// and `volume` channels, a step log's `live` and `volume` -- as one list, a
-// row counted once however many copies hold it, `key` saying when two rows
-// are the same one. The volume copy trails the others by a persist pass, so
-// the union is what is complete.
+// and `volume` channels -- as one list, a row counted once however many
+// copies hold it, `key` saying when two rows are the same one. The volume
+// copy trails the others by a persist pass, so the union is what is complete.
 function union(copies, key) {
   const seen = new Set();
   return copies.flat().filter((row) => {
@@ -98,7 +98,7 @@ function union(copies, key) {
 // Levels in severity order, for the filter row; anything else sorts after.
 const LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
 // Which levels the reader has switched off. Page state rather than DOM
-// state: every poll rebuilds the view, and the choice has to outlive that.
+// state: every fetch rebuilds the view, and the choice has to outlive that.
 const hiddenLevels = new Set(["DEBUG"]);
 
 // DD/MM/YY-HH:mm:ss in the reader's zone; the full instant goes on hover.
@@ -111,9 +111,10 @@ function shortTs(ts) {
 
 // Every call's rows in one stream, each tagged with its call and with who
 // wrote it (`source`: the channel it came out of, or for a row read off the
-// file the channel the file recorded), oldest first. A call's last heartbeat
-// is a row too, so where an attempt stopped beating reads in sequence with
-// what it last said.
+// file the channel the file recorded), newest first, so what is happening
+// now is at the top while the page polls. A call's last heartbeat is a row
+// too, so where an attempt stopped beating reads in sequence with what it
+// last said.
 function logRows(calls) {
   return calls
     .flatMap((call) => [
@@ -131,7 +132,7 @@ function logRows(calls) {
       },
     ])
     .filter(Boolean)
-    .sort((a, b) => a.ts - b.ts);
+    .sort((a, b) => b.ts - a.ts);
 }
 
 function logLine(row) {
@@ -145,10 +146,10 @@ function logLine(row) {
 }
 
 // Every call that has ever worked on this artifact (see main.py's
-// artifact_call_logs), as one stream with a level filter above it: one
+// artifact_calls), as one stream with a level filter above it: one
 // checkbox per level present, DEBUG off until switched on.
-function logs(logsPayload) {
-  const rows = logRows((logsPayload && logsPayload.calls) || []);
+function logs(calls) {
+  const rows = logRows(calls);
   const levels = [...new Set(rows.map((row) => row.level))]
     .sort((a, b) => (LEVELS.indexOf(a) + 1 || 99) - (LEVELS.indexOf(b) + 1 || 99));
   const lines = el("div", { class: "log-lines" });
@@ -197,7 +198,7 @@ const CURVE_POINTS = 500; // at most this many points per attempt per metric are
 // it, so a row is one (attempt, step).
 function curves(train) {
   const byAttempt = new Map();
-  for (const row of union([train.volume, train.live], (r) => r.attempt + " " + r.step)) {
+  for (const row of train) {
     if (!byAttempt.has(row.attempt)) byAttempt.set(row.attempt, []);
     byAttempt.get(row.attempt).push(row);
   }
@@ -261,9 +262,9 @@ function chart(metric, attempts, curves) {
   );
 }
 
-// The leg's training curves, from `/logs/artifact/<path>`'s `train` (both
-// copies of its step log, see docs/LOGGING.md): one chart per metric, one
-// line per attempt. Absent for anything whose job keeps no step log.
+// The leg's training curves, from the step log's rows (see
+// docs/LOGGING.md): one chart per metric, one line per attempt. Absent
+// for anything whose job keeps no step log.
 function curvesSection(train) {
   const series = curves(train);
   const attempts = Object.keys(series).sort((a, b) => a - b);
@@ -287,7 +288,7 @@ function curvesSection(train) {
 // artifact's nodes until a fetch resolves and replaceChildren swaps them --
 // and the title has already changed by then, so leaving them up shows one
 // artifact's metadata under another's name. Only ever called on navigation,
-// never on a repoll: an artifact already on screen keeps what it has until
+// never on a refetch: an artifact already on screen keeps what it has until
 // its own next answer lands.
 export function renderArtifactPending(container, artifactPath) {
   container.replaceChildren(
@@ -296,7 +297,7 @@ export function renderArtifactPending(container, artifactPath) {
   );
 }
 
-export function renderArtifactView(container, entry, logsPayload) {
+export function renderArtifactView(container, entry, page, calls) {
   const nodes = [el("p", { class: "view-back" }, el("a", { href: "#/", text: "← dashboard" }))];
 
   // No entry (declared, not built -- a normal state) and a manifest that
@@ -307,14 +308,14 @@ export function renderArtifactView(container, entry, logsPayload) {
   } else if (entry.error) {
     nodes.push(el("p", { class: "empty", text: entry.error }));
   } else {
-    nodes.push(summary(entry));
+    nodes.push(summary(entry, page.manifest));
   }
 
   // Logs render independently of whether the manifest loaded -- a call can
   // have left output behind even for an artifact that's only declared, not
   // built (a job that ran and failed before writing anything), so an empty
   // manifest is never a reason to hide them.
-  nodes.push(curvesSection((logsPayload && logsPayload.train) || { live: [], volume: [] }), logs(logsPayload));
+  nodes.push(curvesSection(page.train), logs(calls));
 
   container.replaceChildren(...nodes.filter(Boolean)); // curves are null without a step log
 }

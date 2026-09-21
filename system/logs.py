@@ -1,5 +1,5 @@
 """Where a call's log goes: three channels in the `call_logs` Dict, one
-writer each, and the file leasebook appends them to.
+writer each, and the file `persist_logs` appends them to.
 
 `{call_id}:container` is the worker's: `BufferHandler` keeps every row the
 call logs, filtered by `CallFilter` on the call id Modal keeps in a
@@ -7,27 +7,26 @@ contextvar so a container that runs one call after another never files a
 row under the wrong one, and the heartbeat republishes the whole list.
 `{call_id}:launcher` is the launcher's, one row per thing it did to the call
 (`launcher_log`). `{call_id}:volume` is the file's,
-`{artifact_path}/logs/{call_id}.jsonl`: read once at leasebook startup
-(`load_snapshot_from_volume`) and extended each time leasebook appends the
-other two channels' new rows to it (`save_snapshot_to_volume`). Which calls
-belong to an artifact is the `call_history` Dict's to say, written by the
-launcher at grant time and to `call_history.json` on the same pass.
-
-A leg's `train.jsonl` follows a two-copy pattern of its own in the `train`
-Dict, keyed by artifact_path: `StepLog.flush` publishes this attempt's rows
-as it writes them, and `sync_volume_train` reads the files at startup.
+`{artifact_path}/logs/{call_id}.jsonl`: read at leasebook startup and at
+the top of every persist pass (`load_snapshot_from_volume`) and extended
+each time the pass appends the other two channels' new rows to it
+(`save_snapshot_to_volume`). Which calls belong to an artifact is the
+`call_history` Dict's to say, written by the launcher at grant time and to
+`call_history.json` on the same pass.
 """
 
 import json
 import logging
 import sys
 import time
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import modal
 
-from config import CALL_HISTORY, LOGS, TRAIN_LOG
-from system.lease_protocol import call_history, call_logs, train
+from config import CALL_HISTORY, LOGS
+from system.lease_protocol import call_history, call_logs
 
 CHANNELS = ("launcher", "container")  # the two the persist pass appends to the file
 
@@ -88,28 +87,54 @@ class BufferHandler(logging.Handler):
         self.rows.append(row(record))
 
 
-dirty: set[str] = set()  # calls with launcher rows the next persist pass has to file
-
-
 def launcher_log(call_id: str, msg: str, level: str = "INFO") -> None:
-    """Appends one row to `call_logs["{call_id}:launcher"]` and marks the
-    call for the next persist pass.
+    """Appends one row to `call_logs["{call_id}:launcher"]`.
 
     A read-modify-write on one key. Its writers are the one leasebook
     container and `launch_job` at a keyboard, never both on the same call.
     """
     key = f"{call_id}:launcher"
     call_logs.put(key, [*(call_logs.get(key) or []), {"ts": time.time(), "level": level, "logger": "launcher", "msg": msg}])
-    dirty.add(call_id)
 
 
-def read_jsonl(file: Path) -> list[dict]:
-    """Every row of `file`, a last line still landing left out."""
-    lines = file.read_text().splitlines()
-    try:
-        return [json.loads(line) for line in lines]
-    except ValueError:
-        return [json.loads(line) for line in lines[:-1]]
+@contextmanager
+def open_json(file: Path) -> Iterator[dict]:
+    """The object in `file` on the mount, `{}` for a file that does not
+    exist, the descriptor closed on the way out."""
+    if not file.exists():
+        yield {}
+        return
+    with file.open() as f:
+        yield json.load(f)
+
+
+@contextmanager
+def open_jsonl(file: Path) -> Iterator[Iterator[dict]]:
+    """The rows of `file` on the mount, parsed as they are read, for the
+    length of the block; a file that does not exist reads as no rows. The
+    descriptor is closed on the way out, so a reload after the block never
+    finds it open: consume the rows inside.
+
+        with open_jsonl(root / artifact_path / TRAIN_LOG) as rows:
+            train = list(rows)
+    """
+    if not file.exists():
+        yield iter(())
+        return
+    with file.open() as f:
+        yield parse_jsonl(f)
+
+
+def parse_jsonl(lines: Iterable[str]) -> Iterator[dict]:
+    """One row per line, stopping at a last line still landing (no newline
+    yet) rather than raising on it."""
+    for line in lines:
+        try:
+            yield json.loads(line)
+        except ValueError:
+            if line.endswith("\n"):
+                raise
+            return
 
 
 def load_snapshot_from_volume(root: Path) -> dict[tuple[str, str], int]:
@@ -121,14 +146,14 @@ def load_snapshot_from_volume(root: Path) -> dict[tuple[str, str], int]:
     The merge is a union per artifact, so a wiped Dict comes back from the
     file and a file behind the Dict drops nothing; a log file no grant names
     gets a grant with no `granted_ts`, so nothing on the volume goes
-    unlisted. Reads the mount: the caller reloads first, and no reload runs
-    while this does.
+    unlisted. Reads the mount: the caller reloads first.
     """
     history_file = root / CALL_HISTORY
     history = json.loads(history_file.read_text()) if history_file.exists() else {}
     persisted: dict[tuple[str, str], int] = {}
     for file in sorted(root.rglob(f"{LOGS}/*.jsonl")):
-        rows = read_jsonl(file)
+        with open_jsonl(file) as parsed:
+            rows = list(parsed)
         call_logs.put(f"{file.stem}:volume", rows)
         for source in CHANNELS:
             persisted[(file.stem, source)] = sum(r.get("source") == source for r in rows)
@@ -141,21 +166,18 @@ def load_snapshot_from_volume(root: Path) -> dict[tuple[str, str], int]:
     return persisted
 
 
-def save_snapshot_to_volume(root: Path, volume: modal.Volume, persisted: dict[tuple[str, str], int], beating: set[str]) -> None:
+def save_snapshot_to_volume(root: Path, volume: modal.Volume, persisted: dict[tuple[str, str], int]) -> None:
     """Appends the launcher and container rows past `persisted`'s cursor to
-    the file of every call in `beating` or marked by `launcher_log`, extends
-    each one's `:volume` channel by the same rows, writes `call_history` to
-    `call_history.json` and commits.
+    the file of every call in `call_history`, extends each one's `:volume`
+    channel by the same rows, writes `call_history` to `call_history.json`
+    and commits.
 
     A channel is append-only, so the rows past the cursor are the whole
     diff; a channel that came back shorter (a wiped Dict) moves nothing.
-    Every file is closed before this returns, so the caller's next reload
-    finds none open.
     """
-    filed = set(dirty)  # a call marked while this runs stays for the next pass
     history = dict(call_history.items())
     artifact_of = {grant["call_id"]: path for path, grants in history.items() for grant in grants}
-    for call_id in (beating | filed) & artifact_of.keys():
+    for call_id, artifact_path in artifact_of.items():
         new = []
         for source in CHANNELS:
             rows = call_logs.get(f"{call_id}:{source}") or []
@@ -164,7 +186,7 @@ def save_snapshot_to_volume(root: Path, volume: modal.Volume, persisted: dict[tu
             persisted[(call_id, source)] = max(done, len(rows))
         if not new:
             continue
-        file = root / artifact_of[call_id] / LOGS / f"{call_id}.jsonl"
+        file = root / artifact_path / LOGS / f"{call_id}.jsonl"
         file.parent.mkdir(parents=True, exist_ok=True)
         with file.open("a") as f:
             f.writelines(json.dumps(r) + "\n" for r in new)
@@ -172,15 +194,4 @@ def save_snapshot_to_volume(root: Path, volume: modal.Volume, persisted: dict[tu
     tmp = root / f"{CALL_HISTORY}.tmp"
     tmp.write_text(json.dumps(history))
     tmp.replace(root / CALL_HISTORY)
-    dirty.difference_update(filed)
     volume.commit()
-
-
-def sync_volume_train(root: Path) -> int:
-    """How many legs had a step log, after publishing each one's rows as
-    `train["{artifact_path}:volume"]`. Same clock rule as `load_snapshot_from_volume`.
-    """
-    files = sorted(root.rglob(TRAIN_LOG))
-    for file in files:
-        train.put(f"{file.parent.relative_to(root).as_posix()}:volume", read_jsonl(file))
-    return len(files)

@@ -20,8 +20,10 @@ deployed image has both; `uv pip install fastapi httpx` if a bare checkout
 doesn't).
 """
 
+import json
 import sys
 from pathlib import Path
+from tempfile import mkdtemp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -49,23 +51,34 @@ STATE = {
 }
 
 
+# What `/artifact/<path>` serves of a manifest: everything but the
+# dependency manifests nested under `dependencies`.
+MANIFEST = {
+    "artifact": "artifacts.stages.pretraining.Pretraining",
+    "commit": "a299cc8",
+    "allocated_resources": {"cpu": None, "gpu_type": "A100", "gpu_count": 1},
+    "parameters": {"run_id": "toy"},
+}
+
+
 def client(**overrides):
     """A TestClient over `leasebook`'s real ASGI app, with everything that
-    would touch Modal or the volume replaced.
-
-    The refresh thread is left running: it is a daemon, its first pass happens
-    before any request, and `state` is a stub, so it costs a stubbed call
-    per interval and proves the thread starts without raising.
+    would touch Modal replaced, and the volume a temporary folder holding
+    one step log.
     """
     from fastapi.testclient import TestClient
 
     calls = {"launched": [], "cancelled": []}
 
-    # `**_` because the refresh thread passes the `beats` snapshot it shares
-    # with `calls_by_artifact`; this stub answers the same either way. It
-    # accepts keywords only: a caller in main.py that passes `beat_records`
-    # positionally breaks every test here, not just the one that exercises it.
-    main.state = lambda **_: overrides.get("state", STATE)
+    # Counted, so a test can tell a GET that served the snapshot from a
+    # refresh that took a new one.
+    calls["state"] = 0
+
+    def state():
+        calls["state"] += 1
+        return overrides.get("state", STATE)
+
+    main.state = state
     main.attempt_launch = lambda path: (
         calls["launched"].append(path) or (True, f"granted {path}", None)
     )
@@ -73,10 +86,9 @@ def client(**overrides):
         calls["cancelled"].append(path) or (True, f"cancelled {path}")
     )
     main.jupyter = type("Stub", (), {"get_web_url": staticmethod(lambda: "https://lab.test")})()
-    # The startup sync: no mount to reload, nothing on it to read.
+    # The startup sync: nothing to reload, no log files to read.
     main.volume = type("Stub", (), {"reload": staticmethod(lambda: None)})()
     main.load_snapshot_from_volume = lambda root: {}
-    main.sync_volume_train = lambda root: 1
     # A plain dict answers `.get()`/`.items()` the same way the Dict does.
     # Every call the launcher ever granted, per artifact, oldest first: fc-9
     # is a grant made up for a log file, fc-0 never beat, fc-1 is running.
@@ -91,8 +103,13 @@ def client(**overrides):
     ROW = {"ts": 1757246400.0, "level": "INFO", "logger": "job", "msg": "boot: lease held"}
     GRANTED = {"ts": 90.0, "level": "INFO", "logger": "launcher", "msg": "granted"}
     main.call_logs = {"fc-1:launcher": [GRANTED], "fc-1:container": [ROW], "fc-1:volume": [ROW], "fc-9:volume": [ROW]}
+    # The mount: a folder with one leg's manifest and step log on it.
     STEP = {"step": 1, "attempt": 1, "loss": 2.0, "grad_norm": 1.0, "learning_rate": 0.5}
-    main.train = {"runs/toy/pretraining:live": [STEP], "runs/toy/pretraining:volume": [STEP]}
+    main.STORAGE = mkdtemp()
+    leg = Path(main.STORAGE) / "runs/toy/pretraining"
+    leg.mkdir(parents=True)
+    (leg / "manifest.json").write_text(json.dumps({**MANIFEST, "dependencies": {"dataset": {"artifact": "artifacts.dataset.DataSet"}}}))
+    (leg / "train.jsonl").write_text(json.dumps(STEP) + "\n")
     main.beats = {
         "fc-1": {"artifact_path": "runs/toy/pretraining", "last_beat_ts": 100.0},
         "fc-2": {"artifact_path": "sources/tinyshakespeare", "last_beat_ts": 75.0},
@@ -111,18 +128,38 @@ def test_every_route_is_registered():
     api, _ = client()
     paths = {route.path for route in api.app.routes}
     for expected in (
+        "/refresh",
         "/state",
         "/lab",
         "/launch/{artifact_path:path}",
         "/cancel/{artifact_path:path}",
-        "/logs/artifact/{artifact_path:path}",
+        "/artifact/{artifact_path:path}",
+        "/logs/{artifact_path:path}",
     ):
         assert expected in paths, f"{expected} is not registered: {sorted(paths)}"
 
 
-def test_state_serves_what_the_thread_computed():
+def test_state_serves_the_computed_map():
     api, _ = client()
     assert api.get("/state").json() == STATE
+
+
+def test_state_is_computed_at_startup_and_on_refresh_only():
+    """`/state` serves the map the container holds; only POST /refresh
+    computes a new one. The logs, by contrast, are read from the Dicts on
+    every request: a row that lands in `call_logs` shows up without one."""
+    api, calls = client()
+    assert calls["state"] == 1
+    api.get("/state")
+    api.get("/artifact/runs/toy/pretraining")
+    api.get("/logs/runs/toy/pretraining")
+    assert calls["state"] == 1
+    assert api.post("/refresh").json() == {"artifacts": len(STATE)}
+    assert calls["state"] == 2
+
+    main.call_logs["fc-1:container"] = [*main.call_logs["fc-1:container"], {"ts": 101.0, "level": "INFO", "logger": "job", "msg": "step 1"}]
+    body = api.get("/logs/runs/toy/pretraining").json()
+    assert [row["msg"] for row in body["calls"][2]["container"]] == ["boot: lease held", "step 1"]
 
 
 def test_launch_reaches_the_launcher():
@@ -162,15 +199,12 @@ def test_the_lab_link_carries_the_token():
 
 
 def test_artifact_logs_aggregate_every_call_oldest_first():
-    """`/logs/artifact/<path>` -- every call ever granted for this one
-    artifact, not just its current holder, in the launcher's order, each
-    with the beat it left and all three channels of its log. Reads only
-    `call_history`/`beats`/`call_logs` (stubbed to plain dicts here), so it
-    never opens a file on the mount this container reloads on a clock
-    (docs/LOGGING.md), however many calls it aggregates.
+    """`/logs/<path>` -- every call ever granted for this one artifact,
+    not just its current holder, in the launcher's order, each with the
+    beat it left and all three channels of its log, out of the Dicts.
     """
     api, _ = client()
-    body = api.get("/logs/artifact/runs/toy/pretraining").json()
+    body = api.get("/logs/runs/toy/pretraining").json()
     assert body["artifact_path"] == "runs/toy/pretraining"
     call_ids = [call["call_id"] for call in body["calls"]]
     assert call_ids == ["fc-9", "fc-0", "fc-1"], body
@@ -186,45 +220,34 @@ def test_artifact_logs_aggregate_every_call_oldest_first():
     assert by_id["fc-1"]["container"][0]["msg"] == "boot: lease held"
     assert by_id["fc-1"]["volume"] == by_id["fc-1"]["container"]
 
-    # Both copies of the step log ride along, raw: the page dedupes them.
-    assert body["train"]["live"] == body["train"]["volume"] and len(body["train"]["live"]) == 1
-    # An artifact with no step log: empty copies, not an error.
-    body = api.get("/logs/artifact/sources/tinyshakespeare").json()
-    assert body["train"] == {"live": [], "volume": []}, body
-
     # A call that beat for a *different* artifact (fc-2, sources/tinyshakespeare)
     # never leaks into this one's aggregation.
     assert "fc-2" not in call_ids
 
     # An artifact no call has ever touched: empty, not an error.
-    assert api.get("/logs/artifact/sources/never-run").json()["calls"] == []
+    assert api.get("/logs/sources/never-run").json()["calls"] == []
 
 
-def test_artifact_logs_read_the_index_not_the_history_dict():
-    """`/logs/artifact/<path>` looks its calls up in what the refresh pass
-    indexed, never reading `call_history` itself -- that read was on the
-    request path (§7). A `call_history` that raises on `.items()` proves
-    it: the index was already built at startup, so the route still
-    answers, while a handler that read would raise.
-    """
+def test_artifact_page_is_the_manifest_and_step_log_off_the_mount():
+    """`/artifact/<path>` -- the leg's manifest (its own keys, the nested
+    dependency manifests dropped) and step log as this container's image
+    of the mount holds them, and nothing from a Dict."""
     api, _ = client()
-    fixture = main.call_history
-
-    class Scanned:
-        def items(self):
-            raise AssertionError("/logs/artifact read the call_history Dict per request")
-
-    main.call_history = Scanned()  # the refresh thread swallows this and keeps its last pass
-    try:
-        body = api.get("/logs/artifact/runs/toy/pretraining").json()
-        assert [call["call_id"] for call in body["calls"]] == ["fc-9", "fc-0", "fc-1"], body
-    finally:
-        main.call_history = fixture
+    body = api.get("/artifact/runs/toy/pretraining").json()
+    assert body == {
+        "artifact_path": "runs/toy/pretraining",
+        "manifest": MANIFEST,
+        "train": [{"step": 1, "attempt": 1, "loss": 2.0, "grad_norm": 1.0, "learning_rate": 0.5}],
+    }
+    # An artifact with nothing on disk: empty, not an error.
+    assert api.get("/artifact/sources/tinyshakespeare").json() == {"artifact_path": "sources/tinyshakespeare", "manifest": {}, "train": []}
 
 
-def test_artifact_logs_rejects_a_path_that_walks_out():
+def test_artifact_routes_reject_a_path_that_walks_out():
     api, _ = client()
-    body = api.get("/logs/artifact/%2e%2e/%2e%2e/etc/passwd").json()
+    body = api.get("/artifact/%2e%2e/%2e%2e/etc/passwd").json()
+    assert body["manifest"] == {} and body["train"] == [] and "invalid" in body["error"], body
+    body = api.get("/logs/%2e%2e/%2e%2e/etc/passwd").json()
     assert body["calls"] == [] and "invalid" in body["error"], body
 
 

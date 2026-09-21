@@ -9,7 +9,7 @@ Stdlib `logging`. A job receives its logger as `worker.log` (see
 `setup_logging` ([system/logs.py](../system/logs.py)) points the root logger
 at stdout once per container, which is what `modal app logs <app>` reads
 back. A call's own log is **three channels in the `call_logs` Dict, one
-writer each**, and one file leasebook writes them to:
+writer each**, and one file `persist_logs` writes them to:
 
 - `{call_id}:container`, the worker's. `initialize_worker` adds a
   `BufferHandler` to the root logger for the length of the call, behind a
@@ -26,7 +26,7 @@ writer each**, and one file leasebook writes them to:
   (`launcher_log`: the grant, a cancel). Written at grant time, so a call
   whose container never runs still has a log saying it was made.
 - `{call_id}:volume`, the file's: `{artifact_path}/logs/{call_id}.jsonl`,
-  read once at leasebook startup and extended on every persist pass.
+  read at leasebook startup and on every persist pass.
 
 A row is `{"ts": <epoch seconds>, "level": "INFO", "logger": "job", "msg":
 "..."}`, a traceback folded into `msg`; a row in the file also carries
@@ -34,26 +34,27 @@ A row is `{"ts": <epoch seconds>, "level": "INFO", "logger": "job", "msg":
 
 **Which calls belong to an artifact is the `call_history` Dict's to say**:
 `attempt_launch` appends the grant to `call_history[artifact_path]` right
-after `spawn`, and `calls_by_artifact` joins that list with `beats` on the
-refresh pass. Nothing is inferred from a beat or a filename.
+after `spawn`, and `artifact_calls` joins that list with `beats` on every
+request for the artifact's page. Nothing is inferred from a beat or a
+filename.
 
-**`leasebook` is the only thing that reads or writes a log file, on its one
-thread.** At startup, before the clock exists, `load_snapshot_from_volume`
-walks `**/logs/*.jsonl` into `call_logs["{call_id}:volume"]`, merges
-`call_history.json` at the volume root into the `call_history` Dict (a union
-per artifact, so a wiped Dict comes back from the file; a log file no grant
-names gets a grant with no `granted_ts`), and hands back how many rows of
-each channel every file already holds. Then every `PERSIST_LOGS_EVERY`
-seconds the refresh thread, between two of its reloads, calls
-`save_snapshot_to_volume`: for every call that beat since the previous pass
-or that the launcher marked, the rows of the launcher and container channels
-past that count are appended to the file and to the `:volume` channel, then
-`call_history` is written to `call_history.json` and the volume committed.
-Every file is closed before the pass returns, so the next reload finds none
-open ([QUEUES.md](QUEUES.md) §3.3).
+**`persist_logs` is the only thing that writes a log file**, a scheduled
+function in its own container, every `PERSIST_LOGS_EVERY` seconds. Each
+pass is stateless: `load_snapshot_from_volume` walks `**/logs/*.jsonl` into
+`call_logs["{call_id}:volume"]`, merges `call_history.json` at the volume
+root into the `call_history` Dict (a union per artifact, so a wiped Dict
+comes back from the file; a log file no grant names gets a grant with no
+`granted_ts`), and hands back how many rows of each channel every file
+already holds. Then `save_snapshot_to_volume`, for every call in
+`call_history`, appends the rows of the launcher and container channels
+past that count to the file and to the `:volume` channel, writes
+`call_history` to `call_history.json` and commits. `leasebook` runs the
+same `load_snapshot_from_volume` once at startup, so a dashboard that comes
+back after any gap agrees with the files.
 
-`/logs/artifact/<path>` hands back all three channels per call straight
-from the Dict; the page unions them, a row counted once, into one stream
+`/logs/<path>` hands back all three channels per call straight from the
+Dict, and an open artifact page polls it; the page unions them, a row
+counted once, into one stream
 across calls, each line showing its call id and which side wrote it
 (`launcher`, `container`, or the file's own `source` for a row read off
 the volume), filtered by level (`artifactview.js`). The volume copy trails
@@ -63,16 +64,10 @@ the other two by a pass; the union is what is complete.
 
 A leg's `train.jsonl` (one row per training step, tagged with the attempt
 that took it, written by `artifacts/core/SGD/steplog.py`) is the worker's
-own file, with a two-copy path of its own through the `train` Dict, keyed
-by artifact_path rather than call_id. `StepLog.flush` puts `train["{artifact_path}:live"]` itself, right
-after appending to the file: every row this attempt has written, so the
-Dict holds the running attempt and nothing is read back off the disk. A
-put that fails is a warning in the call's log, not a dead training loop. Earlier attempts reach the Dict as
-`train["{artifact_path}:volume"]` when `sync_volume_train` reads the files at
-leasebook startup, so an attempt that ran and crashed since the last
-redeploy is on the volume but not yet in the Dict. The page unions the two,
-one row per (attempt, step), and buckets each attempt down to a point budget
-before drawing. Nothing on the dashboard's clock ever opens the file.
+own file and nothing else: it reaches the volume when the worker commits
+under its lease, and `/artifact/<path>` reads it off leasebook's mount as
+the last refresh reloaded it. No attempt's rows are streamed before that
+commit. The page buckets each attempt down to a point budget before drawing.
 
 ## Levels
 

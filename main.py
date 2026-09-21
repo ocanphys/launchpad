@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import subprocess
-import threading
 import time
 from pathlib import Path
 
@@ -19,8 +18,8 @@ from config import (
     LAB_PORT,
     LAB_SECRET,
     PERSIST_LOGS_EVERY,
-    STATE_REFRESH_SECONDS,
     STORAGE,
+    TRAIN_LOG,
     VOLUME_NAME,
     get_git_commit,
 )
@@ -30,15 +29,15 @@ from system.lease_protocol import (
     call_logs,
     leases,
     new_grant,
-    train,
 )
 from system.logs import (
     CHANNELS,
     launcher_log,
     load_snapshot_from_volume,
+    open_json,
+    open_jsonl,
     save_snapshot_to_volume,
     setup_logging,
-    sync_volume_train,
 )
 from system.runtime import initialize_worker
 
@@ -90,16 +89,10 @@ lab_image = (
 )
 
 
-def state(root: Path = Path(STORAGE), beat_records: dict | None = None) -> dict[str, dict]:
+def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
     """The current state of every declared artifact under `root`, keyed by
-    artifact path: one glob, one manifest read and one status apiece, and one
-    lease and heartbeat snapshot for the whole scan.
-
-    `beat_records` is that heartbeat snapshot, for a caller that already has
-    one and wants this map derived from the same instant as whatever else it
-    derived from it (the refresh thread builds `calls_by_artifact` off the
-    same read). Left out, this takes its own -- every other caller wants one
-    scan and doesn't care when it happened.
+    artifact path: one reload, one glob, one manifest read and one status
+    apiece, and one lease and heartbeat snapshot for the whole scan.
 
         state()["runs/toy/pretraining"] -> {
             "type": "Pretraining", "status": "partial", "error": None,
@@ -111,9 +104,7 @@ def state(root: Path = Path(STORAGE), beat_records: dict | None = None) -> dict[
             "durable_progress": {"step": 100, "total_steps": 500},
         }
 
-    `parameters` is what an artifact's own page shows beyond what a row does
-    -- computed here, on the refresh thread, rather than read off the mount
-    per request, so no request handler touches the volume at all.
+    `parameters` is what an artifact's own page shows beyond what a row does.
 
     A manifest that cannot be read is an entry with status "conflict" and
     its `error`, and the scan continues. `blocked_by` is every direct
@@ -122,8 +113,7 @@ def state(root: Path = Path(STORAGE), beat_records: dict | None = None) -> dict[
     """
     if root == Path(STORAGE):
         volume.reload()
-    if beat_records is None:
-        beat_records = dict(beats.items())
+    beat_records = dict(beats.items())
     grants, now = dict(leases.items()), time.time()
 
     loaded: dict[str, Artifact] = {}
@@ -181,50 +171,28 @@ def state(root: Path = Path(STORAGE), beat_records: dict | None = None) -> dict[
     return entries
 
 
-def calls_by_artifact(beat_records: dict) -> dict[str, list[dict]]:
-    """Every call ever granted for each artifact_path, oldest grant first,
-    each with the last beat it left: `call_history` (the launcher's record,
-    one entry per grant) joined with `beat_records`. A call that never ran
-    is listed with `last_heartbeat` None; a grant `load_snapshot_from_volume`
-    made up for a log file has `granted_ts` None and sorts first.
+def artifact_calls(artifact_path: str) -> list[dict]:
+    """Every call ever granted for `artifact_path`, oldest grant first, each
+    with the last beat it left and its three log channels (`launcher`,
+    `container`, `volume`), read from the Dicts now. A call that never ran
+    has `last_heartbeat` None; a grant `load_snapshot_from_volume` made up
+    for a log file has `granted_ts` None and sorts first.
 
-    Built on the refresh pass, off the snapshot `state` is built from, so
-    `/logs/artifact/<path>` is a lookup rather than a Dict read per request.
-    """
-    return {
-        artifact_path: [
-            {
-                "call_id": grant["call_id"],
-                "granted_ts": grant["granted_ts"],
-                "last_heartbeat": (beat_records.get(grant["call_id"]) or {}).get("last_beat_ts"),
-            }
-            for grant in grants
-        ]
-        for artifact_path, grants in call_history.items()
-    }
-
-
-def artifact_call_logs(calls: list[dict]) -> list[dict]:
-    """`calls` (one artifact's, from `calls_by_artifact`) with each one's
-    rows attached, all three channels: `launcher`, `container` and `volume`.
-
-    Fetched here rather than indexed on the refresh pass: the rows are the
-    large, constantly-changing half, and only the one artifact someone is
-    looking at needs them. Three targeted `call_logs.get`s per attempt at
-    that artifact -- bounded by its own history, not by the size of the Dict.
+    Bounded by this one artifact's history: one `beats.get` and three
+    `call_logs.get`s per call, never a scan of either Dict.
     """
     return [
         {
-            **call,
+            "call_id": grant["call_id"],
+            "granted_ts": grant["granted_ts"],
+            "last_heartbeat": (beats.get(grant["call_id"]) or {}).get("last_beat_ts"),
             **{
-                channel: call_logs.get(f"{call['call_id']}:{channel}") or []
+                channel: call_logs.get(f"{grant['call_id']}:{channel}") or []
                 for channel in (*CHANNELS, "volume")
             },
         }
-        for call in calls
+        for grant in call_history.get(artifact_path) or []
     ]
-
-
 
 
 @app.function(
@@ -237,7 +205,7 @@ def artifact_call_logs(calls: list[dict]) -> list[dict]:
 )
 @modal.asgi_app()
 def leasebook():
-    """The page and the data it polls, under one URL.
+    """The page and the data it fetches, under one URL.
 
     An ASGI app rather than two `fastapi_endpoint`s because two endpoints are two
     URLs on two subdomains: the page would have to be told where its data lives,
@@ -250,9 +218,9 @@ def leasebook():
 
     # Everything below is this container's whole setup and its whole life --
     # one try around all of it, so anything that goes wrong anywhere in here
-    # (building the app, the background thread, any request any route
-    # handles) reaches this same log instead of vanishing into a container
-    # crash or a bare 500 with nothing on record.
+    # (building the app, any request any route handles) reaches this same
+    # log instead of vanishing into a container crash or a bare 500 with
+    # nothing on record.
     try:
         api = FastAPI()
 
@@ -260,74 +228,34 @@ def leasebook():
         log = logging.getLogger("leasebook")
         log.info("leasebook container started")
 
-        # The one read of log and step files this container ever does: before
-        # the clock below exists, so no reload can land while a file is open.
+        # The files on the volume and the Dicts reconciled once, so a
+        # dashboard that comes back after any gap lists what was filed.
         root = Path(STORAGE)
         volume.reload()
         persisted = load_snapshot_from_volume(root)
-        legs = sync_volume_train(root)
-        log.info(f"synced {len({call_id for call_id, _ in persisted})} call logs and {legs} step logs off the volume")
+        log.info(f"synced {len({call_id for call_id, _ in persisted})} call logs off the volume")
 
-        # One thread, one clock, and the only thing in this container that
-        # touches the mount: every pass is one `volume.reload()`, one glob
-        # of the manifests, one lease/beat snapshot, and both views computed
-        # off it here rather than in whatever request happens to arrive next
-        # -- `artifacts` for the table and an artifact's own page, `calls`
-        # for its logs. Every PERSIST_LOGS_EVERY seconds the same pass also
-        # appends the Dicts' new log rows to the files on the volume: on
-        # this thread, so a reload never runs while it holds a file open.
-        def compute() -> dict:
-            # One `beats` read, both views derived from it, so a call in
-            # `calls` is never one the matching `artifacts` entry hasn't
-            # heard of yet.
-            beat_records = dict(beats.items())
-            return {
-                "artifacts": state(beat_records=beat_records),
-                "calls": calls_by_artifact(beat_records),
-            }
+        # This container's picture of the volume: the `state` map, computed
+        # here once and again only when the page's refresh button POSTs
+        # /refresh, which is also the only reload. Everything a request
+        # reads off the mount afterwards is that reload's image of it. No
+        # clock. Modal hands this function one input at a time (no
+        # `@modal.concurrent`), so a refresh never reloads while another
+        # request holds a file on the mount open.
+        latest = state()
 
-        latest = {"value": compute()}
-
-        def refresh_state() -> None:
-            last_persist = time.time()
-            while True:
-                time.sleep(STATE_REFRESH_SECONDS)
-                try:
-                    # One assignment of one key, which the GIL makes atomic:
-                    # a reader gets the whole previous pass or the whole new
-                    # one, never a mix of the two views, so there is nothing
-                    # here for a lock to protect.
-                    latest["value"] = compute()
-                    if time.time() - last_persist >= PERSIST_LOGS_EVERY:
-                        # A container's last rows land on its last beat, so
-                        # one interval of slack past the previous pass
-                        # covers a call that stopped between the two.
-                        since = last_persist - PERSIST_LOGS_EVERY
-                        beating = {
-                            call["call_id"]
-                            for calls in latest["value"]["calls"].values()
-                            for call in calls
-                            if (call["last_heartbeat"] or 0) >= since
-                        }
-                        save_snapshot_to_volume(root, volume, persisted, beating)
-                        last_persist = time.time()
-                except Exception:
-                    # This thread is the dashboard's only clock; letting it die
-                    # would freeze /state with nothing saying why. The last
-                    # good state stays up and the next pass tries again.
-                    log.exception("refresh pass failed, keeping last good state")
-
-        threading.Thread(target=refresh_state, daemon=True).start()
+        @api.post("/refresh")
+        def refresh_route() -> dict:
+            nonlocal latest
+            latest = state()
+            return {"artifacts": len(latest)}
 
         # The one state route for all three table views: one flat map of
         # every artifact on the volume, which the frontend slices per view
-        # locally instead of round-tripping on every nav click. Touches
-        # nothing itself: it hands back whatever the thread above last
-        # computed, so it is never slower than a dict lookup and never
-        # fresher than the last pass.
+        # locally instead of round-tripping on every nav click.
         @api.get("/state")
         def state_route() -> dict:
-            return latest["value"]["artifacts"]
+            return latest
 
         # The header's "lab" link. A redirect rather than a URL the page fetches:
         # the lab lives on its own subdomain, and the token that gets it past the
@@ -358,24 +286,32 @@ def leasebook():
             log.info(f"cancel {artifact_path}: {message}")
             return {"cancelled": cancelled, "message": message}
 
+        # One artifact as this container's disk holds it, off the image the
+        # last refresh reloaded: its manifest minus the dependency manifests
+        # nested in it (a dependency is a path in the state map's
+        # `depends_on`, and its own page is where it lives), and its step
+        # log if its job writes one. Only ever what a worker committed under
+        # its lease; nothing streams an attempt's rows before that.
+        @api.get("/artifact/{artifact_path:path}")
+        def artifact_endpoint(artifact_path: str) -> dict:
+            if not safe_relpath(artifact_path):
+                return {"artifact_path": artifact_path, "manifest": {}, "train": [], "error": "invalid artifact_path"}
+            folder = root / artifact_path
+            with open_json(folder / MANIFEST) as manifest, open_jsonl(folder / TRAIN_LOG) as rows:
+                return {
+                    "artifact_path": artifact_path,
+                    "manifest": {key: value for key, value in manifest.items() if key != "dependencies"},
+                    "train": list(rows),
+                }
+
         # Every call ever granted for this one artifact, each with all three
-        # channels of its log, and both copies of its step log if its job
-        # writes one -- what the drill-down page shows. Dict reads only, so
-        # this never opens a file on the mount this container reloads on a
-        # clock (docs/LOGGING.md), however many calls it aggregates.
-        @api.get("/logs/artifact/{artifact_path:path}")
-        def artifact_logs_endpoint(artifact_path: str) -> dict:
+        # channels of its log as the Dicts hold them now. Dict reads only,
+        # never the mount, so the page polls this one while it is open.
+        @api.get("/logs/{artifact_path:path}")
+        def logs_endpoint(artifact_path: str) -> dict:
             if not safe_relpath(artifact_path):
                 return {"artifact_path": artifact_path, "calls": [], "error": "invalid artifact_path"}
-            calls = latest["value"]["calls"].get(artifact_path, [])
-            return {
-                "artifact_path": artifact_path,
-                "calls": artifact_call_logs(calls),
-                "train": {
-                    "live": train.get(f"{artifact_path}:live") or [],
-                    "volume": train.get(f"{artifact_path}:volume") or [],
-                },
-            }
+            return {"artifact_path": artifact_path, "calls": artifact_calls(artifact_path)}
 
         # TEMPORARY: any of the Dicts whole, for inspection. Remove once
         # the logging rework has been checked on a real deployment.
@@ -399,6 +335,20 @@ def leasebook():
         # before that line ever ran.
         logging.getLogger("leasebook").exception("leasebook failed to start")
         raise
+
+
+@app.function(image=web_image, volumes={STORAGE: volume}, schedule=modal.Period(seconds=PERSIST_LOGS_EVERY))
+def persist_logs() -> None:
+    """Appends every call's new log rows to its file on the volume, writes
+    `call_history.json` and commits: the only writer of either.
+
+    Stateless, in its own container: each pass rebuilds the row-count cursor
+    from the files themselves, so a pass that never ran costs nothing but
+    lag. Fires only on a deployed app (`modal deploy`), not under `modal serve`.
+    """
+    root = Path(STORAGE)
+    volume.reload()
+    save_snapshot_to_volume(root, volume, load_snapshot_from_volume(root))
 
 
 @app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)

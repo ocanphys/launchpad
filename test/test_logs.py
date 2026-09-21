@@ -14,7 +14,6 @@ from system.logs import (
     launcher_log,
     load_snapshot_from_volume,
     save_snapshot_to_volume,
-    sync_volume_train,
 )
 
 
@@ -83,13 +82,11 @@ class SnapshotTests(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.root = Path(self.directory.name)
-        self.call_logs, self.call_history, self.train = Dict(), Dict(), Dict()
+        self.call_logs, self.call_history = Dict(), Dict()
         self.volume = Volume()
         self.patches = [
             patch.object(logs, "call_logs", self.call_logs),
             patch.object(logs, "call_history", self.call_history),
-            patch.object(logs, "train", self.train),
-            patch.object(logs, "dirty", set()),
         ]
         for p in self.patches:
             p.start()
@@ -110,9 +107,9 @@ class SnapshotTests(unittest.TestCase):
         launcher_log("fc-a", "granted")
         self.call_logs.put("fc-a:container", [row("boot"), row("step 1")])
         persisted = {}
-        save_snapshot_to_volume(self.root, self.volume, persisted, set())  # fc-a is dirty, so filed
+        save_snapshot_to_volume(self.root, self.volume, persisted)
         self.call_logs.put("fc-a:container", [row("boot"), row("step 1"), row("done")])
-        save_snapshot_to_volume(self.root, self.volume, persisted, {"fc-a"})
+        save_snapshot_to_volume(self.root, self.volume, persisted)
 
         rows = [json.loads(line) for line in self.file("fc-a").read_text().splitlines()]
         self.assertEqual([(r["source"], r["msg"]) for r in rows], [("launcher", "granted"), ("container", "boot"), ("container", "step 1"), ("container", "done")])
@@ -120,21 +117,19 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(persisted, {("fc-a", "launcher"): 1, ("fc-a", "container"): 3})
         self.assertEqual(json.loads((self.root / "call_history.json").read_text()), self.call_history)
         self.assertEqual(self.volume.commits, 2)
-        self.assertEqual(logs.dirty, set())
 
-    def test_a_call_not_in_beating_or_dirty_is_left_alone(self):
+    def test_a_call_with_nothing_new_gets_no_file(self):
         self.grant("fc-a", 10.0)
-        self.call_logs.put("fc-a:container", [row("boot")])
-        save_snapshot_to_volume(self.root, self.volume, {}, set())
+        save_snapshot_to_volume(self.root, self.volume, {})
         self.assertFalse(self.file("fc-a").exists())
 
     def test_a_channel_that_came_back_shorter_moves_nothing(self):
         self.grant("fc-a", 10.0)
         self.call_logs.put("fc-a:container", [row("boot"), row("done")])
         persisted = {}
-        save_snapshot_to_volume(self.root, self.volume, persisted, {"fc-a"})
+        save_snapshot_to_volume(self.root, self.volume, persisted)
         self.call_logs.put("fc-a:container", [])  # a wiped Dict, republished empty
-        save_snapshot_to_volume(self.root, self.volume, persisted, {"fc-a"})
+        save_snapshot_to_volume(self.root, self.volume, persisted)
         self.assertEqual(len(self.file("fc-a").read_text().splitlines()), 2)
         self.assertEqual(persisted[("fc-a", "container")], 2)
 
@@ -142,7 +137,7 @@ class SnapshotTests(unittest.TestCase):
         self.grant("fc-a", 10.0)
         self.call_logs.put("fc-a:launcher", [row("granted", 10.0)])
         self.call_logs.put("fc-a:container", [row("boot", 11.0)])
-        save_snapshot_to_volume(self.root, self.volume, {}, {"fc-a"})
+        save_snapshot_to_volume(self.root, self.volume, {})
         volume_rows = self.call_logs["fc-a:volume"]
 
         # A fresh leasebook with the Dicts wiped, and one file no grant names.
@@ -168,12 +163,15 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(load_snapshot_from_volume(self.root), {})
         self.assertEqual(self.call_history, {})
 
-    def test_every_step_log_is_published_under_its_artifact(self):
-        step = json.dumps({"step": 1, "attempt": 1, "loss": 2.0, "grad_norm": 1.0, "learning_rate": 0.5})
-        (self.root / self.ARTIFACT).mkdir(parents=True)
-        (self.root / self.ARTIFACT / "train.jsonl").write_text(step + "\n" + step[:10])
-        self.assertEqual(sync_volume_train(self.root), 1)
-        self.assertEqual(self.train, {f"{self.ARTIFACT}:volume": [json.loads(step)]})
+    def test_a_pass_is_stateless_across_containers(self):
+        """A second pass with a cursor rebuilt from the files, as the scheduled
+        function does each time, appends only what the first left out."""
+        self.grant("fc-a", 10.0)
+        self.call_logs.put("fc-a:container", [row("boot")])
+        save_snapshot_to_volume(self.root, self.volume, load_snapshot_from_volume(self.root))
+        self.call_logs.put("fc-a:container", [row("boot"), row("done")])
+        save_snapshot_to_volume(self.root, self.volume, load_snapshot_from_volume(self.root))
+        self.assertEqual([json.loads(line)["msg"] for line in self.file("fc-a").read_text().splitlines()], ["boot", "done"])
 
 
 if __name__ == "__main__":

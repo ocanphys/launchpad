@@ -1,27 +1,27 @@
-// app.js — the runtime: config, app state, the poll loop, launching, and
-// routing between the artifact table and one artifact's own page. This is
-// the only file that talks to the network or holds mutable state. Rendering
-// is delegated to render.js and artifactview.js; DOM building to el.js.
+// app.js — the runtime: app state, fetching, launching, and routing between
+// the artifact table and one artifact's own page. This is the only file that
+// talks to the network or holds mutable state. Rendering is delegated to
+// render.js and artifactview.js; DOM building to el.js.
+//
+// The server serves `/state` out of the map it holds in memory (main.py's
+// `latest`); only the refresh button makes it reload the volume and compute
+// a new one (POST /refresh), after which the current view is fetched again.
+// The one clock on the page is an open artifact's log stream, polled from
+// `/logs/<path>`, which the server answers from the Dicts alone.
 
-import { artifactRow, problemRow, verdict } from "./render.js";
+import { artifactRow, problemRow } from "./render.js";
 import { renderArtifactPending, renderArtifactView } from "./artifactview.js";
 
 // --- config -----------------------------------------------------------------
 
-// How often to re-ask the server. This only bounds how stale the screen can
-// look; it is not a correctness knob.
-const EVERY_MS = 2000;
-
-// How long a just-clicked action button stays blue+disabled at minimum, in
-// case its status never visibly changes (e.g. the launch was refused, or a
-// spawn just hasn't produced a heartbeat yet). Four times the poll interval
-// -- see justClicked below for why this is a floor, not a fixed hold.
-const MIN_CLICKED_MS = EVERY_MS * 4;
+// How often an open artifact page refetches its log stream. Bounds how
+// stale the stream can look; nothing else on the page is on a clock.
+const LOG_POLL_MS = 2000;
 
 // --- dom refs ---------------------------------------------------------------
 
 const titleEl = document.getElementById("title");
-const connEl = document.getElementById("conn");
+const refreshEl = document.getElementById("refresh");
 const metaEl = document.getElementById("meta");
 const dashboardEl = document.getElementById("dashboard");
 const rowsEl = document.getElementById("rows");
@@ -35,88 +35,72 @@ const artifactViewEl = document.getElementById("artifactView");
 
 let lastPayload = null;
 
-// Artifact paths whose action button was just clicked, each mapped to when
-// and what: `since` (Date.now() at click) and `verdict` (render.js's
-// verdict() for this artifact at that moment -- the same classification
-// that picks the dot's color). A path clears out of here -- goes back to
-// reflecting server state -- the first time either becomes true on a poll:
-//
-//   - its verdict has changed from what it was at click time (the dot
-//     would show a different color -- the clearest possible sign the
-//     click did something), checked on every poll regardless of how much
-//     time has passed;
-//   - MIN_CLICKED_MS has elapsed with no such change (a floor: a click
-//     shouldn't free the button again after a single poll if nothing has
-//     visibly happened yet, but it also shouldn't stay frozen forever on
-//     a launch that silently failed).
-//
-// See reconcileJustClicked, called from pollTable on every landed poll.
-const justClicked = new Map(); // artifactPath -> { since, verdict }
+// Artifact paths the page has asked the server to act on since the last
+// refresh, each with what the button says meanwhile ("starting",
+// "stopping"). The server's map does not know about the request until a
+// refresh recomputes it, so the page remembers instead: the button stays
+// blue, disabled and labelled until then. A request the server refused
+// clears its own entry (see act).
+const pending = new Map();
 
-function isJustClicked(artifactPath) {
-  return justClicked.has(artifactPath);
-}
-
-function setConn(text, cls) {
-  connEl.textContent = text;
-  connEl.className = cls;
+function setRefresh(text, cls) {
+  refreshEl.textContent = text;
+  refreshEl.className = cls;
 }
 
 // --- launching --------------------------------------------------------------
 
 // The two things a row's button can ask for -- launch it, stop it -- are one
-// POST to one route named after the ask.
-//
-// Marks the button clicked (blue, disabled) immediately -- snapshotting the
-// artifact's verdict as the baseline reconcileJustClicked compares later polls
-// against -- then fires the POST. Doesn't wait for the POST before returning,
-// and doesn't clear the mark itself either way; that's entirely
-// reconcileJustClicked's job, off real poll results, not this call's own
-// outcome (a launch can report success and still not actually change anything
-// visible for a beat).
-async function act(route, artifactPath, state) {
-  justClicked.set(artifactPath, { since: Date.now(), verdict: verdict(state) });
-  redraw(); // reflect the click immediately, don't wait for the next poll
-
+// POST to one route named after the ask. The button reads "starting" or
+// "stopping" from the click on, and keeps saying so until the next refresh
+// unless the server said no.
+async function act(route, artifactPath, label) {
+  pending.set(artifactPath, label);
+  redraw();
   try {
     // No encodeURIComponent -- artifactPath's /s are meant to stay literal,
     // matching the server's {artifact_path:path} routes (a plain path
     // segment can't match a multi-segment path).
-    const res = await fetch(`${route}/${artifactPath}`, { method: "POST" });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.message || "HTTP " + res.status);
+    const body = await request(`${route}/${artifactPath}`, { method: "POST" });
     if (body.message) console.info(`${route}:`, body.message);
+    if (!(body.launched || body.cancelled)) pending.delete(artifactPath);
   } catch (err) {
     console.warn(`${route} failed:`, err);
+    pending.delete(artifactPath);
   }
+  redraw();
 }
 
 // Injected into every row so render.js never sees app state directly.
 const ctx = {
-  onLaunch: (path, state) => act("launch", path, state),
-  onCancel: (path, state) => act("cancel", path, state),
-  isJustClicked,
+  onLaunch: (path) => act("launch", path, "starting"),
+  onCancel: (path) => act("cancel", path, "stopping"),
+  pending: (path) => pending.get(path),
 };
 
 // --- draw -------------------------------------------------------------------
 
+// The line under the header: how many artifacts the server's map holds
+// and when this page last fetched. Written on every fetch of either view,
+// so a refresh visibly lands on the artifact page too.
+function stamp(states) {
+  const n = Object.keys(states).length;
+  metaEl.textContent = n + (n === 1 ? " artifact" : " artifacts") + " · fetched " + new Date().toLocaleTimeString();
+}
+
 // Every artifact on the volume, one row each, by path. Full rebuild each
 // time is correct and cheap at this scale; don't add reconciliation until
-// something focusable needs to survive a poll.
+// something focusable needs to survive a redraw.
 function draw(states) {
   const paths = Object.keys(states).sort();
-
-  metaEl.textContent =
-    paths.length + (paths.length === 1 ? " artifact" : " artifacts") +
-    " · polled " + new Date().toLocaleTimeString();
-
+  stamp(states);
   rowsEl.replaceChildren(...paths.map((path) => artifactRow(path, states[path], ctx)));
   emptyEl.textContent = "nothing declared on the volume yet.";
   emptyEl.hidden = paths.length > 0;
 
   // Manifests state() could not read. Only touches #problemRows' children
   // and the count text -- never recreates <details id="problems"> itself,
-  // so a poll can't clobber whether the user has it open.
+  // so a redraw can't clobber whether the user has it open.
   const problems = paths.filter((path) => states[path].error);
   problemRowsEl.replaceChildren(...problems.map((path) => problemRow(path, states[path])));
   problemCountEl.textContent = problems.length;
@@ -124,84 +108,108 @@ function draw(states) {
 }
 
 // Redraw from the last good payload (used after a local state change --
-// a just-clicked button; see act()).
+// a request made or refused; see act()).
 function redraw() {
   if (lastPayload) draw(lastPayload);
 }
 
-// --- table poll -------------------------------------------------------------
+// --- fetching ---------------------------------------------------------------
 
-// Clears each justClicked entry whose artifact has either changed verdict
-// since the click, or sat unchanged past MIN_CLICKED_MS -- see justClicked's
-// own comment for the full rule. A path missing from this poll entirely
-// clears too -- nothing left to compare against.
-function reconcileJustClicked(states) {
-  if (justClicked.size === 0) return;
-  const now = Date.now();
-  for (const [path, { since, verdict: clickedVerdict }] of justClicked) {
-    const state = states[path];
-    const changed = state && verdict(state) !== clickedVerdict;
-    const expired = now - since >= MIN_CLICKED_MS;
-    if (!state || changed || expired) justClicked.delete(path);
+// Bumped on every navigation. A fetch checks it when its answer lands, so a
+// slow answer for a view the user has since left (a refresh while a job is
+// writing to the volume can take a moment) is dropped rather than drawn
+// under the newer view.
+let routeToken = 0;
+
+// Same origin as this page — no URL to configure, no CORS to satisfy. A
+// failed request throws with the server's message when it gave one.
+async function request(route, init = {}) {
+  const res = await fetch(route, { cache: "no-store", ...init });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.message || "HTTP " + res.status);
+  return body;
+}
+
+async function fetchTable() {
+  const token = routeToken;
+  const payload = await request("state");
+  if (token !== routeToken) return;
+  lastPayload = payload;
+  draw(payload);
+}
+
+// Bumped whenever an artifact page's log poll starts, so the loop it
+// replaces (a refresh on the same page starts a new one) stops itself.
+let logPoll = 0;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// One artifact's drill-down, from three places: its entry in the table's
+// state map (type, own parameters, what it depends on; fetched only when
+// this page has no map yet -- the first thing loaded, or right after a
+// refresh), `artifact/<path>` for its manifest and step log as the
+// server's disk holds them, and `logs/<path>` for every call that has ever
+// worked on it. Renders,
+// then hands the log stream to `pollLogs` and returns.
+async function fetchArtifactView(path) {
+  const token = routeToken;
+  if (!lastPayload) lastPayload = await request("state");
+  const [page, logs] = await Promise.all([request(`artifact/${path}`), request(`logs/${path}`)]);
+  if (token !== routeToken) return;
+  stamp(lastPayload);
+  const entry = lastPayload[path];
+  renderArtifactView(artifactViewEl, entry, page, logs.calls);
+  pollLogs(path, entry, page); // started, not awaited: this fetch is done
+}
+
+// Refetches `path`'s log stream every LOG_POLL_MS and redraws the page
+// around the entry and disk image it was given, until the route changes
+// or another poll for the page starts. A tick that fails keeps the last
+// stream up; the next one tries again.
+async function pollLogs(path, entry, page) {
+  const token = routeToken;
+  const mine = ++logPoll;
+  while (true) {
+    await sleep(LOG_POLL_MS);
+    if (token !== routeToken || mine !== logPoll) return;
+    try {
+      const { calls } = await request(`logs/${path}`);
+      if (token !== routeToken || mine !== logPoll) return;
+      renderArtifactView(artifactViewEl, entry, page, calls);
+    } catch (err) {
+      console.warn("log poll failed, keeping the last stream:", err);
+    }
   }
 }
 
-// `token` guards against a stale poll clobbering a newer route's render: a
-// fetch still in flight when the user navigates into an artifact's page (more
-// likely right after a launch, since a job actively writing to the volume
-// slows every volume.reload()-backed endpoint) resolves after route() has
-// switched the page over, and would otherwise redraw the table underneath
-// it. route() bumps routeToken on every navigation and hands this call the
-// value current when it was scheduled; a mismatch by the time the fetch
-// resolves means a newer navigation has taken over, so the result is
-// discarded rather than applied.
-async function pollTable(token) {
+// Runs `work` with the refresh button showing how it went: "refresh"
+// (green) after a good answer, the error (red) after a bad one, the last
+// good screen staying up either way.
+async function load(work) {
+  const token = routeToken;
+  refreshEl.disabled = true;
+  setRefresh("loading…", "");
   try {
-    // Same origin as this page — no URL to configure, no CORS to satisfy.
-    const res = await fetch("state", { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const payload = await res.json();
-    if (token !== routeToken) return; // superseded by a newer navigation
-    reconcileJustClicked(payload);
-    lastPayload = payload;
-    draw(lastPayload);
-    setConn("live", "ok");
+    await work();
+    if (token === routeToken) setRefresh("refresh", "ok");
   } catch (err) {
-    if (token !== routeToken) return;
-    // Keep the last good screen up: one missed poll is not news, and blanking
-    // the page on a blip hides the state someone is watching.
-    setConn(String(err.message || err), "bad");
+    if (token === routeToken) setRefresh(String(err.message || err), "bad");
+  } finally {
+    refreshEl.disabled = false;
   }
 }
 
-// --- artifact view poll --------------------------------------------------------
+// Fetches and draws the current view. Set by route().
+let view = async () => {};
 
-// One artifact's drill-down: its entry in the same `state` map the table
-// draws from (type, own parameters, what it depends on), plus every call
-// that has ever worked on it, aggregated -- `logs/artifact/<path>` (see
-// main.py's artifact_call_logs), a Dict read same as everywhere else here,
-// never a file (see artifactview.js). Two fetches, in parallel. The state
-// map is kept as lastPayload too, so going back to the table is instant.
-//
-// `token` guards against a stale poll the same way pollTable's does -- see
-// its comment for why this matters, same race, same fix.
-async function pollArtifactView(path, token) {
-  try {
-    const [stateRes, logsRes] = await Promise.all([
-      fetch("state", { cache: "no-store" }),
-      fetch(`logs/artifact/${path}`, { cache: "no-store" }),
-    ]);
-    if (!stateRes.ok) throw new Error("HTTP " + stateRes.status);
-    const states = await stateRes.json();
-    const logs = await logsRes.json();
-    if (token !== routeToken) return; // superseded by a newer navigation
-    lastPayload = states;
-    renderArtifactView(artifactViewEl, states[path], logs);
-    setConn("live", "ok");
-  } catch (err) {
-    if (token !== routeToken) return;
-    setConn(String(err.message || err), "bad");
-  }
+// The refresh button: the server reloads the volume and recomputes its
+// map, then the current view is fetched again. The one place the page
+// ever asks the server to look at the volume.
+async function refresh() {
+  await request("refresh", { method: "POST" });
+  lastPayload = null;
+  pending.clear(); // the new map knows what was asked; the buttons read it
+  await view();
 }
 
 // --- routing ------------------------------------------------------------------
@@ -216,49 +224,10 @@ function parseRoute() {
   return { view: "table", id: null };
 }
 
-let pollTimer = null; // current setTimeout id, so route() can cancel a not-yet-fired reschedule
-
-// Bumped on every route() call; handed to pollTable/pollArtifactView as
-// `token` so a poll scheduled under an earlier route can tell, once its
-// fetch finally resolves, whether it's still the current one -- see
-// pollTable's own comment for the race this closes. Also doubles as
-// schedulePoll's cancellation signal (below).
-let routeToken = 0;
-
-// Runs `tick` now, then schedules the next run EVERY_MS after this one
-// *finishes* -- not a blind setInterval, which fires on a fixed clock
-// regardless of whether the previous call ever returned. A slow response
-// (the volume genuinely can take a moment to reload while a job is
-// actively writing to it) would otherwise pile up overlapping requests
-// faster than they resolve, which is exactly the "lots of GET requests"
-// symptom this replaces. Checks `token` against `routeToken` both before
-// running and after `tick` resolves, so a poll loop for a view the user
-// has since navigated away from stops rescheduling itself rather than
-// quietly polling in the background forever.
-function schedulePoll(tick, token) {
-  clearTimeout(pollTimer);
-  const run = async () => {
-    if (token !== routeToken) return;
-    await tick();
-    if (token !== routeToken) return;
-    pollTimer = setTimeout(run, EVERY_MS);
-  };
-  run();
-}
-
-// Restarts whichever poll loop route() last set up -- same tick function,
-// same token (the route hasn't changed, just whether the tab watching it
-// is visible), just kicked off again right now instead of waiting for its
-// next scheduled setTimeout. Used by the visibilitychange listener below.
-let currentPoll = null;
-
-// Re-entered on every hashchange, and once at load. Owns the one active
-// poll loop: switching routes cancels whichever one was running before
-// (via the token check in schedulePoll -- clearTimeout alone can't stop a
-// fetch already in flight), so navigating away from an artifact's page
-// doesn't leave it quietly polling in the background.
+// Re-entered on every hashchange, and once at load: switches the page over,
+// points `view` at the new one and fetches it once.
 function route() {
-  const token = ++routeToken;
+  routeToken++;
   const r = parseRoute();
 
   if (r.view === "table") {
@@ -266,38 +235,23 @@ function route() {
     dashboardEl.hidden = false;
     artifactViewEl.hidden = true;
     // Draw the last payload now rather than waiting on a fresh fetch, so
-    // coming back from an artifact's page is instant; the poll below keeps
-    // it current.
+    // coming back from an artifact's page is instant.
     if (lastPayload) draw(lastPayload);
-    currentPoll = () => schedulePoll(() => pollTable(token), token);
-    currentPoll();
-    return;
+    view = fetchTable;
+  } else {
+    titleEl.textContent = r.id;
+    dashboardEl.hidden = true;
+    artifactViewEl.hidden = false;
+    // Clear whatever artifact was on screen before this one. The table branch
+    // above can draw its last payload while it waits, because that payload is
+    // this view's own data one fetch old; here it would be a *different*
+    // artifact's, sitting under the name of the one just clicked.
+    renderArtifactPending(artifactViewEl, r.id);
+    view = () => fetchArtifactView(r.id);
   }
-
-  titleEl.textContent = r.id;
-  dashboardEl.hidden = true;
-  artifactViewEl.hidden = false;
-  // Clear whatever artifact was on screen before this one. The table branch
-  // above can draw its last payload while it waits, because that payload is
-  // this view's own data one poll old; here it would be a *different*
-  // artifact's, sitting under the name of the one just clicked.
-  renderArtifactPending(artifactViewEl, r.id);
-  currentPoll = () => schedulePoll(() => pollArtifactView(r.id, token), token);
-  currentPoll();
+  load(view);
 }
 
-// A backgrounded browser tab gets its timers throttled hard (Chrome can
-// clamp setTimeout to roughly once a minute after a while) -- switching
-// back to this tab would otherwise show whatever was last polled before
-// that throttling kicked in, stale by however long the tab sat in the
-// background, until the throttled timer eventually fires on its own. This
-// polls immediately on return instead of waiting that out. Restarting
-// `currentPoll` (rather than just calling the fetch once) also replaces
-// the still-pending throttled setTimeout with a fresh one on the normal
-// cadence, so the tab doesn't stay on a stretched-out schedule afterward.
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && currentPoll) currentPoll();
-});
-
+refreshEl.addEventListener("click", () => load(refresh));
 window.addEventListener("hashchange", route);
 route();

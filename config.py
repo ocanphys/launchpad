@@ -4,23 +4,21 @@ STORAGE = "/storage"  # this is the container mount name for the volume.
 CONTAINER_LIFETIME = 3600  # no container lives beyond this many seconds.
 HEARTBEAT_SECONDS = 1
 FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
-STATE_REFRESH_SECONDS = 0.5  # how often leasebook's one thread re-reads the volume; /state serves what it last computed.
-PERSIST_LOGS_EVERY = 10  # seconds between leasebook's passes appending the Dict's log rows to the volume.
+PERSIST_LOGS_EVERY = 60  # seconds between `persist_logs` passes appending the Dict's log rows to the volume.
 
 # One call's log, `{call_id}.jsonl` inside this folder of the artifact that
-# call was producing, written by leasebook alone. The `launchpad-call-logs`
-# Dict holds three channels per call: `{call_id}:launcher` (the launcher's
-# own rows), `{call_id}:container` (the worker's, republished whole on every
-# heartbeat) and `{call_id}:volume` (the file's rows, read at leasebook
-# startup and extended as it appends).
+# call was producing, written by `persist_logs` alone. The
+# `launchpad-call-logs` Dict holds three channels per call:
+# `{call_id}:launcher` (the launcher's own rows), `{call_id}:container` (the
+# worker's, republished whole on every heartbeat) and `{call_id}:volume`
+# (the file's rows, read at leasebook startup and on every persist pass).
 LOGS = "logs"
 # Every call ever granted, per artifact_path: the `launchpad-call-history`
 # Dict, written to this file at the volume root on every persist pass and
-# read back into the Dict when leasebook starts.
+# merged back into the Dict when leasebook starts and on every pass.
 CALL_HISTORY = "call_history.json"
-# A leg's per-step record, in its artifact folder. The `launchpad-train` Dict
-# holds the same two copies, keyed `{artifact_path}:live` and
-# `{artifact_path}:volume`.
+# A leg's per-step record, in its artifact folder: the worker's file, read
+# off the volume by the dashboard once the worker has committed it.
 TRAIN_LOG = "train.jsonl"
 
 LAB_PORT = 8888

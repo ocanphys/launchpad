@@ -446,44 +446,30 @@ An unreadable manifest becomes an error entry at its own path; discovery of
 every other path continues.
 
 A state result is an observation over a scan interval, not a transactional
-snapshot: rebuild it on refresh, publish the completed map at once.
+snapshot: rebuild it whole, publish the completed map at once.
 
-### The launcher reads the volume in exactly one place
+### One reload, taken on request
 
-`state()` is the only volume read in the launcher container. Every request
-handler answers from what the refresh loop last computed (`/state`, and the
-call index behind `/logs/artifact/<path>`) or from a
-Dict (`/logs`, and the log lines themselves). No handler opens a file on the
-mount, and none may.
+The launcher container keeps no clock. It reloads the volume at startup and
+again only when the page asks (`POST /refresh`), and computes the `state`
+map off that reload: manifests, leases, heartbeats, what launching and the
+table need. Nothing else it serves is cached. A call's log channels are
+read from the Dicts on every request, so they are live; a leg's step log
+is read off the mount, which means off the last reload's image of it, and
+only inside a block that closes the descriptor before the request returns
+(`open_jsonl`). A reload and a read cannot both be in flight on the same
+mount: a read landing mid-reload sees a path that is briefly absent, and a
+file descriptor still open when a reload starts fails the reload. Neither
+presents as an error. What keeps them apart is that no request holds a
+descriptor past its own block, and Modal hands this function one input at
+a time; `leasebook` must never be given `@modal.concurrent`.
 
-This is not a layering preference. The refresh loop calls `volume.reload()` on
-its own clock, and a reload and a read cannot both be in flight on the same
-mount. The collision breaks in both directions:
-
-- A read landing mid-reload sees a path that is briefly absent, so the handler
-  reports a declared artifact as missing.
-- A file descriptor still open when a reload starts fails the reload instead,
-  so the refresh pass every other route depends on dies and the whole map goes
-  stale.
-
-Both are timing-dependent, so neither presents as an error: the first shows up
-as a page whose contents appear and disappear on the poll interval, the second
-as a dashboard that quietly stops updating. A per-request manifest read for
-the artifact page had exactly the first failure.
-
-Whatever a page needs from the volume is therefore computed on the refresh
-pass and published with the map -- an artifact's own parameters alongside its
-status. Adding a volume read back into a request handler reintroduces the race
-no matter how small the read is.
-
-The same rule extends past the volume to any unbounded scan. The refresh pass
-publishes a second view off the one `beats` snapshot it already takes: which
-calls have beaten for each artifact path, so `/logs/artifact/<path>` is a
-lookup rather than its own scan of a Dict that grows with every call ever run.
-What stays on the request path is bounded by the one artifact being looked at
--- its own calls' log lines, fetched per request because they are large and
-change constantly. A scan whose cost grows with history belongs on the clock;
-a read whose cost is fixed by what was asked for belongs in the handler.
+The volume is the source of truth, and nothing reaches the dashboard from a
+worker that the worker has not committed under its lease, except the log
+rows and heartbeats it publishes to the Dicts. Writing to the volume is the
+worker's (its own artifact, on commit) and `persist_logs`'s (log files and
+`call_history.json`, on a schedule, in its own container); the launcher
+container writes nothing there.
 
 ### Minimal execution contract
 
