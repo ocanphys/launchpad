@@ -6,6 +6,10 @@ HEARTBEAT_SECONDS = 1
 FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
 STARTUP_GRACE_SECONDS = 60  # time after a lease is granted to wait for its first heartbeat.
 PERSIST_LOGS_EVERY = 60  # seconds between `persist_logs` passes appending the Dict's log rows to the volume.
+# How long leasebook's listener blocks on the `refreshes` Queue before looking
+# at whether its container is shutting down. Nothing waits this long for a
+# refresh: a message wakes the read at once.
+REFRESH_WAIT_SECONDS = 30
 # Where the launcher-side containers run. Modal's Dicts and Volumes are served
 # from us-east, and every request those containers answer is a handful of
 # round trips to them: a Dict get is ~25 ms here and ~250 ms from a far region.

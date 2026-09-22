@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import queue
 import subprocess
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,6 +21,7 @@ from config import (
     LAB_PORT,
     LAB_SECRET,
     PERSIST_LOGS_EVERY,
+    REFRESH_WAIT_SECONDS,
     REGION,
     STARTUP_GRACE_SECONDS,
     STORAGE,
@@ -32,6 +35,7 @@ from system.lease_protocol import (
     call_logs,
     leases,
     new_grant,
+    refreshes,
 )
 from system.logs import (
     CHANNELS,
@@ -76,7 +80,10 @@ def safe_relpath(path: str) -> bool:
 
 
 def is_active(grant: dict | None, beat: dict | None, now: float) -> bool:
-    if grant is None or beat is None:
+    """Whether a leased call is still working. A call marks its last beat
+    `exited` on the way out, so the answer is no from that moment rather than
+    a flatline later."""
+    if grant is None or beat is None or beat.get("exited"):
         return False
     return now - beat["last_beat_ts"] < FLATLINE * HEARTBEAT_SECONDS
 
@@ -114,6 +121,13 @@ lab_image = (
 # off the volume itself.
 resolved: dict[str, Artifact] = {}
 
+# Held by anything in this process that reloads the mount or holds a file on
+# it open: `state`, `attempt_launch`, and leasebook's `/artifact` route. A
+# reload replaces the mount's view of the volume and refuses to run while
+# this process has a file under it open, so the listener thread's refresh and
+# a request reading a manifest have to take turns (LESSONS.md).
+mount_lock = threading.Lock()
+
 
 def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
     """The current state of every declared artifact under `root`, keyed by
@@ -144,60 +158,64 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
     "blocked" otherwise. A failed artifact stays `ready`, so it can be run
     again. Every fact is from the one snapshot, so a lease granted after it
     is not on the map until the next refresh.
+
+    Holds `mount_lock` for the reload and the scan, so a caller can be kept
+    waiting by whatever else in this process is reading the mount.
     """
     # `now` before the snapshot: the reload and the Dict scans take a
     # measurable time, and taking the clock after them would charge that
     # time to every beat's age. A beat written during the snapshot is
     # newer than `now` and reads as live, which is the true answer.
     now = time.time()
-    if root == Path(STORAGE):
-        volume.reload()
-    beat_records = dict(beats.items())
-    grants = dict(leases.items())
+    with mount_lock:
+        if root == Path(STORAGE):
+            volume.reload()
+        beat_records = dict(beats.items())
+        grants = dict(leases.items())
 
-    # Subtrees the manifests read this scan share, decoded once: a run's
-    # legs each embed every leg before them. Gone with the scan; `resolved`
-    # keeps the artifacts.
-    memo: dict[str, Artifact] = {}
-    entries: dict[str, dict] = {}
-    for manifest in sorted(root.rglob(MANIFEST)):
-        path = manifest.parent.relative_to(root).as_posix()
-        grant = grants.get(path)
-        beat = beat_records.get(grant["call_id"]) if grant else None
-        active = is_active(grant, beat, now)
-        entry = {
-            "type": None,
-            "status": "conflict",
-            "error": None,
-            "depends_on": [],
-            "parameters": None,
-            "call_id": grant["call_id"] if grant else None,
-            "active": active,
-            "last_heartbeat": beat["last_beat_ts"] if beat else None,
-            "live_progress": beat.get("progress") if beat and active else None,
-            "durable_progress": None,
-        }
-        try:
-            if path not in resolved:
-                resolved[path] = Artifact.load(path, root, memo)
-        except ValueError as error:
-            entry["error"] = str(error)
-        else:
-            artifact = resolved[path]
-            present = list(artifact.status(root).completion.values())
-            entry.update(
-                type=type(artifact).__name__,
-                status="done" if all(present) else "partial" if any(present) else "declared",
-                depends_on=[dep.artifact_path.as_posix() for dep in artifact.deps()],
-                # This artifact's own fields, never a dependency's manifest. A
-                # dependency is a path in `depends_on` and nothing more: its own
-                # entry on this same map is where anything else about it lives,
-                # so nothing is stored twice and nothing here goes stale when it
-                # changes.
-                parameters=artifact.parameters(),
-                durable_progress=artifact.durable_progress(root),
-            )
-        entries[path] = entry
+        # Subtrees the manifests read this scan share, decoded once: a run's
+        # legs each embed every leg before them. Gone with the scan; `resolved`
+        # keeps the artifacts.
+        memo: dict[str, Artifact] = {}
+        entries: dict[str, dict] = {}
+        for manifest in sorted(root.rglob(MANIFEST)):
+            path = manifest.parent.relative_to(root).as_posix()
+            grant = grants.get(path)
+            beat = beat_records.get(grant["call_id"]) if grant else None
+            active = is_active(grant, beat, now)
+            entry = {
+                "type": None,
+                "status": "conflict",
+                "error": None,
+                "depends_on": [],
+                "parameters": None,
+                "call_id": grant["call_id"] if grant else None,
+                "active": active,
+                "last_heartbeat": beat["last_beat_ts"] if beat else None,
+                "live_progress": beat.get("progress") if beat and active else None,
+                "durable_progress": None,
+            }
+            try:
+                if path not in resolved:
+                    resolved[path] = Artifact.load(path, root, memo)
+            except ValueError as error:
+                entry["error"] = str(error)
+            else:
+                artifact = resolved[path]
+                present = list(artifact.status(root).completion.values())
+                entry.update(
+                    type=type(artifact).__name__,
+                    status="done" if all(present) else "partial" if any(present) else "declared",
+                    depends_on=[dep.artifact_path.as_posix() for dep in artifact.deps()],
+                    # This artifact's own fields, never a dependency's manifest. A
+                    # dependency is a path in `depends_on` and nothing more: its own
+                    # entry on this same map is where anything else about it lives,
+                    # so nothing is stored twice and nothing here goes stale when it
+                    # changes.
+                    parameters=artifact.parameters(),
+                    durable_progress=artifact.durable_progress(root),
+                )
+            entries[path] = entry
 
     for path, entry in entries.items():
         starting = is_starting(grants.get(path), beat_records.get(entry["call_id"]), now)
@@ -276,10 +294,14 @@ def leasebook():
         stop_logging = start_launcher_logging()
         log.info("leasebook container started")
 
+        # Set on the way out, for the listener thread below.
+        finished = threading.Event()
+
         @asynccontextmanager
         async def lifespan(_api):
             yield
             log.info("leasebook container stopped")
+            finished.set()
             stop_logging()
 
         api = FastAPI(lifespan=lifespan)
@@ -299,20 +321,50 @@ def leasebook():
         persisted = load_snapshot_from_volume(root)
         log.info(f"synced {sum(key.endswith(':container') for key in persisted)} call logs off the volume")
 
-        # This container's picture of the volume: the `state` map, computed
-        # here once and again only when the page's refresh button POSTs
-        # /refresh, which is also the only reload. Everything a request
-        # reads off the mount afterwards is that reload's image of it. No
-        # clock. Modal hands this function one input at a time (no
-        # `@modal.concurrent`), so a refresh never reloads while another
-        # request holds a file on the mount open.
-        latest = state()
+        # This container's picture of the volume: the `state` map, and the
+        # authority on it -- lagged, but complete, since an artifact's files
+        # never leave the volume once they land. Recomputed when a worker's
+        # message says its call has started or committed, when this container
+        # itself grants or releases a lease, and when the page asks. No
+        # clock: a volume nothing wrote to is a volume worth no reload.
+        # Everything a request reads off the mount in between is the last
+        # recompute's image of it.
+        latest: dict[str, dict] = {}
 
-        @api.post("/refresh")
-        def refresh_route() -> dict:
+        def recompute(reason: str) -> None:
             nonlocal latest
             latest = state()
-            log.debug(f"refreshed: {len(latest)} artifacts on the volume")
+            log.debug(f"refreshed ({reason}): {len(latest)} artifacts on the volume")
+
+        recompute("startup")
+
+        # Blocks on the queue until a call starts or exits, then recomputes
+        # once for everything that landed together -- the whole reason the
+        # dashboard needs no clock. The wait is bounded only so the thread
+        # notices its container going away. Nothing gets to end this loop: a
+        # read or a reload that failed costs one refresh, and the dashboard
+        # would stop keeping up for the rest of the container's life if the
+        # thread died of it.
+        def listen() -> None:
+            while not finished.is_set():
+                try:
+                    messages = refreshes.get_many(100, timeout=REFRESH_WAIT_SECONDS)
+                    for message in messages:
+                        log.info(f"{message['artifact_path']}: {message['call_id']} {message['event']}")
+                    recompute("worker")
+                except queue.Empty:
+                    continue
+                except Exception:
+                    log.exception("refresh listener: this refresh is lost; still listening")
+                    finished.wait(REFRESH_WAIT_SECONDS)
+
+        threading.Thread(target=listen, daemon=True).start()
+
+        # The manual reload: a manifest declared from the lab lands on the
+        # volume without a call, so nothing tells this container about it.
+        @api.post("/refresh")
+        def refresh_route() -> dict:
+            recompute("page")
             return {"artifacts": len(latest)}
 
         # The one state route for all three table views: one flat map of
@@ -346,9 +398,14 @@ def leasebook():
 
         # :path, not a plain path segment -- an artifact_path contains its own
         # /s (runs/my-run/pretraining), which a plain segment can't match.
+        # Both of these change a lease, which the map is computed from, so an
+        # accepted one recomputes before answering: the page's next fetch of
+        # /state shows what it just asked for, with nothing to poll for.
         @api.post("/launch/{artifact_path:path}")
         def launch_endpoint(artifact_path: str) -> dict:
             launched, message = attempt_launch(artifact_path)
+            if launched:
+                recompute("launch")
             return {"launched": launched, "message": message}
 
         # Stop whatever call is working on this artifact -- what the row's
@@ -359,20 +416,26 @@ def leasebook():
             if not safe_relpath(artifact_path):
                 return {"cancelled": False, "message": f"invalid artifact_path {artifact_path!r}"}
             cancelled, message = cancel_call(artifact_path)
+            if cancelled:
+                recompute("cancel")
             return {"cancelled": cancelled, "message": message}
 
         # One artifact as this container's disk holds it, off the image the
-        # last refresh reloaded: its manifest minus the dependency manifests
+        # last recompute reloaded: its manifest minus the dependency manifests
         # nested in it (a dependency is a path in the state map's
         # `depends_on`, and its own page is where it lives), and its step
         # log if its job writes one. Only ever what a worker committed under
-        # its lease; nothing streams an attempt's rows before that.
+        # its lease; nothing streams an attempt's rows before that. Under
+        # `mount_lock`, as every open file on the mount is: a recompute
+        # reloading underneath these two descriptors is what the lock exists
+        # to prevent. A sync def, so the lock is held on the thread that
+        # takes it -- do not make this one async.
         @api.get("/artifact/{artifact_path:path}")
         def artifact_endpoint(artifact_path: str) -> dict:
             if not safe_relpath(artifact_path):
                 return {"artifact_path": artifact_path, "manifest": {}, "train": [], "error": "invalid artifact_path"}
             folder = root / artifact_path
-            with open_json(folder / MANIFEST) as manifest, open_jsonl(folder / TRAIN_LOG) as rows:
+            with mount_lock, open_json(folder / MANIFEST) as manifest, open_jsonl(folder / TRAIN_LOG) as rows:
                 return {
                     "artifact_path": artifact_path,
                     "manifest": {key: value for key, value in manifest.items() if key != "dependencies"},
@@ -584,12 +647,12 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
     is reachable by anyone with the URL, so it's validated before touching a
     lease or a path built from it.
 
-    Readiness is read off the volume as it is now, after a reload: the
-    manifest at the path, and the manifest and completion files of each
-    direct dependency -- the same facts `state()` derives `ready` from, for
-    this one artifact instead of every one on the volume. The dashboard's
-    map is as old as its last refresh, so a launch judged on it could refuse
-    an artifact whose dependency has since finished.
+    Readiness is read off the volume as it is now, after a reload, under
+    `mount_lock`: the manifest at the path, and the manifest and completion
+    files of each direct dependency -- the same facts `state()` derives
+    `ready` from, for this one artifact instead of every one on the volume.
+    The dashboard's map is as old as its last recompute, so a launch judged on
+    it could refuse an artifact whose dependency has since finished.
 
     Resources come from the artifact's own `allocated_resources`, turned into
     `Function.with_options()` kwargs by `resource_options`. That call is
@@ -611,7 +674,7 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
         log.info(f"launch {artifact_path}: refused -- {message}")
         return False, message
 
-    log.info(f"launch {artifact_path}: requested")
+    log.debug(f"launch {artifact_path}: requested")
     if not safe_relpath(artifact_path):
         return refuse(f"invalid artifact_path {artifact_path!r}")
 
@@ -622,21 +685,22 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
         return refuse(f"{artifact_path}: already has a call under way ({grant['call_id']}) -- not launching")
 
     log.debug(f"launch {artifact_path}: no call under way; reading the volume")
-    if root == Path(STORAGE):
-        volume.reload()
-    try:
-        artifact = Artifact.load(artifact_path, root)
-    except (FileNotFoundError, ValueError) as error:
-        return refuse(str(error))
-    if artifact.producer is None:
-        return refuse(f"{artifact_path}: nothing produces it -- done when its dependencies are")
-    if all(artifact.status(root).completion.values()):
-        return refuse(f"{artifact_path}: already done")
-    blocked_by = [
-        dep.artifact_path.as_posix()
-        for dep in artifact.deps()
-        if not (footprint := dep.status(root)).manifest or not all(footprint.completion.values())
-    ]
+    with mount_lock:
+        if root == Path(STORAGE):
+            volume.reload()
+        try:
+            artifact = Artifact.load(artifact_path, root)
+        except (FileNotFoundError, ValueError) as error:
+            return refuse(str(error))
+        if artifact.producer is None:
+            return refuse(f"{artifact_path}: nothing produces it -- done when its dependencies are")
+        if all(artifact.status(root).completion.values()):
+            return refuse(f"{artifact_path}: already done")
+        blocked_by = [
+            dep.artifact_path.as_posix()
+            for dep in artifact.deps()
+            if not (footprint := dep.status(root)).manifest or not all(footprint.completion.values())
+        ]
     if blocked_by:
         return refuse(f"{artifact_path}: blocked on {blocked_by}")
 
@@ -644,7 +708,7 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
         log.info(f"launch {artifact_path}: dropping the stale lease of {grant['call_id']}")
     leases.pop(artifact_path, None)
     options = resource_options(artifact.allocated_resources)
-    log.info(f"launch {artifact_path}: spawning run_job" + (f" with {options}" if options else ""))
+    log.debug(f"launch {artifact_path}: asking run_job to spawn" + (f" with {options}" if options else ""))
     fn = run_job.with_options(**options) if options else run_job
     call = fn.spawn(artifact_path)
     grant = new_grant(call.object_id, type(artifact).__name__)
@@ -653,8 +717,9 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
     # anything: what lists it under the artifact and what its log starts
     # with, so a call whose container never runs is still a call that was made.
     call_history.put(artifact_path, [*(call_history.get(artifact_path) or []), grant])
-    message = f"granted lease for {artifact_path} -> {call.object_id}"
-    launcher_log(call.object_id, message + (f" with {options}" if options else ""))
+    launcher_log(call.object_id, f"launch requested for {artifact_path}" + (f" with {options}" if options else ""), "DEBUG")
+    message = f"spawned {artifact_path} -> {call.object_id}, lease granted"
+    launcher_log(call.object_id, message)
 
     return True, message
 
@@ -668,14 +733,26 @@ def cancel_call(artifact_path: str) -> tuple[bool, str]:
     as one that went stale -- red on the dashboard, for something that was
     stopped on purpose.
 
+    A cancel request can arrive after the call is over. What the call's own
+    output says once the request has been sent is what the logged outcome
+    says, so a request that came too late never reads as a stopped job.
     """
     grant = leases.pop(artifact_path, None)
     if grant is None:
         log.info(f"cancel {artifact_path}: refused -- no active call to cancel")
         return False, f"{artifact_path}: no active call to cancel"
-    log.info(f"cancel {artifact_path}: lease released; cancelling {grant['call_id']}")
-    modal.FunctionCall.from_id(grant["call_id"]).cancel()
-    message = f"cancelled {artifact_path} -> {grant['call_id']}"
+    log.debug(f"cancel {artifact_path}: lease released; requesting cancel of {grant['call_id']}")
+    launcher_log(grant["call_id"], f"cancel requested for {artifact_path}; lease released", "DEBUG")
+    call = modal.FunctionCall.from_id(grant["call_id"])
+    call.cancel()
+    try:
+        call.get(timeout=0)
+        outcome = "the request came too late -- the call had already finished and its result stands"
+    except TimeoutError:  # no output yet: the call was live, so the request is what ends it
+        outcome = "cancelled -- the call had no result when the request landed"
+    except Exception as error:
+        outcome = f"the request came after the call ended: {type(error).__name__}: {error}"
+    message = f"{artifact_path} -> {grant['call_id']}: {outcome}"
     launcher_log(grant["call_id"], message)
     return True, message
 

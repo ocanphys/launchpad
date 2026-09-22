@@ -24,7 +24,11 @@ writer each**, and one file `persist_logs` writes them to:
   never opens its log on the mount.
 - `{call_id}:launcher`, the launcher's: one row per thing it did to the call
   (`launcher_log`: the grant, a cancel). Written at grant time, so a call
-  whose container never runs still has a log saying it was made.
+  whose container never runs still has a log saying it was made. The row's
+  level is the caller's, by name: DEBUG for what was asked of the call (the
+  launch request and its resources, a cancel request), INFO for what became
+  of it (the lease granted, what the cancel found). The page hides DEBUG
+  until a reader switches it on, so a call reads as its outcomes first.
 - `{call_id}:volume`, the file's: `{artifact_path}/logs/{call_id}.jsonl`,
   read at leasebook startup and on every persist pass.
 
@@ -36,7 +40,9 @@ one stream, and a thread republishes the whole list every
 `HEARTBEAT_SECONDS`, once more when the ASGI app shuts down (or when
 building it raised), so the rows logged on the way out land. A publish
 that fails is a warning row the next one carries. What lands there:
-the container starting and stopping, the startup sync, every refresh,
+the container starting and stopping, the startup sync, every recompute of
+the state map and what prompted it (a call that started or ended, named
+with its event; a launch or a cancel; the page),
 every step of a launch (`attempt_launch`: requested, refused and why,
 reading the volume, spawning with which resources, the grant) and
 of a cancel, and any request that raised, with its traceback (the
@@ -101,7 +107,7 @@ A leg's `train.jsonl` (one row per training step, tagged with the attempt
 that took it, written by `artifacts/core/SGD/steplog.py`) is the worker's
 own file and nothing else: it reaches the volume when the worker commits
 under its lease, and `/artifact/<path>` reads it off leasebook's mount as
-the last refresh reloaded it. No attempt's rows are streamed before that
+the last reload left it. No attempt's rows are streamed before that
 commit. The page draws every row, one uPlot line per attempt.
 
 ## Levels
@@ -116,7 +122,8 @@ and every indeterminate retry at DEBUG.
 started, job milestones (e.g. per dataset subset), checkpoint progress (e.g.
 every Nth training step, not every step), job completed.
 Example: `artifacts/*/jobs.py`'s jobs narrate their own start/progress/done at
-INFO; `runtime.py` logs `"done"` once a call's writes are safely committed.
+INFO; `runtime.py` logs `"done"` once a call's writes are safely committed,
+and a line naming the ending it is about to tell the launcher about.
 
 **WARNING** -- recoverable/retryable problems that don't lose work:
 heartbeat write failure, a lease indeterminate-retry that eventually

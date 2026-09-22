@@ -18,6 +18,15 @@ beats = modal.Dict.from_name(f"{APP_NAME}-beats", create_if_missing=True)
 call_logs = modal.Dict.from_name(f"{APP_NAME}-call-logs", create_if_missing=True)
 call_history = modal.Dict.from_name(f"{APP_NAME}-call-history", create_if_missing=True)
 
+# One Queue, two messages per call -- "started", once its first beat is
+# readable, and one naming how it ended, after its `volume.commit()` -- put
+# by the worker and taken by the one leasebook container, whose listener
+# thread recomputes its state map when it finds one. A message is
+# `{"artifact_path", "call_id", "event"}`, where event is "started", "done",
+# "failed" or "lease lost": what to say in the launcher's log, not something
+# the map is computed from -- that is read off the volume, as ever.
+refreshes = modal.Queue.from_name(f"{APP_NAME}-refreshes", create_if_missing=True)
+
 LEASE_RETRIES = 5  # how many times an indeterminate lease read is worth re-asking
 LEASE_BACKOFF = 5.0  # seconds between retries.
 

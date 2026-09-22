@@ -22,7 +22,10 @@ doesn't).
 
 import json
 import logging
+import queue
 import sys
+import threading
+import time
 from pathlib import Path
 from tempfile import mkdtemp
 from unittest import TestCase
@@ -33,6 +36,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main
+
+# Every listener thread `leasebook` starts is a daemon that outlives the test
+# that made it, and it reads whatever `main.refreshes` names when it wakes.
+# Standing in for the real Queue here, before any test saves the module's
+# vars, is what keeps one of those threads from ever reaching Modal's.
+main.refreshes = None
 
 
 # `client` swaps the stubs straight into `main`; this hands the module back
@@ -45,6 +54,31 @@ def restore_main():
 
 
 # --- the stubs ---------------------------------------------------------------
+
+
+class Queue(queue.Queue):
+    """The `refreshes` Queue as the listener thread uses it: one blocking
+    read with a timeout, raising `queue.Empty` when nothing arrives."""
+
+    def get_many(self, n_values: int, timeout: float | None = None) -> list:
+        messages = [self.get(timeout=timeout)]
+        while len(messages) < n_values:
+            try:
+                messages.append(self.get_nowait())
+            except queue.Empty:
+                break
+        return messages
+
+
+def until(predicate, timeout: float = 2.0) -> bool:
+    """Whether `predicate` came true inside `timeout` -- how a test waits on
+    the listener thread without sleeping a fixed amount for it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 STATE = {
     "sources/tinyshakespeare": {
@@ -99,11 +133,17 @@ def client(**overrides):
         return overrides.get("state", STATE)
 
     main.state = state
+    # What a worker puts a message on when its call exits, and the listener
+    # thread blocks on. Its wait is long enough that an idle listener stays
+    # parked on its own queue for the rest of the session instead of waking
+    # up to read whichever one `main.refreshes` names by then.
+    calls["refreshes"] = main.refreshes = Queue()
+    main.REFRESH_WAIT_SECONDS = 300
     main.attempt_launch = lambda path: (
-        calls["launched"].append(path) or (True, f"granted {path}", None)
+        calls["launched"].append(path) or (overrides.get("launched", True), f"granted {path}")
     )
     main.cancel_call = lambda path: (
-        calls["cancelled"].append(path) or (True, f"cancelled {path}")
+        calls["cancelled"].append(path) or (overrides.get("cancelled", True), f"cancelled {path}")
     )
     main.jupyter = type("Stub", (), {"get_web_url": staticmethod(lambda: "https://lab.test")})()
     # The startup sync: nothing to reload, no log files to read.
@@ -220,10 +260,12 @@ def test_request_failures_are_logged_with_their_traceback():
     assert "RuntimeError: Dict unavailable" in captured.output[0]
 
 
-def test_state_is_computed_at_startup_and_on_refresh_only():
-    """`/state` serves the map the container holds; only POST /refresh
-    computes a new one. The logs, by contrast, are read from the Dicts on
-    every request: a row that lands in `call_logs` shows up without one."""
+def test_state_is_computed_when_something_changed_it_and_never_on_a_read():
+    """`/state` serves the map the container holds. A new one is computed
+    when a call exits, when this container grants or releases a lease, and
+    when the page asks -- never by a route that only reads. The logs, by
+    contrast, are read from the Dicts on every request: a row that lands in
+    `call_logs` shows up without any of that."""
     api, calls = client()
     assert calls["state"] == 1
     api.get("/state")
@@ -236,6 +278,57 @@ def test_state_is_computed_at_startup_and_on_refresh_only():
     main.call_logs["fc-1:container"] = [*main.call_logs["fc-1:container"], {"ts": 101.0, "level": "INFO", "logger": "job", "msg": "step 1"}]
     body = api.get("/logs/runs/toy/pretraining").json()
     assert [row["msg"] for row in body["calls"][2]["container"]] == ["boot: lease held", "step 1"]
+
+
+def test_a_call_that_exited_recomputes_the_map_without_anyone_asking():
+    """The whole point of the queue: the launcher's map catches up with the
+    volume because the worker said it had committed, not because the page
+    clicked."""
+    api, calls = client()
+    with api:
+        assert calls["state"] == 1
+        calls["refreshes"].put({"artifact_path": "runs/toy/pretraining", "call_id": "fc-1", "event": "done"})
+        assert until(lambda: calls["state"] == 2), "the listener never recomputed"
+        # A burst of messages is one recompute, not one apiece.
+        for call_id in ("fc-3", "fc-4", "fc-5"):
+            calls["refreshes"].put({"artifact_path": "sources/tinyshakespeare", "call_id": call_id, "event": "started"})
+        assert until(lambda: calls["state"] > 2)
+        time.sleep(0.05)
+        assert calls["state"] == 3, "each message in one batch recomputed separately"
+
+
+def test_an_accepted_launch_or_cancel_recomputes_before_it_answers():
+    """So the page's next fetch of /state shows the lease it just asked for,
+    with nothing to poll for and no refresh of its own to make."""
+    api, calls = client()
+    api.post("/launch/runs/toy/pretraining")
+    assert calls["state"] == 2
+    api.post("/cancel/runs/toy/pretraining")
+    assert calls["state"] == 3
+
+    # A refused one changed nothing, so there is nothing to recompute.
+    api, calls = client(launched=False, cancelled=False)
+    api.post("/launch/runs/toy/pretraining")
+    api.post("/cancel/runs/toy/pretraining")
+    api.post("/cancel/%2e%2e/etc/passwd")
+    assert calls["state"] == 1
+
+
+def test_the_artifact_route_and_a_recompute_never_read_the_mount_at_once():
+    """`mount_lock`: a reload replaces the mount under whatever has a file
+    open on it, so the route that opens one waits for the refresh holding
+    the lock, and only then answers."""
+    api, _ = client()
+    answered = threading.Event()
+
+    def read():
+        api.get("/artifact/runs/toy/pretraining")
+        answered.set()
+
+    with main.mount_lock:
+        threading.Thread(target=read, daemon=True).start()
+        assert not answered.wait(0.2), "the route read the mount while the lock was held"
+    assert answered.wait(2), "the route never answered after the lock was released"
 
 
 def test_launch_reaches_the_launcher():

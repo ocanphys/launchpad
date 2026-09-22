@@ -465,21 +465,32 @@ every other path continues.
 A state result is an observation over a scan interval, not a transactional
 snapshot: rebuild it whole, publish the completed map at once.
 
-### One reload, taken on request
+### One reload, taken when something changed
 
-The launcher container keeps no clock. It reloads the volume at startup and
-again only when the page asks (`POST /refresh`), and computes the `state`
-map off that reload: manifests, leases, heartbeats, what launching and the
-table need. Nothing else it serves is cached. A call's log channels are
-read from the Dicts on every request, so they are live; a leg's step log
-is read off the mount, which means off the last reload's image of it, and
-only inside a block that closes the descriptor before the request returns
-(`open_jsonl`). A reload and a read cannot both be in flight on the same
-mount: a read landing mid-reload sees a path that is briefly absent, and a
-file descriptor still open when a reload starts fails the reload. Neither
-presents as an error. What keeps them apart is that no request holds a
-descriptor past its own block, and Modal hands this function one input at
-a time; `leasebook` must never be given `@modal.concurrent`.
+The launcher container keeps no clock. It reloads the volume and recomputes
+the `state` map -- manifests, leases, heartbeats, what launching and the
+table need -- when something has changed what that map would say: a call
+has started or has committed and exited (it announces each on the
+`refreshes` Queue, which a listener thread in the launcher blocks on), this
+container granted or released a lease, or the page asked (`POST /refresh`,
+for a manifest declared from the lab, which no call announces). The map is then
+the authority on the volume: lagged by one message, but complete, because
+an artifact's files never leave the volume once they land. Nothing else the
+container serves is cached. A call's log channels are read from the Dicts on
+every request, so they are live; a leg's step log is read off the mount,
+which means off the last reload's image of it, and only inside a block that
+closes the descriptor before the request returns (`open_jsonl`).
+
+A reload and a read cannot both be in flight on the same mount: a read
+landing mid-reload sees a path that is briefly absent, and a file descriptor
+still open when a reload starts fails the reload. Neither presents as an
+error. What keeps them apart is one lock (`main.mount_lock`), taken by
+everything in that container which reloads the mount or opens a file on it,
+and the fact that no request holds a descriptor past its own block. The lock
+is never held across the listener's blocking read of the Queue, and the
+routes that take it stay sync `def`, so it is only ever held on a threadpool
+thread. `leasebook` must never be given `@modal.concurrent`: one container,
+one map, one writer of it.
 
 The volume is the source of truth, and nothing reaches the dashboard from a
 worker that the worker has not committed under its lease, except the log
@@ -499,6 +510,7 @@ For an eligible artifact, the executor:
 3. In the worker, refreshes storage and confirms the grant names this call (`system.runtime.initialize_worker`, `Lease.confirm("boot")`), loads the authoritative manifest (`Artifact.load`) and resolves its producer (`Artifact.job`), all in `main.run_job`.
 4. Calls `Job(artifact).run(root, worker)`. Inputs come from the artifact's direct dependencies; the job binds what it consumes.
 5. Confirms the grant again after the run and before the commit (`Lease.confirm("pre vol commit")`, `("commit")`), commits (`volume.commit` in `initialize_worker`), and logs the outcome under the call (`call_logs["{call_id}:container"]`). Exceptions propagate; failed attempts are not reported as success.
+6. Announces itself twice on the `refreshes` Queue, each message naming the artifact, the call and the event: `started`, once it holds the lease and has published its first heartbeat, and one naming how it ended, after the commit and after the last heartbeat, which is marked `exited`. Each message trails what it announces, never leads it: a launcher that reloaded earlier would find what it already had. A message carries no state of its own -- it says only that the volume and the Dicts are worth reading again, which the launcher then does for itself.
 
 Different artifact paths may run concurrently, including nested paths when dependencies permit it.
 

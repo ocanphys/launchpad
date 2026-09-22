@@ -140,17 +140,22 @@ def start_launcher_logging() -> Callable[[], None]:
     return stop
 
 
-def launcher_log(call_id: str, msg: str) -> None:
-    """Appends one row to `call_logs["{call_id}:launcher"]` and logs `msg`,
-    so what the launcher did to a call reads on the call's artifact page
-    and in the launcher's own log alike.
+def launcher_log(call_id: str, msg: str, level: str = "INFO") -> None:
+    """Appends one row to `call_logs["{call_id}:launcher"]` at `level` and logs
+    `msg` there too, so what the launcher did to a call reads on the call's
+    artifact page and in the launcher's own log alike.
+
+    `level` is a level name, the same string the row carries and the log views
+    filter on. DEBUG is for what was asked of a call -- the page hides those
+    rows until a reader switches the level on; what became of it is INFO.
 
     The append is a read-modify-write on one key, and the one leasebook
     container is its only writer.
     """
     key = f"{call_id}:launcher"
-    call_logs.put(key, [*(call_logs.get(key) or []), {"ts": time.time(), "level": "INFO", "logger": "launcher", "msg": msg}])
-    logging.getLogger("leasebook").info(msg)
+    entry = {"ts": time.time(), "level": level, "logger": "launcher", "msg": msg}
+    call_logs.put(key, [*(call_logs.get(key) or []), entry])
+    logging.getLogger("leasebook").log(logging.getLevelNamesMapping()[level], msg)
 
 
 @contextmanager

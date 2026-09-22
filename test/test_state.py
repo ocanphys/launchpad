@@ -338,6 +338,20 @@ class StateTests(unittest.TestCase):
         self.lease("sources/odyssey", "fc-1", beat_age=-30)
         self.assertTrue(self.state()["sources/odyssey"]["active"])
 
+    def test_a_call_that_marked_its_last_beat_exited_is_not_running(self):
+        """A worker marks the beat it leaves on the way out, so the row stops
+        saying "running" the moment the call is over rather than a flatline
+        later -- while its files, committed just before, are already there."""
+        declare(ODYSSEY, self.root)
+        self.lease("sources/odyssey", "fc-1", beat_age=0)
+        main.beats["fc-1"]["exited"] = True
+        entry = self.state()["sources/odyssey"]
+        self.assertFalse(entry["active"])
+        self.assertEqual(entry["last_heartbeat"], NOW)
+        self.assertEqual(entry["verdict"], "failed")
+        self.build(ODYSSEY)
+        self.assertEqual(self.state()["sources/odyssey"]["verdict"], "done")
+
     def test_a_beat_with_no_progress_is_live_without_one(self):
         declare(ODYSSEY, self.root)
         self.lease("sources/odyssey", "fc-1", beat_age=1)

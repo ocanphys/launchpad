@@ -111,6 +111,28 @@ mapping on the mount inside a job is covered by the same clear, as long as
 the reference lives in a frame and not on an object that outlives the call
 (a module global, a cache, the job instance).
 
+## A background thread makes the mount's reload race its readers
+
+`volume.reload()` replaces the mount's view of the volume and refuses to run
+while the process holds a file under it open. `leasebook` was safe from that
+without trying: Modal hands it one input at a time (no `@modal.concurrent`)
+and its routes are sync `def`, so a reload could never overlap a read. That
+argument stopped holding the day a thread started reloading on its own -- the
+listener that recomputes the state map when a worker's call exits. Both
+directions bite: the thread's reload while `/artifact/<path>` has
+`train.jsonl` open raises and loses the refresh, and a read that starts
+mid-reload sees files being swapped under it (a half-written manifest reads
+as a conflict that is not real).
+
+`main.mount_lock` is what holds them apart, and everything in that process
+which reloads the mount or opens a file on it takes it: `state()`,
+`attempt_launch`'s readiness read, and the `/artifact` route. Two rules keep
+it from becoming its own problem: never hold it across the listener's
+blocking queue read (that wait is `REFRESH_WAIT_SECONDS` long, and a request
+would wait it out), and keep those route handlers sync `def` -- an `async
+def` runs on the event loop rather than the threadpool, and blocking on a
+`threading.Lock` there stalls every other request in the container.
+
 ## A call the container never spoke for was invisible
 
 Everything the dashboard knew about a call came from what the call itself

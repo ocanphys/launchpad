@@ -149,10 +149,13 @@ class LauncherLoggingTests(unittest.TestCase):
                 self.assertEqual(self.messages(), ["a", "b", "started"])
 
     def test_launcher_log_reaches_the_call_channel_and_the_launcher_log(self):
+        launcher_log("fc-a", "launch requested", "DEBUG")
         launcher_log("fc-a", "granted lease")
         self.stop()
-        self.assertEqual([r["msg"] for r in self.store["fc-a:launcher"]], ["granted lease"])
-        self.assertEqual(self.messages(), ["granted lease"])
+        rows = self.store["fc-a:launcher"]
+        self.assertEqual([(r["level"], r["msg"]) for r in rows], [("DEBUG", "launch requested"), ("INFO", "granted lease")])
+        self.assertEqual(self.messages(), ["launch requested", "granted lease"])
+        self.assertEqual([r["level"] for r in self.store["launcher"]], ["DEBUG", "INFO"])
 
 
 class SnapshotTests(unittest.TestCase):

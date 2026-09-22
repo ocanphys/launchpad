@@ -35,7 +35,8 @@ Hash-based, client-side, two shapes (`app.js`'s `parseRoute`):
 - `#/artifact/<path>` -- one artifact's own page.
 
 `route()` re-runs on every `hashchange` and once at load: it switches the
-page over, points `refresh` at the new view and fetches it once.
+page over, points `view` at the new one, fetches it once and starts its
+poll.
 
 ## The table
 
@@ -59,31 +60,38 @@ These records belong to the container, so they have no call id.
 
 ## Fetching
 
-`/state` returns the server's most recently computed map, initially built
-when its container started. The header's refresh button POSTs `/refresh`,
-which makes the server reload the volume and recompute the map, then
-fetches the current view again (`app.js`'s `refresh` and `view`). An accepted
-launch or cancel automatically performs the same refresh. The button shows
-how the last fetch went: green `refresh` after a good answer, the error in
-red after a bad one, the last good screen staying up either way. State has
-no timer: a first heartbeat or an expired startup grace period appears
-when the next refresh recomputes the map.
+**The page mirrors the server and decides nothing.** `/state` returns the
+map the leasebook container holds, which *it* recomputes when a worker's
+call starts or exits (a message on the `launchpad-refreshes` Queue), when
+it grants or releases a lease, and when the refresh button POSTs
+`/refresh`. The page refetches the current view every `POLL_MS` (2000ms)
+and redraws what changed, so a row walks `runnable` -> `starting` ->
+`running` -> `done` on its own, a tick behind the server, with nobody
+clicking anything.
 
-Only log streams are polled. The dashboard fetches `/launcher-logs` on
-entry, then every `LOG_POLL_MS` (2000ms). That endpoint reads the
-`launcher` and `launcher:volume` channels off the Dict independently of
-`/state`, and the page unions them, a row counted once (`logview.js`); a
-table refresh does not restart this poll. A failed request preserves the last stream,
-shows a retry message and retries on the next tick.
+One loop, `app.js`'s `poll`, calling whatever `view` the route pointed at:
 
-An artifact page fetches `/artifact/<path>` (the step log as the server's
-disk holds it) once, then polls `/logs/<path>` every 2000ms, rebuilding
-the page with the same entry and curves and the new stream. The server
-answers both log routes from the Dicts alone, so polling never touches
-the mount. Both loops check `routeToken` before applying an answer and
-stop when the route changes. A refresh on an artifact page starts a new
-loop and the old one stops itself (`logPoll`). A tick that fails keeps the
-last stream up and tries again next tick.
+- The table fetches `/state` and `/launcher-logs` per tick. Rows are
+  rebuilt only when the map or the page's own pending marks differ from
+  what is on screen (`draw` compares them as text), so an idle table never
+  rebuilds under the reader. The launcher panel unions the `launcher` and
+  `launcher:volume` channels, a row counted once (`logview.js`).
+- An artifact page fetches `/state` and `/logs/<path>` per tick, and
+  `/artifact/<path>` -- the one route that reads a file on the server's
+  mount -- only when that artifact's own entry has changed, since nothing
+  else can have changed its manifest or step log.
+
+Every other polled route answers out of memory or the Dicts, so polling
+costs the volume nothing. A tick that fails keeps the last screen up, shows
+a retry message and tries again on the next one. Both the fetch and the
+sleeping loop check `routeToken`, so an answer for a view the reader has
+left is dropped and the old route's loop stops itself.
+
+The header's refresh button is the manual reload, for what nothing
+announces: a manifest declared from the lab. It POSTs `/refresh` and
+refetches the view. The button also shows how the last fetch went: green
+`refresh` after a good answer, the error in red after a bad one, the last
+good screen staying up either way.
 
 - **Coming back from an artifact's page doesn't wait on a fetch.**
   `route()` redraws immediately from `lastPayload` (whatever the last fetch
@@ -119,23 +127,24 @@ the dot palette (green run, red stop, blue starting).
 A button reflects server state (`done`/`active`/`verdict`/`ready`/`blocked_by`) directly --
 there's no client-side tracking of whether a launch is "in progress" in the
 sense of waiting for it to finish. The one piece of local state, `pending`,
-remembers what the page has asked since the last refresh: a clicked button
-turns blue and disabled and reads `starting` (or `stopping`) from the click
-on, and stays that way until the refresh after an accepted request replaces
-the map with one that knows about it. A request the server refused (`launched`/
-`cancelled` false, or an error) clears its entry at once, so the button
-goes back to what the map says.
+covers the round trip and nothing more: a clicked button turns blue and
+disabled and reads `starting` (or `stopping`) from the click until the
+server answers. The server recomputes its map before answering an accepted
+launch or cancel, so the fetch right after already knows what was asked
+for, and a refused request lands on a map that says why.
 
-After the refresh, a call that has been granted but not yet beaten reads
-as `starting` while its lease is younger than `STARTUP_GRACE_SECONDS`
-(60 seconds in `config.py`). The row has a blue dot with a tooltip saying
+A call that has been granted but not yet beaten reads as `starting` while
+its lease is younger than `STARTUP_GRACE_SECONDS`
+(60 seconds in `config.py`) -- what a row shows between the launch and the
+call's own "started" message, which is the container booting. The row has a blue dot with a tooltip saying
 it is waiting for the first heartbeat, and a blue, disabled `starting`
 button even if `ready` is true. At or after that deadline, a call that
 still has no heartbeat reads as failed: the dot is red, its tooltip
 explains that no first heartbeat arrived, and the button offers `run`
 again if the artifact is ready. A heartbeat ends startup: a live one
-means `running` and offers `stop`; a stale one means `failed`. These labels
-are recomputed on refresh; they do not advance on a browser timer.
+means `running` and offers `stop`; a stale one means `failed`, as does the
+beat a call marks on its way out. These labels are the server's, recomputed
+when it recomputes its map; they do not advance on a browser timer.
 
 ## The artifact page
 
@@ -156,10 +165,12 @@ stream too. The heading holds one checkbox per level present; DEBUG starts
 off, and the choice survives refetches. Each call arrives with all three
 channels of its log (see [LOGGING.md](LOGGING.md)) and `artifactview.js`
 unions them, one row counted once. The stream is polled while the page is
-open; the curves are the file as the last refresh reloaded it.
+open; the curves are the file as the server's last reload left it, refetched
+when the artifact's entry on the state map changes -- which a call's exit
+is what causes.
 
 ## Known inefficiencies
 
-- **A refresh snapshots every historical beat record.** Nothing prunes
+- **A recompute snapshots every historical beat record.** Nothing prunes
   old ones from that `modal.Dict`, so `state()`'s cost grows with the
   deployment's total call history, not its current active-call count.
