@@ -4,9 +4,9 @@ artifacts/sources/, artifacts/tokenizers/, artifacts/tokenized/,
 artifacts/dataset/, artifacts/stages/* for those (spec.md, section 4).
 
 One job, one artifact. That artifact may comprise several files, but they
-all live in its folder, and the resolver has already created that folder
-(writing the manifest into it) before run() is called -- so no job makes
-directories of its own.
+all live in its folder, and declaration (`lab.declare`) has already created
+that folder, writing the manifest into it, before run() is called -- so no
+job makes its own folder, only subfolders inside it.
 """
 
 from abc import ABC, abstractmethod

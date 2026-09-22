@@ -2,13 +2,13 @@ import time
 
 import modal
 
-from config import APP_NAME, VOLUME_NAME
+from config import APP_NAME
 
 # Four Dicts, not one shared store with prefixed keys: an artifact_path is
 # already a unique key in `leases` and `call_history`, a call_id is already a
 # unique key in `beats`, and `call_logs` holds three channels per call
-# (`:launcher`, `:container`, `:volume`, one writer each). They never need to
-# tell each other's keys apart because they are never in the same Dict.
+# (`:launcher`, `:container`, `:volume`, one writer each) and the launcher's
+# own log under `launcher` and `launcher:volume`, the same way.
 # Every key is a top-level key, and every key has one writer: the worker
 # never touches what the launcher writes and the other way round.
 # `call_logs` is its own Dict rather than a field of the beat so that a copy
@@ -17,7 +17,6 @@ leases = modal.Dict.from_name(f"{APP_NAME}-leases", create_if_missing=True)
 beats = modal.Dict.from_name(f"{APP_NAME}-beats", create_if_missing=True)
 call_logs = modal.Dict.from_name(f"{APP_NAME}-call-logs", create_if_missing=True)
 call_history = modal.Dict.from_name(f"{APP_NAME}-call-history", create_if_missing=True)
-volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 LEASE_RETRIES = 5  # how many times an indeterminate lease read is worth re-asking
 LEASE_BACKOFF = 5.0  # seconds between retries.
@@ -60,7 +59,7 @@ def fence(artifact_path: str, my_call_id: str) -> tuple[str, dict | None]:
       time, then give up.
 
     Always the module's own `leases` Dict. Nothing here runs anywhere but inside a
-    container or the local entrypoint, both of which have a real Dict to reach.
+    container, which has a real Dict to reach.
     """
     try:
         grant = leases.get(artifact_path)

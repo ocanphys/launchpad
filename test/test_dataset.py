@@ -79,6 +79,7 @@ class DataSetTests(unittest.TestCase):
             ):
                 with self.subTest(train=train, valid=valid):
                     dataset = DataSet.from_sources(NO_EOT, train, valid)
+                    (root / dataset.artifact_path).mkdir(parents=True)  # as declaration would
                     DataSetJob(dataset).run(root, Mock())
                     self.assertEqual(
                         dataset.paths(root)["training set"].read_bytes(),
@@ -113,6 +114,7 @@ class DataSetTests(unittest.TestCase):
                 )
             )
             dataset = DataSet.from_sources(TOKENIZER, (FIRST, SECOND, THIRD), (THIRD, FIRST))
+            (root / dataset.artifact_path).mkdir(parents=True)  # as declaration would
             for contents, expected_train, expected_valid in (
                 (([1, 2], [3], [4, 5]), [1, 2, 257, 3, 257, 4, 5], [4, 5, 257, 1, 2]),
                 (([1, 2], [], [4, 5]), [1, 2, 257, 257, 4, 5], [4, 5, 257, 1, 2]),

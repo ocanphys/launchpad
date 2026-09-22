@@ -1,9 +1,9 @@
 """Artifact <-> manifest dict <-> bytes on disk.
 
 The one place field annotations are interpreted, and the seam to replace if
-the codec ever changes: artifact.py calls `to_manifest`, `from_manifest` and
-`dependencies`, and nothing else in the repo reaches past those. Nothing
-here touches storage.
+the codec ever changes: artifact.py calls `to_manifest`, `parameters`,
+`from_manifest` and `dependencies`, and nothing else in the repo reaches
+past those. Nothing here touches storage.
 """
 
 from __future__ import annotations
@@ -87,34 +87,50 @@ def _encode(value: object) -> object:
     return value
 
 
-def _decode(annotation: object, value: object) -> object:
+def _decode(annotation: object, value: object, memo: dict[str, Artifact] | None) -> object:
     """One field value rebuilt from JSON, shaped by its declared type.
 
     JSON can't tell a tuple from a set from a list, or a nested config from
     any other dict. A union of artifact types isn't ambiguous -- every
     manifest names its own concrete type -- but any other multi-arm union is.
 
-    _decode(tuple[str, ...], ["<pad>", "<unk>"]) -> ("<pad>", "<unk>")
+    _decode(tuple[str, ...], ["<pad>", "<unk>"], None) -> ("<pad>", "<unk>")
     """
     if get_origin(annotation) in (UnionType, Union):
         if value is None:
             return None
         if _holds_artifacts(annotation):
-            return from_manifest(value)
+            return from_manifest(value, memo)
         arms = [arm for arm in get_args(annotation) if arm is not type(None)]
         if len(arms) != 1:
             raise TypeError(f"can't decode into {annotation}: more than one arm")
-        return _decode(arms[0], value)
+        return _decode(arms[0], value, memo)
     if get_origin(annotation) is tuple:
-        return tuple(_decode(get_args(annotation)[0], item) for item in value)
+        return tuple(_decode(get_args(annotation)[0], item, memo) for item in value)
     if get_origin(annotation) is frozenset:
-        return frozenset(_decode(get_args(annotation)[0], item) for item in value)
+        return frozenset(_decode(get_args(annotation)[0], item, memo) for item in value)
     if _is_artifact(annotation):
-        return from_manifest(value)
+        return from_manifest(value, memo)
     if is_dataclass(annotation):
         hints = get_type_hints(annotation)
-        return annotation(**{k: _decode(hints[k], v) for k, v in value.items()})
+        return annotation(**{k: _decode(hints[k], v, memo) for k, v in value.items()})
     return value
+
+
+def parameters(artifact: Artifact) -> dict:
+    """An artifact's own fields as JSON, sorted by name: the `"parameters"`
+    half of its manifest, without the dependencies' manifests.
+
+    The parameters/dependencies split is read off the annotations, so it is
+    the same split regardless of what a field happens to hold. `commit` and
+    `allocated_resources` are neither, being about running and not state.
+    """
+    dep_fields = dependencies(type(artifact))
+    return {
+        f.name: _encode(getattr(artifact, f.name))
+        for f in sorted(fields(artifact), key=lambda f: f.name)
+        if f.name not in dep_fields and f.name not in ("commit", "allocated_resources")
+    }
 
 
 def to_manifest(artifact: Artifact) -> dict:
@@ -122,36 +138,37 @@ def to_manifest(artifact: Artifact) -> dict:
     its type, its commit, its resources, its own parameters, and a manifest
     apiece for the artifacts it's built from.
 
-    The parameters/dependencies split is read off the annotations, so it is
-    the same split regardless of what a field happens to hold. Key order is
-    fixed -- the five here as written, everything below sorted -- so the file
-    stays a pure function of the artifact even when a dataclass's fields are
-    reordered.
+    Key order is fixed -- the five here as written, everything below sorted
+    -- so the file stays a pure function of the artifact even when a
+    dataclass's fields are reordered.
     """
-    dep_fields = dependencies(type(artifact))
-    parameters: dict[str, object] = {}
-    deps: dict[str, object] = {}
-    for f in fields(artifact):
-        if f.name in ("commit", "allocated_resources"):
-            continue  # their own top-level keys, being about running and not state
-        target = deps if f.name in dep_fields else parameters
-        target[f.name] = _encode(getattr(artifact, f.name))
     cls = type(artifact)
     return {
         "artifact": f"{cls.__module__}.{cls.__qualname__}",
         "commit": artifact.commit,
         "allocated_resources": _encode(artifact.allocated_resources),
-        "parameters": dict(sorted(parameters.items())),
-        "dependencies": dict(sorted(deps.items())),
+        "parameters": parameters(artifact),
+        "dependencies": {
+            name: _encode(getattr(artifact, name)) for name in dependencies(cls)
+        },
     }
 
 
-def from_manifest(data: dict) -> Artifact:
+def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifact:
     """The artifact a manifest describes and the tree under it, unbound.
 
     Each node keeps the commit recorded for it, so a subtree produced by
     older code stays visibly older.
+
+    `memo` maps a manifest's JSON to the artifact it decoded to. One dict
+    across many calls hands back the same instance for a subtree they share
+    (the dataset under every leg of a run, each leg under the next) instead
+    of decoding it again; the instances are frozen, so sharing them changes
+    nothing but the work.
     """
+    key = json.dumps(data, sort_keys=True) if memo is not None else None
+    if key is not None and key in memo:
+        return memo[key]
     cls = locate(data["artifact"])
     hints = get_type_hints(cls)
     plugged = {
@@ -160,7 +177,10 @@ def from_manifest(data: dict) -> Artifact:
         **data["parameters"],
         **data["dependencies"],
     }
-    return cls(**{name: _decode(hints[name], value) for name, value in plugged.items()})
+    artifact = cls(**{name: _decode(hints[name], value, memo) for name, value in plugged.items()})
+    if key is not None:
+        memo[key] = artifact
+    return artifact
 
 
 def manifest_json(manifest: dict) -> str:

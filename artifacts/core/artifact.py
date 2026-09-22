@@ -1,7 +1,7 @@
 """The base artifact model: parameters plugged together with the artifacts
 they're built from, a folder each artifact owns, and a manifest that rebuilds
 it. Concrete types live in sources/, tokenizers/, tokenized/, dataset/,
-mappeddataset/, models/*.
+mappeddataset/, stages/*.
 
 An artifact has three lives, and this class carries all three:
 
@@ -185,20 +185,32 @@ class Artifact(ABC):
         else -- see artifacts.core.manifest."""
         return manifest.to_manifest(self)
 
-    @staticmethod
-    def from_manifest(data: dict) -> Artifact:
-        """The artifact a manifest describes and the tree under it, unbound."""
-        return manifest.from_manifest(data)
+    def parameters(self) -> dict:
+        """This artifact's own fields as JSON: the `"parameters"` half of
+        `to_manifest`, without the dependencies' manifests."""
+        return manifest.parameters(self)
 
     @staticmethod
-    def load(artifact_path: Path | str, root: Path | str | None = None) -> Artifact:
+    def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifact:
+        """The artifact a manifest describes and the tree under it, unbound.
+
+        `memo`, one dict across many calls, hands back the same instance for a
+        manifest seen before instead of decoding it again (see
+        artifacts.core.manifest.from_manifest).
+        """
+        return manifest.from_manifest(data, memo)
+
+    @staticmethod
+    def load(
+        artifact_path: Path | str, root: Path | str | None = None, memo: dict[str, Artifact] | None = None
+    ) -> Artifact:
         """The artifact declared at `root / artifact_path`, always unbound --
         even when every one of its files is there. Bind it to use them.
 
         Raises unless the manifest rebuilds an artifact that belongs at the
         folder it was read from: a path is a pure function of parameters, so a
         manifest disagreeing with its own folder was copied or renamed, and
-        nothing beside it is about what it claims.
+        nothing beside it is about what it claims. `memo` is `from_manifest`'s.
         """
         wanted = Path(artifact_path)
         if wanted.is_absolute() or ".." in wanted.parts:
@@ -211,7 +223,7 @@ class Artifact(ABC):
         except json.JSONDecodeError as error:
             raise ValueError(f"{path} is not readable JSON: {error}") from error
         try:
-            artifact = Artifact.from_manifest(data)
+            artifact = Artifact.from_manifest(data, memo)
         except (ImportError, AttributeError, KeyError, TypeError, ValueError) as error:
             raise ValueError(f"{path} is not a readable manifest: {error!r}") from error
         if artifact.artifact_path != wanted:
@@ -314,8 +326,8 @@ class Artifact(ABC):
 
         The dashboard shows this when no call is running and the call's own
         self-report (system.runtime.Worker.progress) when one is. A subclass
-        whose job writes intermediate state overrides it -- MambaPretraining
-        reports its furthest checkpoint, which says more than "0 of 2 files".
+        whose job writes intermediate state overrides it -- SGD.Training
+        reports its furthest checkpoint, which says more than "0 of 1 files".
         """
         completion = self.status(root).completion
         if not completion:

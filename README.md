@@ -46,11 +46,15 @@ where things live and how traffic flows between them.
   cancel), `{call_id}:container` (every log row the call has produced so
   far, republished whole on each beat) and `{call_id}:volume` (the file's
   rows, read when the dashboard starts and on every persist pass).
+  The launcher's own log is two more keys of the same kind: `launcher`
+  (what the leasebook container has logged, republished whole every
+  heartbeat) and `launcher:volume` (its file's rows, `logs/launcher.jsonl`
+  at the volume root).
 
 ## Dashboard
 
 The web app (`leasebook`) serves a small dashboard: one table, one row per
-artifact on the volume, plus a drill-down page per artifact. No build step,
+artifact on the volume, a live launcher-log side panel, and a drill-down page per artifact. No build step,
 no framework. Full writeup: [docs/UI.md](docs/UI.md).
 
 ## The lab
@@ -98,13 +102,14 @@ its own, and JupyterLab's own autosave does the rest.
   - **One `state` map in memory, computed at startup and on `POST
     /refresh`.** `state()` is one `volume.reload()`, one `leases`/`beats`
     Dict snapshot and one glob of the manifests off the **local mount**:
-    what launching and the table need, and nothing more. That reload is
-    the only one this container ever does, so a file read off the mount
-    afterwards is that reload's image of it. No clock. Modal hands
-    `leasebook` one input at a time (no `@modal.concurrent`), so a refresh
-    never reloads while another request holds a file open. It writes
+    what the table needs, and nothing more. A file read off the mount
+    afterwards is that reload's image of it; the only other reload is a
+    `/launch`, which reads one artifact fresh. No clock. Modal hands
+    `leasebook` one input at a time (no `@modal.concurrent`), so no reload
+    happens while another request holds a file open. It writes
     nothing to the volume; at startup it runs `load_snapshot_from_volume`
-    once so the Dicts and the files agree after any gap.
+    once so the Dicts and the files agree after any gap. Runs pinned to
+    `REGION`, next to Modal's Dicts, so a Dict read is a short round trip.
   - `/refresh`: what the page's refresh button POSTs. Reloads and
     recomputes the map.
   - `/state`: that map, one flat map of every artifact on the volume. An
@@ -120,10 +125,13 @@ its own, and JupyterLab's own autosave does the rest.
     read from the `call_logs` Dict now (`{call_id}:launcher`, `:container`,
     `:volume`; the page dedupes). Dict reads only, never the mount, which
     is what lets an open artifact page poll it.
-  - `/launch/{artifact_path:path}`: checks the lease, makes a `.remote()`
-    call to `declared_artifact` (below) to confirm the artifact is
-    declared and ready, then spawns `run_job` and writes the new grant --
-    returns immediately, it doesn't wait for the job to finish.
+  - `/launcher-logs`: the launcher's own log, `call_logs["launcher"]` and
+    `["launcher:volume"]` as the Dict holds them (the page unions them),
+    polled by the dashboard's panel every two seconds. Dict reads only.
+  - `/launch/{artifact_path:path}`: checks the lease, reloads the volume
+    and reads the artifact's manifest and its direct dependencies' files to
+    confirm it is declared and ready, then spawns `run_job` and writes the
+    new grant -- returns immediately, it doesn't wait for the job to finish.
   - `/cancel/{artifact_path:path}`: releases the artifact's lease and cancels
     the call holding it -- the lease first, so a worker between checkpoints
     discovers it lost the artifact even if the cancel itself never lands.
@@ -134,20 +142,15 @@ its own, and JupyterLab's own autosave does the rest.
   (`load_snapshot_from_volume`), append every call's new Dict rows
   (`save_snapshot_to_volume`), commit. Schedules only fire on a deployed
   app (`modal deploy`), not under `modal serve`.
-- **`declared_artifact`** and **`run_job`** are separate Modal functions,
-  each with their own container and their own mount of the volume --
-  `declared_artifact` computes `state()` and picks one entry; `run_job` writes
-  locally and only publishes those writes with an explicit
-  `volume.commit()` right before exiting. Nothing either writes is visible
-  to any other reader, mounted or not, until that commit lands.
-- **The local CLI** (`launch_job`, a `modal.local_entrypoint`) has no mount
-  at all and never touches the volume directly -- it reads/writes the
-  `leases`/`beats` Dicts directly (reachable from anywhere), and reaches
-  everything volume-shaped through a `.remote()`/`.spawn()` call into a
-  container that has one (`declared_artifact`, `run_job`). `lab.py`
-  (below) is the exception: it's meant to run *inside* a container that
-  already has the volume mounted (a notebook server), so its functions
-  touch `Path(STORAGE)` directly.
+- **`run_job`** is its own Modal function, with its own container and its
+  own mount of the volume: it writes locally and only publishes those
+  writes with an explicit `volume.commit()` right before exiting. Nothing
+  it writes is visible to any other reader, mounted or not, until that
+  commit lands.
+- **`lab.py`** runs *inside* a container that already has the volume
+  mounted (the notebook server), so its functions touch `Path(STORAGE)`
+  directly; `local.py` is how a laptop gets there, one `.remote()` call
+  into a container that has the mount.
 
 So the volume is always the actual source of truth; every reader --
 mounted or not -- is working from some snapshot of it: a local mount
@@ -163,23 +166,24 @@ the shape of it. Each artifact family (`artifacts/sources/`,
 `Artifact` subclass (parameters, where it lives, what files it comprises)
 with exactly one `Job` subclass that produces it -- no `job_uid`, no per-run
 config file. A `Job` subclass declares what it produces with one class
-annotation (`artifact: Tokenizer`), and defining the class registers it as
-that type's producer automatically, at import time
-(`Job.__init_subclass__` populating `artifacts.core.job.REGISTRY`). Its inputs are derived,
-never declared separately: `artifact.deps()` -- the artifact-valued
-parameters of the one thing it produces -- so a job's dependency list can
-never drift out of sync with what its own artifact actually names.
+annotation (`artifact: Tokenizer`); the artifact names its job the other way
+round, as a dotted string (`producer: ClassVar[str] =
+"artifacts.tokenizers.bpe.jobs.TokenizerJob"`) that only `Artifact.job()`
+ever imports, so resolving and inspecting never load a family's `jobs.py`.
+Its inputs are derived, never declared separately: `artifact.deps()` -- the
+artifact-valued parameters of the one thing it produces -- so a job's
+dependency list can never drift out of sync with what its own artifact
+actually names.
 
 Declaring (writing `manifest.json` files ahead of the work, for a whole
 dependency tree at once) and launching (granting a lease and spawning the
-job that fills one manifest in) are separate steps -- see
-`artifacts.core.resolve` (`resolve`/`declare`) and `main.attempt_launch`.
-There's no per-job `resources`
-block in a config file; a job's resource ask lives on its own artifact
-(`allocated_resources: Resources`, e.g. `Resources(gpu_type="A100")`),
-turned into `Function.with_options(...)` kwargs by `grant_and_spawn` right
-before spawning -- an artifact that declares none runs on `run_job`'s own
-default pool.
+job that fills one manifest in) are separate steps -- see `lab.declare`
+(over `artifacts.core.resolve`) and `main.attempt_launch`. There's no
+per-job `resources` block in a config file; a job's resource ask lives on
+its own artifact (`allocated_resources: Resources`, e.g.
+`Resources(gpu_type="A100")`), turned into `Function.with_options(...)`
+kwargs by `resource_options` right before `attempt_launch` spawns -- an
+artifact that declares none runs on `run_job`'s own default pool.
 
 ## Scheduling, deferred
 
@@ -188,8 +192,7 @@ There is no queue in the tree. Launching is per artifact and by hand:
 plan and works through it was built, run against real containers, and taken
 back out -- the launcher underneath it wants simplifying first.
 
-What it looked like, every way it broke, and what to do differently:
-[docs/QUEUES.md](docs/QUEUES.md). The code itself is in `stash@{0}`.
+The code is in `git stash` ("queue but its got complicated").
 
 ## One job, traced
 
@@ -201,17 +204,14 @@ the Dicts' rows on its schedule.
 
 ```mermaid
 sequenceDiagram
-    participant L as Launcher (cli / web)
+    participant L as Launcher (leasebook)
     participant Le as Leases (Dict)
     participant B as Beats + call_logs + call_history (Dicts)
-    participant D as declared_artifact (container)
     participant V as Volume (source of truth)
     participant J as Job container (run_job)
 
     L->>Le: GET lease -- already active?
-    L->>D: remote(): load manifest, check status
-    D->>V: reload(); read manifest.json + files
-    D-->>L: (artifact, ready?)
+    L->>V: reload(); read manifest.json + dependencies' files -- ready?
     L->>Le: DELETE stale grant (if any)
     L->>J: spawn(artifact_path)
     L->>Le: PUT new grant

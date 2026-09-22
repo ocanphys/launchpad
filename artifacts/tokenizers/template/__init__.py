@@ -28,11 +28,10 @@ To use it:
    `encode`/`decode` contract, and it is what every downstream artifact
    annotates with, so nothing outside this folder has to change.
 
-Two things that will bite if changed:
-
-- `uid` must be injective over the parameters. Identity is the folder, so two
-  different parameter sets rendering to one uid is one artifact silently
-  overwriting another -- hence the digest over whatever can't stay readable.
+One thing that will bite if changed: `uid` must be injective over the
+parameters. Identity is the folder, so two different parameter sets
+rendering to one uid is one artifact silently overwriting another -- hence
+the digest over whatever can't stay readable.
 """
 
 import json
@@ -119,9 +118,10 @@ class TemplateTokenizer(tokenizers.Tokenizer):
 
     # -- ALGORITHM (2 of 2): how text becomes ids and back ------------------
     #
-    # Keep these names. Downstream jobs (datasets/, models/*) call encode /
-    # encode_iterable / decode on whatever tokenizer they were given, so the
-    # names are the whole interface between a family and everything above it.
+    # Keep these names. Everything above a family (tokenized/, dataset/,
+    # mappeddataset/) calls encode / encode_iterable / decode on whatever
+    # tokenizer it was given, so the names are the whole interface between a
+    # family and everything above it.
 
     def encode(self, text: str) -> list[int]:
         self._require("encoding")

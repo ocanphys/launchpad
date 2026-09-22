@@ -1,11 +1,7 @@
-// el.js — the only DOM-building primitive in the app.
-//
-// Why this exists: the original page repeated createElement / className /
-// textContent / appendChild by hand ~15 times. That is what made a small page
-// feel "JS heavy". This collapses all of it into one call while KEEPING the
-// safety property that mattered: text always goes through textContent, never
-// innerHTML, so run ids / call ids chosen by someone else are never parsed as
-// markup.
+// el.js -- the only DOM-building primitive in the app: one call for
+// createElement / className / textContent / appendChild, with the safety
+// property that text always goes through textContent, never innerHTML, so
+// run ids / call ids chosen by someone else are never parsed as markup.
 //
 //   el("td", { class: "run", text: id })
 //   el("button", { class: "job-btn", disabled: true, onclick: fn }, "label")
@@ -27,7 +23,7 @@ export function el(tag, props = {}, ...children) {
   for (const [key, value] of Object.entries(props)) {
     if (value == null) continue;                       // skip null/undefined props
     if (key === "class") node.className = value;
-    else if (key === "text") node.textContent = value; // text only — never HTML
+    else if (key === "text") node.textContent = value; // text only -- never HTML
     else if (key.startsWith("on") && typeof value === "function") {
       node.addEventListener(key.slice(2).toLowerCase(), value);
     } else if (typeof value === "boolean") {

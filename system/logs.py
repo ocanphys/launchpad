@@ -1,5 +1,11 @@
 """Where a call's log goes: three channels in the `call_logs` Dict, one
-writer each, and the file `persist_logs` appends them to.
+writer each, and the file `persist_logs` appends them to. The launcher's
+own log goes the same way: `launcher` is what the leasebook container has
+logged (`start_launcher_logging`), republished whole on the same cadence,
+`launcher:volume` is its file's rows, `logs/launcher.jsonl` at the volume
+root, and the persist pass appends the live list's rows past the file's
+count like any channel's. A new container continues the last one's list,
+which is what keeps that cursor true across restarts.
 
 `{call_id}:container` is the worker's: `BufferHandler` keeps every row the
 call logs, filtered by `CallFilter` on the call id Modal keeps in a
@@ -18,17 +24,20 @@ each time the pass appends the other two channels' new rows to it
 import json
 import logging
 import sys
+import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 import modal
 
-from config import CALL_HISTORY, LOGS
+from config import CALL_HISTORY, HEARTBEAT_SECONDS, LOGS
 from system.lease_protocol import call_history, call_logs
 
 CHANNELS = ("launcher", "container")  # the two the persist pass appends to the file
+LAUNCHER_LOG_KEY = "launcher"
+LAUNCHER_VOLUME_KEY = f"{LAUNCHER_LOG_KEY}:volume"
 
 
 def setup_logging() -> None:
@@ -75,30 +84,77 @@ class CallFilter(logging.Filter):
 
 
 class BufferHandler(logging.Handler):
-    """Keeps every row of `call_id`'s records in `rows`, in order, for the
-    heartbeat to publish. Touches no file."""
+    """Keeps every row logged in `rows`, in order, for a heartbeat to
+    publish: one call's rows given its `call_id`, the whole container's
+    given none. Touches no file."""
 
-    def __init__(self, call_id: str):
+    def __init__(self, call_id: str | None = None):
         super().__init__()
-        self.addFilter(CallFilter(call_id))
+        if call_id is not None:
+            self.addFilter(CallFilter(call_id))
         self.rows: list[dict] = []
 
     def emit(self, record: logging.LogRecord) -> None:
         self.rows.append(row(record))
 
 
-def launcher_log(call_id: str, msg: str, level: str = "INFO") -> None:
-    """Appends one row to `call_logs["{call_id}:launcher"]`.
+def start_launcher_logging() -> Callable[[], None]:
+    """Points this container's logging at stdout and starts the thread that
+    republishes everything it logs, whole, as `call_logs["launcher"]` every
+    HEARTBEAT_SECONDS; returns what stops it.
 
-    A read-modify-write on one key. Its writers are the one leasebook
-    container and `launch_job` at a keyboard, never both on the same call.
+    The list continues the last container's, so it extends the file the
+    persist pass appends to like a call's channel does, across restarts:
+    the longer of what that container published and what the file holds,
+    so a wiped Dict comes back from the file. Stopping publishes once more,
+    so the rows logged on the way out land.
+    """
+    setup_logging()
+    for noisy in ("modal", "grpc", "urllib3"):  # the publisher's own RPCs stay out of the log
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    log = logging.getLogger("leasebook")
+    log.setLevel(logging.DEBUG)  # everything; filtering is the reader's job
+    buffer = BufferHandler()
+    buffer.rows = list(max((call_logs.get(key) or [] for key in (LAUNCHER_LOG_KEY, LAUNCHER_VOLUME_KEY)), key=len))
+    logging.getLogger().addHandler(buffer)
+    finished = threading.Event()
+
+    def publish():
+        while True:
+            stop = finished.wait(HEARTBEAT_SECONDS)
+            try:
+                call_logs.put(LAUNCHER_LOG_KEY, list(buffer.rows))
+            except Exception as exc:
+                log.warning(f"launcher log not published ({exc})")
+            if stop:
+                return
+
+    thread = threading.Thread(target=publish, daemon=True)
+    thread.start()
+
+    def stop():
+        finished.set()
+        thread.join()
+        logging.getLogger().removeHandler(buffer)
+
+    return stop
+
+
+def launcher_log(call_id: str, msg: str) -> None:
+    """Appends one row to `call_logs["{call_id}:launcher"]` and logs `msg`,
+    so what the launcher did to a call reads on the call's artifact page
+    and in the launcher's own log alike.
+
+    The append is a read-modify-write on one key, and the one leasebook
+    container is its only writer.
     """
     key = f"{call_id}:launcher"
-    call_logs.put(key, [*(call_logs.get(key) or []), {"ts": time.time(), "level": level, "logger": "launcher", "msg": msg}])
+    call_logs.put(key, [*(call_logs.get(key) or []), {"ts": time.time(), "level": "INFO", "logger": "launcher", "msg": msg}])
+    logging.getLogger("leasebook").info(msg)
 
 
 @contextmanager
-def open_json(file: Path) -> Iterator[dict]:
+def open_json(file: Path) -> Generator[dict, None, None]:
     """The object in `file` on the mount, `{}` for a file that does not
     exist, the descriptor closed on the way out."""
     if not file.exists():
@@ -109,7 +165,7 @@ def open_json(file: Path) -> Iterator[dict]:
 
 
 @contextmanager
-def open_jsonl(file: Path) -> Iterator[Iterator[dict]]:
+def open_jsonl(file: Path) -> Generator[Iterator[dict], None, None]:
     """The rows of `file` on the mount, parsed as they are read, for the
     length of the block; a file that does not exist reads as no rows. The
     descriptor is closed on the way out, so a reload after the block never
@@ -137,11 +193,12 @@ def parse_jsonl(lines: Iterable[str]) -> Iterator[dict]:
             return
 
 
-def load_snapshot_from_volume(root: Path) -> dict[tuple[str, str], int]:
-    """How many rows of each (call_id, channel) the files already hold, the
-    cursor `save_snapshot_to_volume` appends from, after publishing every
-    log file as `call_logs["{call_id}:volume"]` and merging `call_history.json`
-    into the `call_history` Dict.
+def load_snapshot_from_volume(root: Path) -> dict[str, int]:
+    """How many rows of each `call_logs` channel (`{call_id}:launcher`,
+    `{call_id}:container`, `launcher`) the files already hold, the cursor
+    `save_snapshot_to_volume` appends from, after publishing every log file
+    as its `:volume` channel and merging `call_history.json` into the
+    `call_history` Dict.
 
     The merge is a union per artifact, so a wiped Dict comes back from the
     file and a file behind the Dict drops nothing; a log file no grant names
@@ -150,13 +207,19 @@ def load_snapshot_from_volume(root: Path) -> dict[tuple[str, str], int]:
     """
     history_file = root / CALL_HISTORY
     history = json.loads(history_file.read_text()) if history_file.exists() else {}
-    persisted: dict[tuple[str, str], int] = {}
+    launcher_file = root / LOGS / f"{LAUNCHER_LOG_KEY}.jsonl"
+    with open_jsonl(launcher_file) as parsed:
+        rows = list(parsed)
+    call_logs.put(LAUNCHER_VOLUME_KEY, rows)
+    persisted = {LAUNCHER_LOG_KEY: len(rows)}
     for file in sorted(root.rglob(f"{LOGS}/*.jsonl")):
+        if file == launcher_file:
+            continue
         with open_jsonl(file) as parsed:
             rows = list(parsed)
         call_logs.put(f"{file.stem}:volume", rows)
         for source in CHANNELS:
-            persisted[(file.stem, source)] = sum(r.get("source") == source for r in rows)
+            persisted[f"{file.stem}:{source}"] = sum(r.get("source") == source for r in rows)
         grants = history.setdefault(file.parent.parent.relative_to(root).as_posix(), [])
         if all(grant["call_id"] != file.stem for grant in grants):
             grants.append({"call_id": file.stem, "granted_ts": None, "artifact_type": None})
@@ -166,31 +229,38 @@ def load_snapshot_from_volume(root: Path) -> dict[tuple[str, str], int]:
     return persisted
 
 
-def save_snapshot_to_volume(root: Path, volume: modal.Volume, persisted: dict[tuple[str, str], int]) -> None:
-    """Appends the launcher and container rows past `persisted`'s cursor to
-    the file of every call in `call_history`, extends each one's `:volume`
-    channel by the same rows, writes `call_history` to `call_history.json`
-    and commits.
+def save_snapshot_to_volume(root: Path, volume: modal.Volume, persisted: dict[str, int]) -> None:
+    """Appends the rows past `persisted`'s cursor to their file: the
+    launcher and container rows of every call in `call_history` to the
+    call's, the launcher's own to `logs/launcher.jsonl` at the root. Extends
+    each file's `:volume` channel by the same rows, writes `call_history`
+    to `call_history.json` and commits.
 
     A channel is append-only, so the rows past the cursor are the whole
     diff; a channel that came back shorter (a wiped Dict) moves nothing.
     """
+
+    def new_rows(key: str) -> list[dict]:
+        return (call_logs.get(key) or [])[persisted.get(key, 0):]
+
     history = dict(call_history.items())
-    artifact_of = {grant["call_id"]: path for path, grants in history.items() for grant in grants}
-    for call_id, artifact_path in artifact_of.items():
-        new = []
-        for source in CHANNELS:
-            rows = call_logs.get(f"{call_id}:{source}") or []
-            done = persisted.get((call_id, source), 0)
-            new.extend({**r, "source": source} for r in rows[done:])
-            persisted[(call_id, source)] = max(done, len(rows))
+    files = [
+        (
+            root / artifact_path / LOGS / f"{grant['call_id']}.jsonl",
+            f"{grant['call_id']}:volume",
+            [{**r, "source": source} for source in CHANNELS for r in new_rows(f"{grant['call_id']}:{source}")],
+        )
+        for artifact_path, grants in history.items()
+        for grant in grants
+    ]
+    files.append((root / LOGS / f"{LAUNCHER_LOG_KEY}.jsonl", LAUNCHER_VOLUME_KEY, new_rows(LAUNCHER_LOG_KEY)))
+    for file, volume_key, new in files:
         if not new:
             continue
-        file = root / artifact_path / LOGS / f"{call_id}.jsonl"
         file.parent.mkdir(parents=True, exist_ok=True)
         with file.open("a") as f:
             f.writelines(json.dumps(r) + "\n" for r in new)
-        call_logs.put(f"{call_id}:volume", [*(call_logs.get(f"{call_id}:volume") or []), *new])
+        call_logs.put(volume_key, [*(call_logs.get(volume_key) or []), *new])
     tmp = root / f"{CALL_HISTORY}.tmp"
     tmp.write_text(json.dumps(history))
     tmp.replace(root / CALL_HISTORY)

@@ -138,9 +138,11 @@ def _leaves(value: object, prefix: str = "") -> dict[str, object]:
     return {prefix: value}
 
 
-def _inspect(artifact: Artifact, root: Path) -> dict:
+def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
     """One report row: how what `root` holds at this artifact's path compares
-    with the artifact requested. Every difference is `key: [on disk, requested]`."""
+    with the artifact requested. Every difference is `key: [on disk, requested]`.
+    `memo` is `Artifact.load`'s, shared across one declaration's rows so a
+    subtree many manifests embed decodes once."""
     footprint = artifact.status(root)
     row = {
         "path": artifact.artifact_path.as_posix(),
@@ -159,7 +161,7 @@ def _inspect(artifact: Artifact, root: Path) -> dict:
             row["differences"] = {f"outputs.{desc}": ["present", None] for desc in present}
         return row
     try:
-        stored = Artifact.load(artifact.artifact_path, root)
+        stored = Artifact.load(artifact.artifact_path, root, memo)
     except ValueError as error:
         row["state"] = "conflict"
         row["differences"] = {"manifest": [str(error), None]}
@@ -272,7 +274,8 @@ def declare(
         notebook = current_notebook()
     if on_volume:
         refresh()
-    rows = [_inspect(node, root) for node in graph]
+    memo: dict[str, Artifact] = {}
+    rows = [_inspect(node, root, memo) for node in graph]
     report = DeclarationReport(rows, strict_commit)
     if commit:
         if report.blockers:
@@ -282,7 +285,7 @@ def declare(
             if row["state"] == "new":
                 manifest = node.to_manifest()
             elif stored != requested:
-                on_disk = Artifact.load(node.artifact_path, root)
+                on_disk = Artifact.load(node.artifact_path, root, memo)
                 manifest = replace(on_disk, allocated_resources=node.allocated_resources).to_manifest()
             else:
                 continue
@@ -290,9 +293,9 @@ def declare(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(manifest_json(manifest))
             if row["state"] == "new":
-                row.update(_inspect(node, root), created=True)
+                row.update(_inspect(node, root, memo), created=True)
             else:  # keep the pair, so the report shows what changed to what
-                row.update(_inspect(node, root), updated=True, resources=[stored, requested])
+                row.update(_inspect(node, root, memo), updated=True, resources=[stored, requested])
         if rows[-1]["created"] and notebook is not None and isinstance(artifact, Training):
             copy = root / "runs" / artifact.run_id / f"declare-{artifact.uid}.ipynb"
             copy.parent.mkdir(parents=True, exist_ok=True)

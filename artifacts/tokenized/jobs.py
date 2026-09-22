@@ -18,7 +18,6 @@ class TokenizeSourceJob(Job):
         self.source = artifact.source
 
     def run(self, root: Path, worker: "Worker") -> None:
-        (root / self.artifact.artifact_path).mkdir(parents=True, exist_ok=True)
         worker.log.info(f"tokenizing {self.source.name}")
 
         tokenizer = self.tokenizer.bind(root)  # reads the tokenizer.json its job wrote

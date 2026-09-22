@@ -10,8 +10,8 @@ log file, and never calls `commit`:
 
 The log is the root logger's records for this call, kept by the
 `BufferHandler` in `system.logs` and published whole on every heartbeat as
-`call_logs["{call_id}:container"]`; leasebook is what files it on the volume,
-so the worker never holds its log open on the mount. Anything that goes
+`call_logs["{call_id}:container"]`; `persist_logs` is what files it on the
+volume, so the worker never holds its log open on the mount. Anything that goes
 through `logging` is in it, and anything that bypasses it (a bare `print`,
 tqdm on stderr) reaches only Modal's own capture.
 """

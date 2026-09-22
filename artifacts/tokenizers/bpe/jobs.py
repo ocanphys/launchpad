@@ -112,8 +112,7 @@ class TokenizerJob(Job):
         self.special_tokens = list(artifact.special_tokens)
         self.vocab_size = artifact.vocab_size
 
-    def run(self, root: Path , worker: "Worker") -> None:
-        (root / self.artifact.artifact_path).mkdir(parents=True, exist_ok=True)
+    def run(self, root: Path, worker: "Worker") -> None:
         worker.log.info(
             f"training BPE tokenizer (vocab_size={self.vocab_size}) "
             f"on {len(self.sources)} source(s)"

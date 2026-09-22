@@ -3,8 +3,8 @@
 way as needed.
 
 Lets artifact definitions store framework types -- torch dtypes, optimizer
-classes, numpy dtypes, and so on -- as plain strings, so af.py modules never
-need to import torch/numpy just to type a field. The actual import only
+classes, numpy dtypes, and so on -- as plain strings, so an artifact module
+never imports torch/numpy just to type a field. The actual import only
 happens where the string gets resolved, which is always worker-side code
 where the framework is guaranteed installed.
 """

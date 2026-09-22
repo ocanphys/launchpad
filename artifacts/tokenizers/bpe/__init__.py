@@ -43,7 +43,7 @@ def mergebpairs(pretoken: list, pair: tuple, new_index: int, track_diff: bool = 
         track_diff: bool  When True (default), also compute the pairs created and
             destroyed by this merge so the caller can update its pair frequency map
             incrementally. When False, skip building these lists and return empty
-            lists in their place — useful when the caller does not need the diff
+            lists in their place -- useful when the caller does not need the diff
             (e.g. tokenizer encoding) and wants to avoid the bookkeeping overhead.
 
     Output

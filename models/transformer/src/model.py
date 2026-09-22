@@ -35,7 +35,7 @@ class Embedding(nn.Module):
     """Token embedding table mapping integer token IDs to dense vectors.
 
     Args:
-        num_embeddings: Vocabulary size — the number of distinct tokens.
+        num_embeddings: Vocabulary size -- the number of distinct tokens.
         embedding_dim: Embedding dimension (d_model).
         device: Device to store the parameters on.
         dtype: Data type of the parameters

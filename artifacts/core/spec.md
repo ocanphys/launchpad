@@ -57,7 +57,7 @@ Keep three questions distinct:
 2. **Same definition:** concrete type, normalized parameters, and dependency definitions agree recursively. Commit, resources, and bound state are excluded at every node. **This is what `==` and `hash()` mean.** The frozen dataclass generates both: `commit` and `allocated_resources` are declared `compare=False`, and bound state is set outside the declared fields, so all three exclusions hold with no hand-written comparison. Binding does not change equality.
 3. **Same provenance or allocation:** the recorded non-identifying fields agree.
 
-Declaration and resolution check definition agreement with `==`, and always between two artifacts already known to share a path — a manifest read from that path, or a second route reaching it during traversal. Sharing a path is therefore never evidence of agreement: two sources named `odyssey` with different URLs land on one path, compare unequal, and must conflict.
+Declaration and resolution check definition agreement with `==`, and always between two artifacts already known to share a path -- a manifest read from that path, or a second route reaching it during traversal. Sharing a path is therefore never evidence of agreement: two sources named `odyssey` with different URLs land on one path, compare unequal, and must conflict.
 
 A dependency field's declared type says whether its order identifies the artifact, and nothing else does. A `tuple` is a sequence: its order and its repeats are part of what the artifact is, as with a mapped dataset's concatenated source streams. A `frozenset` is a set: neither is, as with a tokenizer's `sources`. Equality and hashing then follow from the type, so no value is ever reordered to make two definitions compare equal.
 
@@ -143,8 +143,9 @@ The in-memory manifest is a dictionary. `manifest.json` is its JSON representati
 
 ```python
 artifact.to_manifest() -> dict
-Artifact.from_manifest(data: dict) -> Artifact
-Artifact.load(artifact_path, root=None) -> Artifact
+artifact.parameters() -> dict
+Artifact.from_manifest(data: dict, memo=None) -> Artifact
+Artifact.load(artifact_path, root=None, memo=None) -> Artifact
 artifact.bind(root=None) -> Self
 ```
 
@@ -155,6 +156,10 @@ Omitting `root` uses `STORAGE`; an explicit root overrides it for that call. Nor
 `to_manifest` and `from_manifest` convert between an artifact and a dictionary without storage access. `load` reads `root / artifact_path / "manifest.json"`, parses JSON into a dictionary, and passes it to `from_manifest`. It rejects a reconstructed path that differs from the requested folder. Invalid schemas, unknown types, and missing or unreadable manifests raise descriptive errors. This keeps decoding in one place and gives filesystem access its own name.
 
 **`Artifact.load(...)` always returns an unbound instance, even when all outputs exist.** It never loads output state or calls the binding hook. Call `.bind()` explicitly on the returned instance before using output-dependent methods. `Artifact.from_manifest(...)` also always returns an unbound instance.
+
+An artifact is a pure function of its manifest, so decoding is memoizable by the manifest. `memo` is one dict a caller keeps across calls: a subtree seen before, nested inside another manifest, comes back as the same instance instead of being decoded again, which is what keeps a run's legs, each embedding every leg before it, linear to decode. Instances are frozen, so sharing them is safe; the one thing a shared instance must not be is bound, which is why `bind` never passes a memo.
+
+A definition at a path is immutable once declared, and a scan of the volume shows nothing from a manifest but its definition, so the launcher keeps what each path decoded to for its whole life (`main.resolved`) and reads a manifest only the first time it sees the path. What may change on a redeclaration, the resources, is read fresh by launching, which loads the manifest itself.
 
 The round-trip contract is definition agreement, plus preservation of recorded commit and resources. Path equality alone is too weak to test serialization.
 
@@ -179,7 +184,7 @@ setup, no environment detection, and no second root that varies by process.
 
 Every storage-touching call takes `root=None` and resolves it to `STORAGE`
 when omitted. **Passing an explicit absolute path in its place is how you
-reach any other store** — a second volume mounted elsewhere in the container,
+reach any other store** -- a second volume mounted elsewhere in the container,
 a `tmp_path` in a test, a working folder on a development machine. All of
 these are ordinary roots; the code does not distinguish them and nothing
 detects which kind it was handed. This is not a corner case, it is the whole
@@ -189,14 +194,14 @@ That leaves one rule, which the whole arrangement depends on: **nothing
 internal may call `bind()` or `load()` bare.** A job, a `_load` hook, or
 anything else already holding a root threads it through every call it makes.
 A hook that binds a dependency with no argument would silently reach for
-`STORAGE` while everything around it reads a different store — no error,
+`STORAGE` while everything around it reads a different store -- no error,
 just the wrong file or a missing one. `root` is therefore a parameter on
 every internal call, and the `STORAGE` default is consumed only at the top:
 a notebook in the lab container, or the launcher.
 
 **`STORAGE` and every `root` are always absolute. `artifact_path` is always
 relative (§2).** Every join in this contract (`root / artifact_path`, §3,
-§6, §7) depends on that pairing — pathlib's `/` silently discards the left
+§6, §7) depends on that pairing -- pathlib's `/` silently discards the left
 side if the right side is itself absolute, so a relative root or an
 absolute `artifact_path` would not raise, it would resolve to the wrong
 file. Nothing else in this spec makes storage location a matter of the
@@ -271,7 +276,7 @@ The source occurs once even though both the tokenizer and tokenized source refer
 
 ## 6. `lab`: the notebook-facing API
 
-`lab` is the notebook API, imported with `import lab`. It has one entry point: declaration. Construction, loading, and binding stay on the artifact classes and instances — `Tokenizer(...)`, `Artifact.load(path)`, `tokenizer.bind()` — and all read `STORAGE` directly (§4). There is nothing to initialize.
+`lab` is the notebook API, imported with `import lab`. It has one entry point: declaration. Construction, loading, and binding stay on the artifact classes and instances -- `Tokenizer(...)`, `Artifact.load(path)`, `tokenizer.bind()` -- and all read `STORAGE` directly (§4). There is nothing to initialize.
 
 A committed declaration whose requested artifact belongs to a run (a `Training`, with a `run_id`) and was created by that commit also copies the notebook it ran from to `runs/<run_id>/declare-<uid>.ipynb`, before the commit, so the copy and the manifests land together. The notebook is the kernel's own file (`lab.current_notebook()`, from jupyter_server's `JPY_SESSION_NAME`); `local.declare_on_volume` reads it on the laptop and ships it along. Preview, a redeclaration, and a shared artifact write no copy.
 
@@ -309,7 +314,7 @@ lab.declare(
 ```
 
 `verbose` controls how the result is printed; it does not change resolution,
-inspection, or writes. `root` is for tests and manual scripts — a notebook
+inspection, or writes. `root` is for tests and manual scripts -- a notebook
 never passes it, and gets `STORAGE`. `notebook` is the bytes of the declaring
 notebook when the caller has them and no kernel; a notebook never passes it
 either.
@@ -320,7 +325,7 @@ The algorithm performs one operation against its root:
 2. Inspect each path once and compare existing manifests using definition agreement.
 3. Record commit drift and resource differences per retained graph node. Drift blocks only with `strict_commit=True`; resource differences never block.
 4. Collect one row per path with state, drift, and differences. Preview returns these observations in a report without writes.
-5. With `commit=True`, refuse before writing if any row blocks. Otherwise publish manifests for `new` artifacts in dependency order, and rewrite an existing matching manifest whose resources differ with the requested resources, its definition and commit kept. Reload the volume before inspection and commit successful writes before returning — the one place this contract touches volume mechanics, internal to this function, not exposed as a separate call.
+5. With `commit=True`, refuse before writing if any row blocks. Otherwise publish manifests for `new` artifacts in dependency order, and rewrite an existing matching manifest whose resources differ with the requested resources, its definition and commit kept. Reload the volume before inspection and commit successful writes before returning -- the one place this contract touches volume mechanics, internal to this function, not exposed as a separate call.
 6. Return a report recording created and updated manifests and the resulting observed states. Reuse the resolved artifact list and recheck changed paths as needed; do not resolve the graph again.
 
 Example: `sources/odyssey` and `tokenizers/bpe-1.0k-feeeeefa90` are already
@@ -415,10 +420,22 @@ Each entry keeps the shape the dashboard reads:
 ```python
 {"type": "Tokenizer", "status": "done", "error": None,
  "depends_on": ["sources/odyssey"], "parameters": {"vocab_size": 1000},
- "blocked_by": [], "done": True, "ready": False,
+ "blocked_by": [], "done": True, "ready": False, "verdict": "done",
  "call_id": None, "active": False, "last_heartbeat": None, "live_progress": None,
  "durable_progress": {"phase": "files", "done": 1, "total": 1}}
 ```
+
+`verdict` is the one word a row shows, first match wins: `done`; `running`
+while the leased call beats; `starting` while a lease has no heartbeat and
+`now - granted_ts < STARTUP_GRACE_SECONDS` (60 seconds, configured in
+`config.py`); `failed` for a manifest that would not load or a lease whose
+call stopped beating or exhausted its startup grace period; `runnable` when
+`ready`; `blocked` otherwise. A failed artifact is still `ready`, so it can be run again. Every
+field is computed from one snapshot of the leases and heartbeats and one reload
+of the volume. Startup classification uses that snapshot's clock and grant
+timestamp, with no call-status request to Modal. A lease without a grant
+timestamp cannot qualify as starting. The launch check uses the same grace
+period to refuse a second call while the first is starting.
 
 `parameters` is the artifact's own fields only -- the same half of the
 annotation-driven split `to_manifest` puts under `"parameters"`, so a
@@ -477,11 +494,11 @@ A job is eligible when its declaration and dependency graph are valid, it has a 
 
 For an eligible artifact, the executor:
 
-1. Establishes exclusive execution ownership for its path.
-2. Refreshes storage, rechecks readiness, and spawns a worker using resources from the authoritative manifest.
-3. In the worker, refreshes and rechecks readiness again, loads the authoritative manifest, and resolves its producer.
+1. Refuses while a call is active or starting on its path (`main.attempt_launch`, reading the `leases` and `beats` Dicts).
+2. Refreshes storage and checks readiness (`main.attempt_launch`: the manifest at the path, each direct dependency's manifest and completion files), spawns a worker using resources from the authoritative manifest (`main.resource_options`, `run_job.spawn`), and records the grant naming that call (`leases.put`, `call_history`).
+3. In the worker, refreshes storage and confirms the grant names this call (`system.runtime.initialize_worker`, `Lease.confirm("boot")`), loads the authoritative manifest (`Artifact.load`) and resolves its producer (`Artifact.job`), all in `main.run_job`.
 4. Calls `Job(artifact).run(root, worker)`. Inputs come from the artifact's direct dependencies; the job binds what it consumes.
-5. Confirms ownership at publication boundaries, verifies completion, commits remote changes, and records the attempt's outcome. Exceptions propagate; failed attempts are not reported as success.
+5. Confirms the grant again after the run and before the commit (`Lease.confirm("pre vol commit")`, `("commit")`), commits (`volume.commit` in `initialize_worker`), and logs the outcome under the call (`call_logs["{call_id}:container"]`). Exceptions propagate; failed attempts are not reported as success.
 
 Different artifact paths may run concurrently, including nested paths when dependencies permit it.
 
@@ -493,7 +510,7 @@ Execution ownership must prevent two workers from publishing to the same path. S
 
 ## 8. Delivery and acceptance
 
-Implement in this order, with a complete source-to-tokenizer-to-tokenized-source example working end to end before connecting execution. Everything is developed and tested on Modal, against the mounted volume — there is no local path to keep working.
+Implement in this order, with a complete source-to-tokenizer-to-tokenized-source example working end to end before connecting execution. Everything is developed and tested on Modal, against the mounted volume -- there is no local path to keep working.
 
 1. Immutable definitions, normalization, manifest round trips, and pure resolution.
 2. Declaration, status, and binding.
@@ -526,7 +543,7 @@ The backbone is ready when these cases hold:
 
 Identity describes declared inputs, not output bytes. A source URL may change without changing its path. The first completed download is treated as fixed until explicit deletion; deleting and rebuilding it can change bytes without invalidating downstream artifacts. Recorded commits do not make execution reproducible.
 
-`STORAGE` is the mount path of the volume inside the container, and it is the default root for every storage-touching call. Any other store is reached by passing an alternative absolute path in its place: a second volume mounted elsewhere in the container, or a plain folder on a development machine. Both are ordinary roots — the code does not distinguish them, and nothing detects which kind it was handed.
+`STORAGE` is the mount path of the volume inside the container, and it is the default root for every storage-touching call. Any other store is reached by passing an alternative absolute path in its place: a second volume mounted elsewhere in the container, or a plain folder on a development machine. Both are ordinary roots -- the code does not distinguish them, and nothing detects which kind it was handed.
 
 What is not supported is reaching the volume itself from outside Modal. The mount exists only in the container, so there is no environment detection and no remote-declaration call; a laptop works against a folder of its own, not against `/storage` over the network. If declaring onto the volume from a laptop is wanted later, it returns as one explicit remote call, never as a default root that varies per process.
 

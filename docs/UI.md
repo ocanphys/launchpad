@@ -9,19 +9,20 @@ Served as static files by the same ASGI app that answers the API
 `launch/...`) are same-origin relative paths -- no URL to configure, no
 CORS.
 
-Three files split by responsibility, each a pure function of its inputs
-with no state of its own:
+Files split by responsibility:
 
-- **[app.js](../web/app.js)** -- the only file that touches the network or
-  holds mutable state: routing, fetching, launching, and the one bit of
-  client-only UI state (which buttons have a POST in flight). Everything else
-  is handed data and gives back DOM.
+- **[app.js](../web/app.js)** -- the only file that touches the network:
+  routing, fetching, launching, log polling, pending buttons and launcher
+  log filter choices. Rendering modules receive data and give back DOM.
 - **[render.js](../web/render.js)** -- the artifact row and its cells.
 - **[artifactview.js](../web/artifactview.js)** -- one artifact's own page:
   its type, parameters and dependency links, its training curves when its
-  job keeps a step log (one inline SVG per metric, one line per attempt; the
-  rows are `train.jsonl` read off the volume, bucketed to a point budget in
-  the browser), and every call's log.
+  job keeps a step log (one uPlot chart per metric, one line per attempt,
+  every row of `train.jsonl` as read off the volume; drag to zoom, click a
+  legend entry to hide an attempt), and every call's log. It retains the
+  reader's parameter and artifact log filter choices between redraws.
+- **[logview.js](../web/logview.js)** -- shared timestamp formatting, level
+  filters and safe log rows for artifact streams and the launcher panel.
 - **[el.js](../web/el.js)** -- the one DOM-building primitive everything
   else uses (`el(tag, props, ...children)`), so text always goes through
   `textContent`, never `innerHTML`.
@@ -46,26 +47,43 @@ flat `{artifact_path: state}` map. There is no grouping by run, source or
 dataset; a manifest `state()` could not read lands in the collapsed
 "unreadable manifests" table under it.
 
+The dashboard's right side shows the leasebook container's **launcher
+logs**, with its own scroll area. The panel moves below the table on
+narrower screens; artifact pages retain their original width. Launcher
+records show their timestamp, severity and message on one dense line, newest
+first, with the logger name on the message's hover.
+Multiline tracebacks preserve their line breaks. Level checkboxes work
+like the artifact log filters: DEBUG starts off, and selections survive
+polls and navigation. Launcher filters are separate from artifact filters.
+These records belong to the container, so they have no call id.
+
 ## Fetching
 
-`/state` is the map the server computed when its container started; the
-page fetches it once per navigation. Only the header's refresh button asks
-for anything newer: it POSTs `/refresh`, which makes the server reload the
-volume and recompute the map, then fetches the current view again
-(`app.js`'s `refresh` and `view`). The button shows how the last fetch
-went: green `refresh` after a good answer, the error in red after a bad
-one, the last good screen staying up either way. A launch or cancel does
-not refresh: the row keeps showing the map until you press the button.
+`/state` returns the server's most recently computed map, initially built
+when its container started. The header's refresh button POSTs `/refresh`,
+which makes the server reload the volume and recompute the map, then
+fetches the current view again (`app.js`'s `refresh` and `view`). An accepted
+launch or cancel automatically performs the same refresh. The button shows
+how the last fetch went: green `refresh` after a good answer, the error in
+red after a bad one, the last good screen staying up either way. State has
+no timer: a first heartbeat or an expired startup grace period appears
+when the next refresh recomputes the map.
 
-The one clock on the page is an open artifact's log stream. The page
-fetches `/artifact/<path>` (the step log as the server's disk holds it)
-once, then polls `/logs/<path>` every `LOG_POLL_MS` (2000ms), rebuilding
+Only log streams are polled. The dashboard fetches `/launcher-logs` on
+entry, then every `LOG_POLL_MS` (2000ms). That endpoint reads the
+`launcher` and `launcher:volume` channels off the Dict independently of
+`/state`, and the page unions them, a row counted once (`logview.js`); a
+table refresh does not restart this poll. A failed request preserves the last stream,
+shows a retry message and retries on the next tick.
+
+An artifact page fetches `/artifact/<path>` (the step log as the server's
+disk holds it) once, then polls `/logs/<path>` every 2000ms, rebuilding
 the page with the same entry and curves and the new stream. The server
-answers that route from the Dicts alone, so the poll never touches the
-mount. The loop checks `routeToken` before and after each fetch and stops
-when the route changes; a refresh on the same page starts a new loop and
-the old one stops itself (`logPoll`). A tick that fails keeps the last
-stream up and tries again next tick.
+answers both log routes from the Dicts alone, so polling never touches
+the mount. Both loops check `routeToken` before applying an answer and
+stop when the route changes. A refresh on an artifact page starts a new
+loop and the old one stops itself (`logPoll`). A tick that fails keeps the
+last stream up and tries again next tick.
 
 - **Coming back from an artifact's page doesn't wait on a fetch.**
   `route()` redraws immediately from `lastPayload` (whatever the last fetch
@@ -86,6 +104,7 @@ One button per row, offering the one thing worth doing to that artifact
 |---|---|---|
 | is done | *run*, frozen | -- |
 | has a call running | **stop** | `POST /cancel/<path>` |
+| has verdict `starting` | *starting*, blue and disabled | -- |
 | is ready | **run** | `POST /launch/<path>` |
 | is blocked | *run*, frozen | -- |
 
@@ -95,18 +114,28 @@ lease outlives its call, and a beat is only as fresh as the last one written
 -- so an artifact already on disk never offers to stop anything, whatever
 the liveness signals still say. One shape and one slot either way, so
 nothing shifts when a row changes hands; only the color says which, matching
-the dot palette (green run, red stop).
+the dot palette (green run, red stop, blue starting).
 
-A button reflects server state (`ready`/`active`/`blocked_by`) directly --
+A button reflects server state (`done`/`active`/`verdict`/`ready`/`blocked_by`) directly --
 there's no client-side tracking of whether a launch is "in progress" in the
 sense of waiting for it to finish. The one piece of local state, `pending`,
 remembers what the page has asked since the last refresh: a clicked button
 turns blue and disabled and reads `starting` (or `stopping`) from the click
-on, and stays that way until the next refresh replaces the map with one
-that knows about the request. A request the server refused (`launched`/
+on, and stays that way until the refresh after an accepted request replaces
+the map with one that knows about it. A request the server refused (`launched`/
 `cancelled` false, or an error) clears its entry at once, so the button
-goes back to what the map says. After the refresh a call that has been
-granted but not yet beaten reads as failed (red) until its first heartbeat.
+goes back to what the map says.
+
+After the refresh, a call that has been granted but not yet beaten reads
+as `starting` while its lease is younger than `STARTUP_GRACE_SECONDS`
+(60 seconds in `config.py`). The row has a blue dot with a tooltip saying
+it is waiting for the first heartbeat, and a blue, disabled `starting`
+button even if `ready` is true. At or after that deadline, a call that
+still has no heartbeat reads as failed: the dot is red, its tooltip
+explains that no first heartbeat arrived, and the button offers `run`
+again if the artifact is ready. A heartbeat ends startup: a live one
+means `running` and offers `stop`; a stale one means `failed`. These labels
+are recomputed on refresh; they do not advance on a browser timer.
 
 ## The artifact page
 
@@ -131,13 +160,6 @@ open; the curves are the file as the last refresh reloaded it.
 
 ## Known inefficiencies
 
-- **The `/launch` route pays a full Modal round-trip per click.**
-  `attempt_launch` hops to `declared_artifact` to recompute readiness that
-  `leasebook`, already inside a volume-mounted container, could read
-  in-process. The separation exists so the CLI entrypoint (`launch_job`,
-  which runs outside any container) can share the same code path -- but it
-  costs every launch click a cold container's worth of latency for an
-  answer `state()` already has.
 - **A refresh snapshots every historical beat record.** Nothing prunes
   old ones from that `modal.Dict`, so `state()`'s cost grows with the
   deployment's total call history, not its current active-call count.

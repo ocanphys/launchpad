@@ -21,13 +21,28 @@ doesn't).
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 from tempfile import mkdtemp
+from unittest import TestCase
+from unittest.mock import Mock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main
+
+
+# `client` swaps the stubs straight into `main`; this hands the module back
+# after each test, so test_state gets the real `state` and `volume`.
+@pytest.fixture(autouse=True)
+def restore_main():
+    saved = dict(vars(main))
+    yield
+    vars(main).update(saved)
+
 
 # --- the stubs ---------------------------------------------------------------
 
@@ -35,7 +50,7 @@ STATE = {
     "sources/tinyshakespeare": {
         "type": "Source", "status": "done", "error": None,
         "depends_on": ["sources/other"], "parameters": {"name": "tinyshakespeare"},
-        "blocked_by": [], "done": True, "ready": False, "call_id": None,
+        "blocked_by": [], "done": True, "ready": False, "verdict": "done", "call_id": None,
         "active": False, "last_heartbeat": None, "live_progress": None,
         "durable_progress": {"phase": "files", "done": 1, "total": 1},
     },
@@ -44,7 +59,7 @@ STATE = {
     "sources/broken": {
         "type": None, "status": "conflict", "error": "not a readable manifest",
         "depends_on": [], "parameters": None,
-        "blocked_by": [], "done": False, "ready": False, "call_id": None,
+        "blocked_by": [], "done": False, "ready": False, "verdict": "failed", "call_id": None,
         "active": False, "last_heartbeat": None, "live_progress": None,
         "durable_progress": None,
     },
@@ -73,9 +88,14 @@ def client(**overrides):
     # Counted, so a test can tell a GET that served the snapshot from a
     # refresh that took a new one.
     calls["state"] = 0
+    calls["reload"] = 0
+    calls["stop_logging"] = overrides.get("stop_logging", Mock())
+    main.start_launcher_logging = Mock(return_value=calls["stop_logging"])
 
     def state():
         calls["state"] += 1
+        if "state_error" in overrides:
+            raise overrides["state_error"]
         return overrides.get("state", STATE)
 
     main.state = state
@@ -87,7 +107,10 @@ def client(**overrides):
     )
     main.jupyter = type("Stub", (), {"get_web_url": staticmethod(lambda: "https://lab.test")})()
     # The startup sync: nothing to reload, no log files to read.
-    main.volume = type("Stub", (), {"reload": staticmethod(lambda: None)})()
+    def reload():
+        calls["reload"] += 1
+
+    main.volume = type("Stub", (), {"reload": staticmethod(reload)})()
     main.load_snapshot_from_volume = lambda root: {}
     # A plain dict answers `.get()`/`.items()` the same way the Dict does.
     # Every call the launcher ever granted, per artifact, oldest first: fc-9
@@ -130,6 +153,7 @@ def test_every_route_is_registered():
     for expected in (
         "/refresh",
         "/state",
+        "/launcher-logs",
         "/lab",
         "/launch/{artifact_path:path}",
         "/cancel/{artifact_path:path}",
@@ -142,6 +166,58 @@ def test_every_route_is_registered():
 def test_state_serves_the_computed_map():
     api, _ = client()
     assert api.get("/state").json() == STATE
+
+
+def test_launcher_logs_are_live_and_do_not_refresh_state_or_storage():
+    api, calls = client()
+    assert api.get("/launcher-logs").json() == {"launcher": [], "volume": []}
+    first = {"ts": 1.0, "level": "INFO", "logger": "leasebook", "msg": "started"}
+    main.call_logs["launcher"] = [first]
+    main.call_logs["launcher:volume"] = [first]
+    second = {"ts": 2.0, "level": "ERROR", "logger": "leasebook", "msg": "failed\ntraceback"}
+    main.call_logs["launcher"].append(second)
+    assert api.get("/launcher-logs").json() == {"launcher": [first, second], "volume": [first]}
+    assert calls["state"] == 1
+    assert calls["reload"] == 1
+    assert "launcher" not in main.call_history
+
+
+def test_launcher_logging_is_stopped_on_asgi_shutdown():
+    api, calls = client()
+    main.start_launcher_logging.assert_called_once_with()
+    with api:
+        assert api.get("/launcher-logs").status_code == 200
+        calls["stop_logging"].assert_not_called()
+    calls["stop_logging"].assert_called_once_with()
+
+
+def test_launcher_logging_is_stopped_after_logging_a_startup_failure():
+    stop_logging = Mock()
+    with TestCase().assertLogs("leasebook", level=logging.ERROR) as captured:
+        try:
+            client(stop_logging=stop_logging, state_error=RuntimeError("startup failed"))
+        except RuntimeError as exc:
+            assert str(exc) == "startup failed"
+        else:
+            raise AssertionError("startup failure was swallowed")
+    assert "leasebook failed to start" in captured.output[0]
+    assert "RuntimeError: startup failed" in captured.output[0]
+    stop_logging.assert_called_once_with()
+
+
+def test_request_failures_are_logged_with_their_traceback():
+    api, _ = client()
+    main.call_logs = Mock()
+    main.call_logs.get.side_effect = RuntimeError("Dict unavailable")
+    with TestCase().assertLogs("leasebook", level=logging.ERROR) as captured:
+        try:
+            api.get("/launcher-logs")
+        except RuntimeError as exc:
+            assert str(exc) == "Dict unavailable"
+        else:
+            raise AssertionError("request failure was swallowed")
+    assert "GET /launcher-logs failed" in captured.output[0]
+    assert "RuntimeError: Dict unavailable" in captured.output[0]
 
 
 def test_state_is_computed_at_startup_and_on_refresh_only():

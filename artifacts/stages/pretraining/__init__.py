@@ -6,6 +6,7 @@ package under models/.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import ClassVar
 
@@ -45,7 +46,7 @@ class Pretraining(Training):
                 f"{self.starting_checkpoint.tokenizer.uid}"
             )
 
-    @property
+    @cached_property
     def lineage_hash(self) -> str:
         """A readable short id for this leg's trajectory and ancestry.
         The hash includes anything that can change the training trajectory.

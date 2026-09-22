@@ -9,6 +9,8 @@ this module stays free of torch so declaring an artifact never imports it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
+from pathlib import Path
 from typing import Any, Literal
 
 from artifacts.core.artifact import Artifact
@@ -128,8 +130,9 @@ class Training(Artifact):
             elif getattr(self, name) != inherited:
                 raise ValueError(f"{name} must match starting_checkpoint.{name}")
 
-    @property
+    @cached_property
     def start_step(self) -> int:
+        # Once per instance: it walks the chain of starting checkpoints.
         return self.starting_checkpoint.end_step if self.starting_checkpoint else 0
 
     @property
@@ -143,3 +146,13 @@ class Training(Artifact):
         # checkpoints/{step}.pt and are intentionally undeclared: recovery
         # state is job-owned and may differ after an interrupted run.
         return {"model": "model.pt"}
+
+    def durable_progress(self, root: Path) -> dict:
+        """The step the volume holds this leg at, out of end_step: end_step
+        once model.pt is there, else the furthest failsafe, else start_step."""
+        if self.paths(root)["model"].exists():
+            step = self.end_step
+        else:
+            failsafes = (root / self.artifact_path / "checkpoints").glob("*.pt")
+            step = max((int(p.stem) for p in failsafes), default=self.start_step)
+        return {"phase": "step", "done": step, "total": self.end_step}

@@ -4,7 +4,13 @@ STORAGE = "/storage"  # this is the container mount name for the volume.
 CONTAINER_LIFETIME = 3600  # no container lives beyond this many seconds.
 HEARTBEAT_SECONDS = 1
 FLATLINE = 5  # if heartbeat age is longer than this many HEARTBEAT_SECONDS, the call is not active.
+STARTUP_GRACE_SECONDS = 60  # time after a lease is granted to wait for its first heartbeat.
 PERSIST_LOGS_EVERY = 60  # seconds between `persist_logs` passes appending the Dict's log rows to the volume.
+# Where the launcher-side containers run. Modal's Dicts and Volumes are served
+# from us-east, and every request those containers answer is a handful of
+# round trips to them: a Dict get is ~25 ms here and ~250 ms from a far region.
+# Not the GPU worker, which waits for whatever region has its GPU.
+REGION = "us-east"
 
 # One call's log, `{call_id}.jsonl` inside this folder of the artifact that
 # call was producing, written by `persist_logs` alone. The
@@ -12,6 +18,8 @@ PERSIST_LOGS_EVERY = 60  # seconds between `persist_logs` passes appending the D
 # `{call_id}:launcher` (the launcher's own rows), `{call_id}:container` (the
 # worker's, republished whole on every heartbeat) and `{call_id}:volume`
 # (the file's rows, read at leasebook startup and on every persist pass).
+# The launcher's own log is `launcher.jsonl` in this folder at the volume
+# root, with `launcher` and `launcher:volume` as its two channels.
 LOGS = "logs"
 # Every call ever granted, per artifact_path: the `launchpad-call-history`
 # Dict, written to this file at the volume root on every persist pass and
@@ -38,36 +46,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
-def get_git_commit(dirty_suffix: bool = True) -> str:
-    """Git commit hash of PROJECT_ROOT's current HEAD. Meant to be called from
-    the driver notebook right before dispatching a run to Modal -- captures
-    exactly what code is about to be shipped, since add_local_python_source
-    mounts local disk directly rather than doing any git checkout of its own,
-    so there's no Modal-side notion of "commit" independent of this.
-
-    Doesn't care which branch HEAD is on -- the hash alone fully identifies
-    the commit's content regardless of branch (or even a detached HEAD with
-    no branch at all).
-
-    dirty_suffix: when True (default), appends "-dirty" if the working tree
-    has uncommitted changes, since Modal ships whatever's actually on disk,
-    not just the last commit.
+def get_git_commit() -> str:
+    """PROJECT_ROOT's HEAD hash, with "-dirty" appended when the working tree
+    has uncommitted changes: `add_local_python_source` ships what is on disk,
+    not the last commit, so a clean hash alone would overstate what ran.
     """
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
+    git = lambda *args: subprocess.run(
+        ["git", *args], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True
     ).stdout.strip()
-    if dirty_suffix:
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        if dirty:
-            commit += "-dirty"
-    return commit
+    commit = git("rev-parse", "HEAD")
+    return commit + "-dirty" if git("status", "--porcelain") else commit

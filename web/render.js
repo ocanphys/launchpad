@@ -1,4 +1,4 @@
-// render.js — components.
+// render.js -- components.
 //
 // Each function takes state and returns a DOM node. Nothing here reaches into
 // app state or fetches anything: to add a column or a new cell you edit one
@@ -18,46 +18,30 @@ function dim(text) {
   return el("span", { class: "dim", text });
 }
 
-// One status light per artifact, folding declaration status (done/ready/
-// blocked_by) and lease/heartbeat (call_id/active) into a single verdict --
-// there's one thing worth asking about a row: what would happen if you
-// looked at it right now.
+// One status light per artifact: the server's `verdict` (see main.py's
+// `state`) as a color, with the reason on hover.
 //   green  (done)     : status is "done"
 //   blue   (running)  : an active call is working on it
+//   blue   (starting) : waiting for a first heartbeat within the startup grace
 //   red    (failed)   : a call held the lease and went stale before
-//                        finishing, or the manifest itself conflicts with
-//                        what's declared/undeclared
+//                        finishing, never beat, or the manifest would not load
 //   amber  (runnable) : not done, not blocked, no call in progress
 //   gray   (blocked)  : not done, not runnable -- waiting on a dependency
-//
-// Takes an artifact's own state, not a run's -- a lease is granted per
-// artifact_path (see main.py's attempt_launch), so this is the granularity
-// at which "active" actually means anything.
-function verdict(state) {
-  if (state.done) return "done";
-  if (state.active) return "running";
-  if (state.status === "conflict") return "failed";
-  if (state.status === "undeclared") return "failed";
-  if (state.call_id) return "failed";
-  if (state.ready) return "runnable";
-  return "blocked";
-}
-
 function dot(state) {
-  const cls = verdict(state);
   const title = {
     done: "done",
     running: "running",
+    starting: "starting: waiting for first heartbeat",
     failed:
       state.status === "conflict"
-        ? "conflict: manifest disagrees with what's declared"
-        : state.status === "undeclared"
-        ? "undeclared: outputs exist with no manifest"
-        : "failed: call went stale before finishing",
+        ? "conflict: manifest would not load"
+        : state.last_heartbeat == null
+          ? "failed: call never sent a heartbeat"
+          : "failed: call went stale before finishing",
     runnable: "runnable",
     blocked: "blocked on " + (state.blocked_by.join(", ") || "?"),
-  }[cls];
-  return el("span", { class: "dot " + cls, title });
+  }[state.verdict];
+  return el("span", { class: "dot " + state.verdict, title });
 }
 
 
@@ -107,10 +91,11 @@ function progressCell(state) {
 }
 
 // One square button per artifact, offering the one thing worth doing to it.
-// Three cases, asked in this order:
+// Asked in this order:
 //
 //   done                    -> run, frozen
 //   a call is running       -> stop
+//   a call is starting      -> starting, blue and frozen
 //   ready                   -> run
 //   blocked                 -> run, frozen
 //
@@ -137,6 +122,7 @@ function actionButton(path, state, ctx) {
 
   if (state.done) return act("run", "run", "already done", null);
   if (state.active) return act("cancel", "stop", "cancel this running job", ctx.onCancel);
+  if (state.verdict === "starting") return act("starting", "starting", "waiting for first heartbeat", null);
   if (state.ready) return act("run", "run", "launch", ctx.onLaunch);
   return act("run", "run", "blocked on " + (state.blocked_by.join(", ") || "?"), null);
 }

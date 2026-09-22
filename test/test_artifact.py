@@ -104,6 +104,16 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(rebuilt.allocated_resources, Resources(gpu_type="A100"))
         self.assertFalse(rebuilt.bound)
 
+    def test_a_shared_memo_decodes_a_shared_subtree_once(self):
+        memo = {}
+        first = Artifact.from_manifest(tokenizer((ODYSSEY, ILIAD)).to_manifest(), memo)
+        second = Artifact.from_manifest(tokenizer((ODYSSEY,)).to_manifest(), memo)
+        [odyssey] = second.sources
+        self.assertIs(odyssey, next(s for s in first.sources if s == ODYSSEY))
+        self.assertEqual(len(memo), 4)  # two tokenizers, two sources
+        # Without one, every call decodes its own tree.
+        self.assertIsNot(Artifact.from_manifest(ODYSSEY.to_manifest()), Artifact.from_manifest(ODYSSEY.to_manifest()))
+
     def test_bytes_are_canonical(self):
         text = manifest_json(ODYSSEY.to_manifest())
         self.assertTrue(text.endswith("}\n"))
@@ -154,6 +164,21 @@ class LoadTests(unittest.TestCase):
             (moved / MANIFEST).write_text(manifest_json(ODYSSEY.to_manifest()))
             with self.assertRaisesRegex(ValueError, "describes sources/odyssey"):
                 Artifact.load("sources/elsewhere", root)
+
+    def test_a_memo_hands_back_the_same_instance_for_the_same_manifest(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            declare(ODYSSEY, root)
+            memo = {}
+            first = Artifact.load("sources/odyssey", root, memo)
+            self.assertIs(Artifact.load("sources/odyssey", root, memo), first)
+            self.assertIsNot(Artifact.load("sources/odyssey", root), first)
+            # The same manifest at the wrong folder is still refused.
+            moved = root / "sources" / "elsewhere"
+            moved.mkdir()
+            (moved / MANIFEST).write_text(manifest_json(ODYSSEY.to_manifest()))
+            with self.assertRaisesRegex(ValueError, "describes sources/odyssey"):
+                Artifact.load("sources/elsewhere", root, memo)
 
     def test_a_path_cannot_escape_its_root(self):
         with self.assertRaisesRegex(ValueError, "must stay under root"):

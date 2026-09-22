@@ -1,4 +1,4 @@
-"""Transformer model, optimizer, and training utilities."""
+"""The transformer model."""
 
 from models.transformer.src.model import TransformerLM
 

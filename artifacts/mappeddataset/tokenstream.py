@@ -18,8 +18,6 @@ import numpy as np
 
 
 class TokenStream:
-    dtype = np.uint16
-
     def __init__(self, paths: list[Path], separator: int | None):
         # an empty file cannot be mapped, and an empty source is a legal one
         pieces = [

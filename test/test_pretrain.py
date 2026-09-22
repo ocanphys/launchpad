@@ -132,6 +132,17 @@ class PretrainJobTests(unittest.TestCase):
             for key, tensor in torch.load(straight.paths(other_root)["model"])["model"].items():
                 self.assertTrue(torch.equal(tensor, self.final(self.leg)["model"][key]), key)
 
+    def test_durable_progress_is_the_furthest_checkpoint(self):
+        progress = lambda: self.leg.durable_progress(self.root)
+        self.assertEqual(progress(), {"phase": "step", "done": 0, "total": 4})
+        with crash_after_first_failsafe(), self.assertRaises(RuntimeError):
+            PretrainJob(self.leg).run(self.root, worker())
+        self.assertEqual(progress(), {"phase": "step", "done": 2, "total": 4})
+        PretrainJob(self.leg).run(self.root, worker())
+        for name in ("2.pt", "4.pt"):
+            (self.folder / "checkpoints" / name).unlink()
+        self.assertEqual(progress(), {"phase": "step", "done": 4, "total": 4})
+
     def test_rerunning_a_finished_leg_leaves_its_model_untouched(self):
         PretrainJob(self.leg).run(self.root, worker())
         path = self.leg.paths(self.root)["model"]

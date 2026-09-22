@@ -1,21 +1,22 @@
-// app.js — the runtime: app state, fetching, launching, and routing between
+// app.js -- the runtime: app state, fetching, launching, and routing between
 // the artifact table and one artifact's own page. This is the only file that
 // talks to the network or holds mutable state. Rendering is delegated to
-// render.js and artifactview.js; DOM building to el.js.
+// render.js, artifactview.js and logview.js; DOM building to el.js.
 //
 // The server serves `/state` out of the map it holds in memory (main.py's
 // `latest`); only the refresh button makes it reload the volume and compute
 // a new one (POST /refresh), after which the current view is fetched again.
-// The one clock on the page is an open artifact's log stream, polled from
-// `/logs/<path>`, which the server answers from the Dicts alone.
+// Only logs are on a clock: the dashboard's launcher stream or an open
+// artifact's stream. Both routes read the Dicts alone.
 
 import { artifactRow, problemRow } from "./render.js";
 import { renderArtifactPending, renderArtifactView } from "./artifactview.js";
+import { logStream, union } from "./logview.js";
 
 // --- config -----------------------------------------------------------------
 
-// How often an open artifact page refetches its log stream. Bounds how
-// stale the stream can look; nothing else on the page is on a clock.
+// How often the current view refetches its log stream. Artifact state
+// still changes only on refresh.
 const LOG_POLL_MS = 2000;
 
 // --- dom refs ---------------------------------------------------------------
@@ -30,17 +31,19 @@ const problemsEl = document.getElementById("problems");
 const problemCountEl = document.getElementById("problemCount");
 const problemRowsEl = document.getElementById("problemRows");
 const artifactViewEl = document.getElementById("artifactView");
+const launcherLogsEl = document.getElementById("launcherLogs");
+const launcherLogStatusEl = document.getElementById("launcherLogStatus");
 
 // --- app state --------------------------------------------------------------
 
 let lastPayload = null;
+const hiddenLauncherLevels = new Set(["DEBUG"]);
 
-// Artifact paths the page has asked the server to act on since the last
-// refresh, each with what the button says meanwhile ("starting",
-// "stopping"). The server's map does not know about the request until a
-// refresh recomputes it, so the page remembers instead: the button stays
-// blue, disabled and labelled until then. A request the server refused
-// clears its own entry (see act).
+// Artifact paths the page has asked the server to act on, each with what
+// the button says meanwhile ("starting", "stopping"). The server's map does
+// not know about the request until a refresh recomputes it, so the page
+// remembers instead: the button stays blue, disabled and labelled until the
+// refresh that follows the server's answer (see act).
 const pending = new Map();
 
 function setRefresh(text, cls) {
@@ -52,23 +55,29 @@ function setRefresh(text, cls) {
 
 // The two things a row's button can ask for -- launch it, stop it -- are one
 // POST to one route named after the ask. The button reads "starting" or
-// "stopping" from the click on, and keeps saying so until the next refresh
-// unless the server said no.
+// "stopping" from the click until the server answers. An accepted request
+// is followed by a refresh, so the button then shows what the map knows: a
+// launched call keeps "starting" while it waits for its first heartbeat
+// within the startup grace period. A refused one puts the button back.
 async function act(route, artifactPath, label) {
   pending.set(artifactPath, label);
   redraw();
+  let accepted = false;
   try {
     // No encodeURIComponent -- artifactPath's /s are meant to stay literal,
     // matching the server's {artifact_path:path} routes (a plain path
     // segment can't match a multi-segment path).
     const body = await request(`${route}/${artifactPath}`, { method: "POST" });
     if (body.message) console.info(`${route}:`, body.message);
-    if (!(body.launched || body.cancelled)) pending.delete(artifactPath);
+    accepted = Boolean(body.launched || body.cancelled);
   } catch (err) {
     console.warn(`${route} failed:`, err);
-    pending.delete(artifactPath);
   }
-  redraw();
+  if (accepted) await load(refresh);
+  else {
+    pending.delete(artifactPath);
+    redraw();
+  }
 }
 
 // Injected into every row so render.js never sees app state directly.
@@ -121,7 +130,7 @@ function redraw() {
 // under the newer view.
 let routeToken = 0;
 
-// Same origin as this page — no URL to configure, no CORS to satisfy. A
+// Same origin as this page -- no URL to configure, no CORS to satisfy. A
 // failed request throws with the server's message when it gave one.
 async function request(route, init = {}) {
   const res = await fetch(route, { cache: "no-store", ...init });
@@ -136,6 +145,36 @@ async function fetchTable() {
   if (token !== routeToken) return;
   lastPayload = payload;
   draw(payload);
+}
+
+function drawLauncherLogs(logs, emptyText = "no launcher logs yet.") {
+  launcherLogsEl.replaceChildren(logStream(logs, {
+    title: "launcher logs",
+    className: "launcher-logs",
+    hiddenLevels: hiddenLauncherLevels,
+    emptyText,
+  }));
+}
+
+// Independent of table fetches and volume refreshes: start immediately
+// when the dashboard opens and keep the last stream through failures.
+// Navigation invalidates both a sleeping loop and an in-flight answer.
+async function pollLauncherLogs() {
+  const token = routeToken;
+  if (!launcherLogsEl.hasChildNodes()) drawLauncherLogs([], "loading launcher logs…");
+  while (token === routeToken) {
+    try {
+      const { launcher, volume } = await request("launcher-logs");
+      if (token !== routeToken) return;
+      drawLauncherLogs(union([volume, launcher]));
+      launcherLogStatusEl.textContent = "updates every 2s";
+    } catch (err) {
+      if (token !== routeToken) return;
+      launcherLogStatusEl.textContent = "connection interrupted · retrying…";
+      console.warn("launcher log poll failed, keeping the last stream:", err);
+    }
+    await sleep(LOG_POLL_MS);
+  }
 }
 
 // Bumped whenever an artifact page's log poll starts, so the loop it
@@ -202,9 +241,9 @@ async function load(work) {
 // Fetches and draws the current view. Set by route().
 let view = async () => {};
 
-// The refresh button: the server reloads the volume and recomputes its
-// map, then the current view is fetched again. The one place the page
-// ever asks the server to look at the volume.
+// The server reloads the volume and recomputes its map, then the current
+// view is fetched again. The one way the page ever asks the server to look
+// at the volume: from the header button, or from act() once a request lands.
 async function refresh() {
   await request("refresh", { method: "POST" });
   lastPayload = null;
@@ -229,6 +268,7 @@ function parseRoute() {
 function route() {
   routeToken++;
   const r = parseRoute();
+  document.body.classList.toggle("dashboard-page", r.view === "table");
 
   if (r.view === "table") {
     titleEl.textContent = "artifacts";
@@ -238,6 +278,7 @@ function route() {
     // coming back from an artifact's page is instant.
     if (lastPayload) draw(lastPayload);
     view = fetchTable;
+    pollLauncherLogs(); // its own loop: a table refresh never restarts it
   } else {
     titleEl.textContent = r.id;
     dashboardEl.hidden = true;
