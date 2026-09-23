@@ -8,6 +8,7 @@ pair that must not drift apart.
 import heapq
 import json
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -138,6 +139,13 @@ class TokenizerJob(Job):
         total_bytes = sum(os.path.getsize(path) for path in input_paths)
         read_bytes = 0
 
+        # worker.progress says how far along a running call is and is gone once
+        # it ends; these lines are what the call's log still holds afterwards.
+        for path in input_paths:
+            worker.log.info(f"  {path.parent.name}/{path.name}: {os.path.getsize(path)} bytes")
+        started = time.perf_counter()
+        logged_bytes = 0
+
         freq = {}  # pretoken frequency map
         for path in input_paths:
             for chunk in process_chunks(path):
@@ -150,6 +158,17 @@ class TokenizerJob(Job):
                 worker.progress.update(
                     {"phase": "pretokenizing", "done": read_bytes, "total": total_bytes}
                 )
+                if read_bytes - logged_bytes >= total_bytes / 10:
+                    logged_bytes = read_bytes
+                    worker.log.info(
+                        f"pretokenizing {read_bytes}/{total_bytes} bytes, "
+                        f"{len(freq)} distinct pretokens so far"
+                    )
+
+        worker.log.info(
+            f"pretokenized {read_bytes} bytes in {time.perf_counter() - started:.1f}s: "
+            f"{len(freq)} distinct pretokens, {sum(freq.values())} occurrences"
+        )
 
         pretoken_str, pretoken_freq = zip(*freq.items())
         pretokens = [list(pretoken.encode("utf-8")) for pretoken in pretoken_str]
@@ -177,6 +196,13 @@ class TokenizerJob(Job):
         vocab = {i: bytes(resolve(i)) for i in range(256)}
         base_vocab_size = len(vocab)
         total_merges = self.vocab_size - 256 - len(self.special_tokens)
+
+        worker.log.info(f"seeded {len(pair_map)} distinct pairs, merging {total_merges}:")
+        for line in peek_top_pairs(pair_heap, pair_map):
+            worker.log.info(f"  {line}")
+        started = time.perf_counter()
+        log_every = max(1, total_merges // 20)
+
         for merge_index in range(total_merges):
             if len(pair_heap) == 0:
                 break
@@ -244,17 +270,35 @@ class TokenizerJob(Job):
 
             # counted here rather than at the top of the loop: `done` is merges
             # made, so the last one has to be reported after it is made
+            merged = merge_index + 1
             worker.progress.update(
-                {"phase": "merging", "done": merge_index + 1, "total": total_merges}
+                {"phase": "merging", "done": merged, "total": total_merges}
             )
+            if merged % log_every == 0 or merged == total_merges:
+                left, right = merges[-1]
+                elapsed = time.perf_counter() - started
+                worker.log.info(
+                    f"merge {merged}/{total_merges}: {left} + {right} -> "
+                    f"{left + right} at {-most_frequent_pair[0]}, "
+                    f"{len(pair_map)} pairs live, {merged / elapsed:.1f}/s"
+                )
+
+        worker.log.info(
+            f"merged {len(merges)} pairs in {time.perf_counter() - started:.1f}s"
+        )
 
         # and finally add special tokens.
         offset = len(vocab)
         for index in range(len(self.special_tokens)):
             vocab[offset + index] = bytes(self.special_tokens[index].encode("utf-8"))
+        worker.log.info(f"appended {len(self.special_tokens)} special tokens at {offset}")
 
         self.save(root, vocab, merges)
-        worker.log.info(f"trained, vocab has {len(vocab)} entries")
+        path = self.artifact.paths(root)["tokenizer"]
+        worker.log.info(
+            f"trained, vocab has {len(vocab)} entries -- wrote {path.name}, "
+            f"{path.stat().st_size} bytes"
+        )
 
     def save(
         self, root: Path, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]]

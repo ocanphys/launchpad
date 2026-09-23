@@ -481,6 +481,18 @@ every request, so they are live; a leg's step log is read off the mount,
 which means off the last reload's image of it, and only inside a block that
 closes the descriptor before the request returns (`open_jsonl`).
 
+An entry on that map has two halves, and only one of them is as old as the
+recompute. The durable half comes from the volume and cannot change without
+one. The live half -- which call holds the artifact, its last beat, what
+that call reports of its own progress, and the verdict those imply -- is a
+function of a grant and a beat alone (`main.liveness`), so `/state` reads it
+again on every request for the calls the map found under way: a running
+job's progress reaches the page on the browser's own poll, and the map is
+recomputed only when the volume itself has something new to say. The read is
+bounded by the calls under way rather than the size of the map, because an
+artifact nothing is working on can only acquire a lease through the launcher
+container, which recomputes when it grants one.
+
 A reload and a read cannot both be in flight on the same mount: a read
 landing mid-reload sees a path that is briefly absent, and a file descriptor
 still open when a reload starts fails the reload. Neither presents as an
@@ -509,8 +521,8 @@ For an eligible artifact, the executor:
 2. Refreshes storage and checks readiness (`main.attempt_launch`: the manifest at the path, each direct dependency's manifest and completion files), spawns a worker using resources from the authoritative manifest (`main.resource_options`, `run_job.spawn`), and records the grant naming that call (`leases.put`, `call_history`).
 3. In the worker, refreshes storage and confirms the grant names this call (`system.runtime.initialize_worker`, `Lease.confirm("boot")`), loads the authoritative manifest (`Artifact.load`) and resolves its producer (`Artifact.job`), all in `main.run_job`.
 4. Calls `Job(artifact).run(root, worker)`. Inputs come from the artifact's direct dependencies; the job binds what it consumes.
-5. Confirms the grant again after the run and before the commit (`Lease.confirm("pre vol commit")`, `("commit")`), commits (`volume.commit` in `initialize_worker`), and logs the outcome under the call (`call_logs["{call_id}:container"]`). Exceptions propagate; failed attempts are not reported as success.
-6. Announces itself twice on the `refreshes` Queue, each message naming the artifact, the call and the event: `started`, once it holds the lease and has published its first heartbeat, and one naming how it ended, after the commit and after the last heartbeat, which is marked `exited`. Each message trails what it announces, never leads it: a launcher that reloaded earlier would find what it already had. A message carries no state of its own -- it says only that the volume and the Dicts are worth reading again, which the launcher then does for itself.
+5. Confirms the grant again after the run and before the commit (`Lease.confirm("pre vol commit")`, `("commit")`), commits (`volume.commit` in `initialize_worker`), and logs the outcome under the call (`call_logs["{call_id}:livedict:worker"]`). Exceptions propagate; failed attempts are not reported as success.
+6. Announces itself twice on the `refreshes` Queue, each message naming the artifact, the call and the event: `started`, from the heartbeat's first pass and right after the beat that pass published, and one naming how it ended, after the commit and after the last heartbeat, which is marked `exited`. Each message trails what it announces, never leads it: a launcher that reloaded earlier would find what it already had. A message carries no state of its own -- it says only that the volume and the Dicts are worth reading again, which the launcher then does for itself, so a call that goes on to fail its lease having already said it started costs one refresh and misleads nothing.
 
 Different artifact paths may run concurrently, including nested paths when dependencies permit it.
 

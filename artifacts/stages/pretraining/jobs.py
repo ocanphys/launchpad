@@ -74,7 +74,7 @@ class PretrainJob(TrainingJob):
         (folder / "checkpoints").mkdir(parents=True, exist_ok=True)
         # resume from initial model or most recent failsafe checkpoint.
         model, optimizer, step = self.resume(root, worker)
-        log = StepLog(root, self.artifact.artifact_path.as_posix())
+        steplog = StepLog(root, self.artifact.artifact_path.as_posix())
         # the artifact run_job hands a job is the declaration only; bind maps
         # the train/valid token files its own job wrote onto it
         dataset = self.dataset.bind(root)
@@ -93,18 +93,18 @@ class PretrainJob(TrainingJob):
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             optimizer.step()
             optimizer.zero_grad()
-            log.record(step, loss, grad_norm, learning_rate)
+            steplog.record(step, loss, grad_norm, learning_rate)
             worker.progress["step"] = step
 
             if step % self.loop_config.val_every == 0:
                 self.evaluate(model, dataset, step, loss, learning_rate, grad_norm, worker)
-                log.flush()
+                steplog.flush()
 
             if step % self.loop_config.checkpoint_every == 0:
                 self.failsafe(folder / "checkpoints", model, optimizer, step)
-                worker.log.info(f"failsafe at step {step}/{end_step}")
+                worker.log.info(f"checkpoint saved at step {step}/{end_step}")
 
-        log.flush()
+        steplog.flush()
         self.write_atomic(
             self.artifact.paths(root)["model"],
             {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": end_step},

@@ -27,6 +27,9 @@ class Source(Artifact):
 
 @dataclass(frozen=True)
 class SourceURL(Source):
+    """Text downloaded from a URL. A URL ending in .gz is unzipped on the way
+    in, so body.txt is plain text whichever one it was."""
+
     producer: ClassVar[str] = "artifacts.sources.jobs.SourceURLJob"
 
     url: str
