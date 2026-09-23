@@ -80,15 +80,52 @@ Under `optimizer_checkpoint_policy="latest"`, `failsafe` writes
 between leaves two resumable failsafes, and `resume` takes the newest. The
 other order would leave an instant with no resumable failsafe at all.
 
-## The call id is a contextvar, and a thread does not inherit it
+## Ask the record which call it is, never the thread
 
 `modal.current_function_call_id()` reads a contextvar Modal sets for the
 call's own thread. A `threading.Thread` the worker starts sees `None` there,
-so a log filter keyed on the call id silently drops everything that thread
-logs; the heartbeat's own warnings were the lines that went missing.
+so a log filter that asked the thread silently dropped everything that
+thread logged; the heartbeat's own warnings were the lines that went
+missing. `contextvars.copy_context().run(...)` fixed that one thread and
+nothing else: a library's thread, and any thread a job starts for itself,
+still carried no id.
 
-Start any such thread under `contextvars.copy_context().run(...)`, as
-`initialize_worker` does, and the filter sees the same id on both threads.
+So the id travels on the record instead. `call_logger` is a `LoggerAdapter`
+holding `extra={"call_id": ...}`, which stamps every record it makes from
+any thread, and `BufferHandler` reads the stamp rather than the ambient
+state. Two consequences worth knowing:
+
+- Only a filter on a **handler** sees records from other loggers. A filter
+  on the root *logger* never runs for a record logged on `torch.foo`:
+  `Logger.handle` runs only the originating logger's filters, and
+  `callHandlers` then walks ancestors collecting handlers, consulting no
+  further logger filters. Levels are the opposite and do inherit, which is
+  why `setLevel("modal")` silences `modal.client` for free.
+- A record is one object shared by every handler, so a handler that
+  *writes* a stamp is visible to every handler after it. Read with a
+  default; do not mutate.
+
+A library never stamps anything, so an unstamped record is the container's,
+not a mistake: it goes to that container's `ambient` source rather than being
+dropped.
+
+## A library that keeps its own handler never reaches ours
+
+`import torch` gives `torch` and some fifty `torch.*` loggers a
+`StreamHandler` of their own on **stderr** and `propagate = False`, one per
+module rather than one for the family. Propagation is what carries a record
+to the root logger's handlers, so none of it reaches `BufferHandler`, and
+putting only the `torch` logger back would not help: `torch._dynamo` sets
+`propagate = False` on *itself*. Found by a test asserting on `ambient` that
+passed alone and failed in the suite, where an earlier test had imported
+torch.
+
+So `ambient` holds what propagates, not everything the container printed:
+those lines reach Modal's own capture and stop there. Before assuming any
+library is captured, check the whole family, not the top name:
+
+    [(n, l.propagate, bool(l.handlers)) for n, l in
+     logging.root.manager.loggerDict.items() if isinstance(l, logging.Logger)]
 
 ## A traceback keeps the volume's files mapped after the call
 
@@ -150,3 +187,25 @@ touches the mount, so the reload runs inside the same `try` as the job and
 its failure is the call's first container row. The worker holds no log
 file at all; `persist_logs` appends the Dict's rows to the file on its
 schedule.
+
+## Encoding line by line is not the same token sequence as encoding whole
+
+`TokenizeSourceJob` feeds `encode_iterable` one line at a time, so no
+pretoken can span a newline. `PAT` ends in `\s+(?!\S)|\s+`, which means a
+whitespace run that crosses a line boundary pretokenizes differently than it
+would in one string:
+
+    'a  \nb'    whole ['a', '  ', '\n', 'b']   by line ['a', '  \n', 'b']
+    'a\n\n'     whole ['a', '\n\n']            by line ['a', '\n', '\n']
+
+Both encodings decode back to the identical source, so nothing is lost; the
+ids just differ at those boundaries. Found while checking the streaming
+rewrite against the old whole-file `encode()`: 2 MB of TinyStories came out
+byte-identical (717 blank lines and all, because a run *followed* by text
+already splits the same way), and only trailing spaces, whitespace-only
+lines and a file ending in a blank line diverge.
+
+What this costs: a `tokens.bin` built before the rewrite is not reproducible
+by rebuilding it. Don't diff one against a fresh one to decide whether a
+tokenizer changed -- compare `tokenizer.json`, or decode both and compare
+the text.

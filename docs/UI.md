@@ -48,15 +48,37 @@ flat `{artifact_path: state}` map. There is no grouping by run, source or
 dataset; a manifest `state()` could not read lands in the collapsed
 "unreadable manifests" table under it.
 
-The dashboard's right side shows the leasebook container's **launcher
-logs**, with its own scroll area. The panel moves below the table on
-narrower screens; artifact pages retain their original width. Launcher
-records show their timestamp, severity and message on one dense line, newest
-first, with the logger name on the message's hover.
+Four columns: the artifact (its status dot and type), its path, its
+progress, and the button. Which call holds it and when that call last beat
+are the **hover of the artifact's label** (`callSummary` in `render.js`),
+not columns of their own: both are long, and neither is what the table is
+read for at a glance. Progress is the only column with no width of its own,
+so it takes whatever the others leave, being the one that gets long; what
+still overruns it truncates with the whole of it on hover, like the path,
+rather than wrapping a row taller than its neighbours.
+
+The dashboard is **two frames**: the table above, the leasebook container's
+**launcher logs** below, and a boundary between them that drags (`#split`,
+app.js's splitter, writing the `--log-height` the bottom row reads). The log
+takes a fifth of the window until someone drags it; each frame scrolls on
+its own, and a drag lasts as long as the page does, since nothing stores it.
+An artifact's page carries its own calls' stream, so the bottom frame is not
+on screen there and the page takes the whole window.
+
+Launcher records are one line each: time, call, source, severity, message,
+newest first, with the logger name on the message's hover. Its time drops
+the date the artifact stream keeps, the frame being short rather than wide,
+and its column labels stay pinned to the top of its scroll area.
 Multiline tracebacks preserve their line breaks. Level checkboxes work
 like the artifact log filters: DEBUG starts off, and selections survive
 polls and navigation. Launcher filters are separate from artifact filters.
-These records belong to the container, so they have no call id.
+The panel is the whole account of what that container did, so it holds what
+it did to the calls it manages as well: each line names its call (short id,
+`launcher` for the container's own) and its source, which is why a grant here
+also reads on that call's artifact page. The noise around them -- uvicorn,
+grpc -- is the container's `ambient` source, under the same **ambient** box
+the artifact stream has: on by default, and off leaves the leasebook's own
+rows.
 
 ## Fetching
 
@@ -74,8 +96,12 @@ One loop, `app.js`'s `poll`, calling whatever `view` the route pointed at:
 - The table fetches `/state` and `/launcher-logs` per tick. Rows are
   rebuilt only when the map or the page's own pending marks differ from
   what is on screen (`draw` compares them as text), so an idle table never
-  rebuilds under the reader. The launcher panel unions the `launcher` and
-  `launcher:volume` channels, a row counted once (`logview.js`).
+  rebuilds under the reader -- and a row with a job running rebuilds on
+  every tick, because `/state` reads that call's beat off the Dicts per
+  request: its progress cell and its label's hover advance between
+  recomputes, without anything reloading the volume. The bottom frame unions
+  the two storages `/launcher-logs` hands back, `livedict` and `volume`, a
+  row counted once (`logview.js`).
 - An artifact page fetches `/state` and `/logs/<path>` per tick, and
   `/artifact/<path>` -- the one route that reads a file on the server's
   mount -- only when that artifact's own entry has changed, since nothing
@@ -143,8 +169,12 @@ still has no heartbeat reads as failed: the dot is red, its tooltip
 explains that no first heartbeat arrived, and the button offers `run`
 again if the artifact is ready. A heartbeat ends startup: a live one
 means `running` and offers `stop`; a stale one means `failed`, as does the
-beat a call marks on its way out. These labels are the server's, recomputed
-when it recomputes its map; they do not advance on a browser timer.
+beat a call marks on its way out. These labels are the server's and never
+the browser's, but they are not frozen to the recompute: for a call the map
+found under way, `/state` reads the grant and the beat again on each
+request, so an expired grace period or a call whose beats stopped -- a
+container killed hard, which announces nothing -- reaches the row on the
+next poll.
 
 ## The artifact page
 
@@ -159,12 +189,18 @@ rather than the whole tree being dumped on one screen. A path with no entry
 
 Below that, what every call that ever worked on the artifact said, as one
 stream newest first, each line tagged with its call (short id, full on
-hover) and its level, timestamps as `DD/MM/YY-HH:mm:ss` in the reader's zone
-with the full instant on hover. A call's last heartbeat is a line in the
+hover) and its level under a row of column labels, timestamps as
+`DD/MM/YY-HH:mm:ss` in the reader's zone with the full instant on hover. A
+call's last heartbeat is a line in the
 stream too. The heading holds one checkbox per level present; DEBUG starts
-off, and the choice survives refetches. Each call arrives with all three
-channels of its log (see [LOGGING.md](LOGGING.md)) and `artifactview.js`
-unions them, one row counted once. The stream is polled while the page is
+off, and the choice survives refetches. Beside the level boxes is an
+**ambient** box, on by default and shown only when the container logged
+anything alongside the call: turning it off leaves the call's own account of
+itself. Each call arrives with its log in both storages (see
+[LOGGING.md](LOGGING.md)) and `artifactview.js` unions them, one row counted
+once. A line's `source` says who wrote it: `worker` is the call itself,
+`launcher` what the leasebook did to it, `ambient` what the container logged
+around it. The stream is polled while the page is
 open; the curves are the file as the server's last reload left it, refetched
 when the artifact's entry on the state map changes -- which a call's exit
 is what causes.

@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import queue
 import subprocess
@@ -21,6 +20,7 @@ from config import (
     LAB_PORT,
     LAB_SECRET,
     PERSIST_LOGS_EVERY,
+    REFRESH_BATCH,
     REFRESH_WAIT_SECONDS,
     REGION,
     STARTUP_GRACE_SECONDS,
@@ -38,24 +38,26 @@ from system.lease_protocol import (
     refreshes,
 )
 from system.logs import (
-    CHANNELS,
-    LAUNCHER_LOG_KEY,
-    LAUNCHER_VOLUME_KEY,
-    launcher_log,
+    LAUNCHER,
+    LIVE,
+    VOLUME,
+    launcher_logger,
     load_snapshot_from_volume,
     open_json,
     open_jsonl,
-    save_snapshot_to_volume,
-    start_launcher_logging,
+    persist_snapshot,
+    start_logging,
+    stream,
 )
 from system.runtime import initialize_worker
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-# The launcher's own log: what the leasebook container does, published as
-# `call_logs["launcher"]` for the dashboard's panel once
-# `start_launcher_logging` has run (system/logs.py).
-log = logging.getLogger("leasebook")
+# Where a row from this module goes, once `start_logging` has run
+# (system/logs.py). Both are the launcher's own rows and both reach the
+# dashboard's panel; a row stamped with a call reaches that call's page too.
+log_launcher = launcher_logger()  # this container's doings
+log_call = launcher_logger  # a call this container manages
 
 base_image = modal.Image.debian_slim(python_version="3.12").pip_install("regex", "tqdm")
 
@@ -94,6 +96,45 @@ def is_starting(grant: dict | None, beat: dict | None, now: float) -> bool:
         return False
     granted_ts = grant.get("granted_ts")
     return granted_ts is not None and now - granted_ts < STARTUP_GRACE_SECONDS
+
+
+def liveness(entry: dict, grant: dict | None, beat: dict | None, now: float) -> dict:
+    """The half of an entry that is true only right now: which call holds the
+    artifact, what it last said, and the one word the row shows.
+
+        liveness(entry, grant, beat, now) -> {
+            "call_id": "fc-01JQ8W", "active": True,
+            "last_heartbeat": 1757260800.1,
+            "live_progress": {"step": 120, "end_step": 500},
+            "verdict": "running",
+        }
+
+    `entry` supplies what the volume said (`done`, `ready`, `status`); the
+    grant and the beat supply what is true now. `verdict` is the first match
+    of: "done"; "running" for an active call; "starting" for a lease younger
+    than STARTUP_GRACE_SECONDS whose call has not beaten yet; "failed" for a
+    manifest that would not load or a lease whose call stopped beating or
+    exhausted its grace; "runnable" when ready; "blocked" otherwise. A failed
+    artifact stays `ready`, so it can be run again.
+
+    Nothing here touches the mount, so a caller holding a grant and a beat
+    has this answer without a reload.
+    """
+    active = is_active(grant, beat, now)
+    return {
+        "call_id": grant["call_id"] if grant else None,
+        "active": active,
+        "last_heartbeat": beat["last_beat_ts"] if beat else None,
+        "live_progress": beat.get("progress") if beat and active else None,
+        "verdict": (
+            "done" if entry["done"]
+            else "running" if active
+            else "starting" if is_starting(grant, beat, now)
+            else "failed" if entry["status"] == "conflict" or grant
+            else "runnable" if entry["ready"]
+            else "blocked"
+        ),
+    }
 
 
 WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
@@ -150,14 +191,11 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
     dependency not `done` on this same map, one with no manifest included;
     `ready` is additionally false for an artifact nothing produces.
 
-    `verdict` is the one word the row shows, first match wins: "done";
-    "running" for an active call; "starting" for a lease younger than
-    STARTUP_GRACE_SECONDS whose call has not beaten yet; "failed" for a
-    manifest that would not load or a lease whose call stopped beating or
-    exhausted its startup grace period; "runnable" when ready;
-    "blocked" otherwise. A failed artifact stays `ready`, so it can be run
-    again. Every fact is from the one snapshot, so a lease granted after it
-    is not on the map until the next refresh.
+    The last five fields are `liveness`, over this scan's lease and beat
+    snapshot: every fact is from the one snapshot, so a lease granted after
+    it is not on the map until the next scan. They are also the only fields
+    a reader can have fresher than the map -- `/state` reads them again per
+    request, for the calls this scan found under way.
 
     Holds `mount_lock` for the reload and the scan, so a caller can be kept
     waiting by whatever else in this process is reading the mount.
@@ -180,19 +218,12 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
         entries: dict[str, dict] = {}
         for manifest in sorted(root.rglob(MANIFEST)):
             path = manifest.parent.relative_to(root).as_posix()
-            grant = grants.get(path)
-            beat = beat_records.get(grant["call_id"]) if grant else None
-            active = is_active(grant, beat, now)
             entry = {
                 "type": None,
                 "status": "conflict",
                 "error": None,
                 "depends_on": [],
                 "parameters": None,
-                "call_id": grant["call_id"] if grant else None,
-                "active": active,
-                "last_heartbeat": beat["last_beat_ts"] if beat else None,
-                "live_progress": beat.get("progress") if beat and active else None,
                 "durable_progress": None,
             }
             try:
@@ -218,45 +249,37 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
             entries[path] = entry
 
     for path, entry in entries.items():
-        starting = is_starting(grants.get(path), beat_records.get(entry["call_id"]), now)
         blocked_by = [
             dep for dep in entry["depends_on"] if entries.get(dep, {}).get("status") != "done"
         ]
         done = entry["status"] == "done"
-        ready = path in resolved and resolved[path].producer is not None and not done and not blocked_by
         entry["blocked_by"] = blocked_by
         entry["done"] = done
-        entry["ready"] = ready
-        entry["verdict"] = (
-            "done" if done
-            else "running" if entry["active"]
-            else "starting" if starting
-            else "failed" if entry["status"] == "conflict" or entry["call_id"]
-            else "runnable" if ready
-            else "blocked"
-        )
+        entry["ready"] = path in resolved and resolved[path].producer is not None and not done and not blocked_by
+        grant = grants.get(path)
+        entry.update(liveness(entry, grant, beat_records.get(grant["call_id"]) if grant else None, now))
     return entries
 
 
 def artifact_calls(artifact_path: str) -> list[dict]:
     """Every call ever granted for `artifact_path`, oldest grant first, each
-    with the last beat it left and its three log channels (`launcher`,
-    `container`, `volume`), read from the Dicts now. A call that never ran
-    has `last_heartbeat` None; a grant `load_snapshot_from_volume` made up
-    for a log file has `granted_ts` None and sorts first.
+    with the last beat it left and its log in both storages -- what the
+    containers have published (`livedict`) and what its file holds
+    (`volume`) -- read from the Dicts now. Every row says which source wrote
+    it, so the page unions the two and counts a row once.
 
-    Bounded by this one artifact's history: one `beats.get` and three
-    `call_logs.get`s per call, never a scan of either Dict.
+    A call that never ran has `last_heartbeat` None; a grant
+    `load_snapshot_from_volume` made up for a log file has `granted_ts` None
+    and sorts first. Bounded by this one artifact's history: never a scan of
+    either Dict.
     """
     return [
         {
             "call_id": grant["call_id"],
             "granted_ts": grant["granted_ts"],
             "last_heartbeat": (beats.get(grant["call_id"]) or {}).get("last_beat_ts"),
-            **{
-                channel: call_logs.get(f"{grant['call_id']}:{channel}") or []
-                for channel in (*CHANNELS, "volume")
-            },
+            LIVE: stream(grant["call_id"], LIVE),
+            VOLUME: stream(grant["call_id"], VOLUME),
         }
         for grant in call_history.get(artifact_path) or []
     ]
@@ -291,8 +314,8 @@ def leasebook():
     # vanishing into a container crash or a bare 500 with nothing on record.
     stop_logging = None
     try:
-        stop_logging = start_launcher_logging()
-        log.info("leasebook container started")
+        stop_logging = start_logging(LAUNCHER)
+        log_launcher.info("leasebook container started")
 
         # Set on the way out, for the listener thread below.
         finished = threading.Event()
@@ -300,7 +323,7 @@ def leasebook():
         @asynccontextmanager
         async def lifespan(_api):
             yield
-            log.info("leasebook container stopped")
+            log_launcher.info("leasebook container stopped")
             finished.set()
             stop_logging()
 
@@ -311,15 +334,14 @@ def leasebook():
             try:
                 return await call_next(request)
             except Exception:
-                log.exception(f"{request.method} {request.url.path} failed")
+                log_launcher.exception(f"{request.method} {request.url.path} failed")
                 raise
 
         # The files on the volume and the Dicts reconciled once, so a
         # dashboard that comes back after any gap lists what was filed.
         root = Path(STORAGE)
         volume.reload()
-        persisted = load_snapshot_from_volume(root)
-        log.info(f"synced {sum(key.endswith(':container') for key in persisted)} call logs off the volume")
+        log_launcher.info(f"synced {len(load_snapshot_from_volume(root))} log channels off the volume")
 
         # This container's picture of the volume: the `state` map, and the
         # authority on it -- lagged, but complete, since an artifact's files
@@ -334,7 +356,7 @@ def leasebook():
         def recompute(reason: str) -> None:
             nonlocal latest
             latest = state()
-            log.debug(f"refreshed ({reason}): {len(latest)} artifacts on the volume")
+            log_launcher.debug(f"refreshed ({reason}): {len(latest)} artifacts on the volume")
 
         recompute("startup")
 
@@ -348,14 +370,16 @@ def leasebook():
         def listen() -> None:
             while not finished.is_set():
                 try:
-                    messages = refreshes.get_many(100, timeout=REFRESH_WAIT_SECONDS)
+                    messages = refreshes.get_many(REFRESH_BATCH, timeout=REFRESH_WAIT_SECONDS)
                     for message in messages:
-                        log.info(f"{message['artifact_path']}: {message['call_id']} {message['event']}")
+                        # The call's row, not the container's: what a call did
+                        # reads on that call's page.
+                        log_call(message["call_id"]).info(f"{message['artifact_path']}: {message['event']}")
                     recompute("worker")
                 except queue.Empty:
                     continue
                 except Exception:
-                    log.exception("refresh listener: this refresh is lost; still listening")
+                    log_launcher.exception("refresh listener: this refresh is lost; still listening")
                     finished.wait(REFRESH_WAIT_SECONDS)
 
         threading.Thread(target=listen, daemon=True).start()
@@ -367,23 +391,41 @@ def leasebook():
             recompute("page")
             return {"artifacts": len(latest)}
 
-        # The one state route for all three table views: one flat map of
-        # every artifact on the volume, which the frontend slices per view
-        # locally instead of round-tripping on every nav click.
+        # One flat map of every artifact on the volume, as the last recompute
+        # left it, with the `liveness` of every call that recompute found
+        # under way read off the Dicts again here. Durable facts are as old as
+        # that recompute; live ones are as new as this request, which is what
+        # moves a running job's progress and heartbeat on the page without
+        # anything reloading the volume.
+        #
+        # Bounded by the calls under way, never a scan of either Dict: an
+        # artifact nothing is working on cannot acquire a lease except
+        # through this container, which recomputes when it grants one.
         @api.get("/state")
         def state_route() -> dict:
-            return latest
+            now = time.time()
+            entries = {}
+            for path, entry in latest.items():
+                if entry["verdict"] in ("running", "starting"):
+                    grant = leases.get(path)
+                    beat = beats.get(grant["call_id"]) if grant else None
+                    # A call that has said it exited already put its ending on
+                    # the queue, so the recompute that reads its files is on
+                    # the way. Reading that beat here would call a finished
+                    # run "failed" for the moment in between.
+                    if not (beat or {}).get("exited"):
+                        entry = {**entry, **liveness(entry, grant, beat, now)}
+                entries[path] = entry
+            return entries
 
-        # The launcher's own log, both channels as the Dict holds them now
-        # (what this container has published, and the file's rows), which
-        # the page unions like a call's. Dict reads only, so the dashboard
-        # polls it.
+        # The launcher's own log: the call id `launcher` in both storages, what
+        # this container has published and what its file holds, which the page
+        # unions like a call's. Its own rows and the noise around them share
+        # the storage, told apart by `source`. Dict reads only, so the
+        # dashboard polls it.
         @api.get("/launcher-logs")
         def launcher_logs_endpoint() -> dict:
-            return {
-                "launcher": call_logs.get(LAUNCHER_LOG_KEY) or [],
-                "volume": call_logs.get(LAUNCHER_VOLUME_KEY) or [],
-            }
+            return {LIVE: stream(LAUNCHER, LIVE), VOLUME: stream(LAUNCHER, VOLUME)}
 
         # The header's "lab" link. A redirect rather than a URL the page fetches:
         # the lab lives on its own subdomain, and the token that gets it past the
@@ -442,9 +484,9 @@ def leasebook():
                     "train": list(rows),
                 }
 
-        # Every call ever granted for this one artifact, each with all three
-        # channels of its log as the Dicts hold them now. Dict reads only,
-        # never the mount, so the page polls this one while it is open.
+        # Every call ever granted for this one artifact, each with its log in
+        # both storages as the Dicts hold them now. Dict reads only, never the
+        # mount, so the page polls this one while it is open.
         @api.get("/logs/{artifact_path:path}")
         def logs_endpoint(artifact_path: str) -> dict:
             if not safe_relpath(artifact_path):
@@ -469,7 +511,7 @@ def leasebook():
 
         return api
     except Exception:
-        log.exception("leasebook failed to start")
+        log_launcher.exception("leasebook failed to start")
         if stop_logging:
             stop_logging()
         raise
@@ -484,9 +526,8 @@ def persist_logs() -> None:
     from the files themselves, so a pass that never ran costs nothing but
     lag. Fires only on a deployed app (`modal deploy`), not under `modal serve`.
     """
-    root = Path(STORAGE)
     volume.reload()
-    save_snapshot_to_volume(root, volume, load_snapshot_from_volume(root))
+    persist_snapshot(Path(STORAGE), volume)
 
 
 @app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
@@ -666,15 +707,17 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
     artifact and its declared dependencies' statuses, not what runs it.
     `run_job` resolves the job itself, right before running it.
 
-    Every step lands in the launcher's log, so a launch that refuses says
-    where it got to.
+    Every step is logged, and the ones naming a call are stamped with it: the
+    call under way for a refusal that names one, the new call from the spawn
+    on, so its page opens on the grant that made it. All of it is in the
+    launcher's own log either way.
     """
 
-    def refuse(message: str) -> tuple[bool, str]:
-        log.info(f"launch {artifact_path}: refused -- {message}")
+    def refuse(message: str, call_id: str = LAUNCHER) -> tuple[bool, str]:
+        log_call(call_id).info(f"launch {artifact_path}: refused -- {message}")
         return False, message
 
-    log.debug(f"launch {artifact_path}: requested")
+    log_launcher.debug(f"launch {artifact_path}: requested")
     if not safe_relpath(artifact_path):
         return refuse(f"invalid artifact_path {artifact_path!r}")
 
@@ -682,9 +725,11 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
     beat = beats.get(grant["call_id"]) if grant else None
     now = time.time()
     if is_active(grant, beat, now) or is_starting(grant, beat, now):
-        return refuse(f"{artifact_path}: already has a call under way ({grant['call_id']}) -- not launching")
+        # The call under way is the one this concerns: a relaunch attempted
+        # while it works reads on its page, beside what it was doing.
+        return refuse(f"{artifact_path}: already a call running - not launching", grant["call_id"])
 
-    log.debug(f"launch {artifact_path}: no call under way; reading the volume")
+    log_launcher.debug(f"launch {artifact_path}: no current call for artifact; preflight check from volume")
     with mount_lock:
         if root == Path(STORAGE):
             volume.reload()
@@ -705,10 +750,9 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
         return refuse(f"{artifact_path}: blocked on {blocked_by}")
 
     if grant:
-        log.info(f"launch {artifact_path}: dropping the stale lease of {grant['call_id']}")
+        log_call(grant["call_id"]).info(f"{artifact_path}: stale lease dropped by a new launch")
     leases.pop(artifact_path, None)
     options = resource_options(artifact.allocated_resources)
-    log.debug(f"launch {artifact_path}: asking run_job to spawn" + (f" with {options}" if options else ""))
     fn = run_job.with_options(**options) if options else run_job
     call = fn.spawn(artifact_path)
     grant = new_grant(call.object_id, type(artifact).__name__)
@@ -717,9 +761,9 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
     # anything: what lists it under the artifact and what its log starts
     # with, so a call whose container never runs is still a call that was made.
     call_history.put(artifact_path, [*(call_history.get(artifact_path) or []), grant])
-    launcher_log(call.object_id, f"launch requested for {artifact_path}" + (f" with {options}" if options else ""), "DEBUG")
+    log_call(call.object_id).debug(f"spawn requested for {artifact_path}" + (f" with {options}" if options else ""))
     message = f"spawned {artifact_path} -> {call.object_id}, lease granted"
-    launcher_log(call.object_id, message)
+    log_call(call.object_id).info(message)
 
     return True, message
 
@@ -739,20 +783,19 @@ def cancel_call(artifact_path: str) -> tuple[bool, str]:
     """
     grant = leases.pop(artifact_path, None)
     if grant is None:
-        log.info(f"cancel {artifact_path}: refused -- no active call to cancel")
+        log_launcher.info(f"cancel {artifact_path}: refused - no active call to cancel")
         return False, f"{artifact_path}: no active call to cancel"
-    log.debug(f"cancel {artifact_path}: lease released; requesting cancel of {grant['call_id']}")
-    launcher_log(grant["call_id"], f"cancel requested for {artifact_path}; lease released", "DEBUG")
+    log_call(grant["call_id"]).debug(f"cancel requested for {artifact_path}; lease released")
     call = modal.FunctionCall.from_id(grant["call_id"])
     call.cancel()
     try:
         call.get(timeout=0)
-        outcome = "the request came too late -- the call had already finished and its result stands"
+        outcome = "late request - call had already finished"
     except TimeoutError:  # no output yet: the call was live, so the request is what ends it
-        outcome = "cancelled -- the call had no result when the request landed"
+        outcome = "cancelled"
     except Exception as error:
         outcome = f"the request came after the call ended: {type(error).__name__}: {error}"
-    message = f"{artifact_path} -> {grant['call_id']}: {outcome}"
-    launcher_log(grant["call_id"], message)
+    message = f"{artifact_path} - {grant['call_id']}: {outcome}"
+    log_call(grant["call_id"]).info(message)
     return True, message
 

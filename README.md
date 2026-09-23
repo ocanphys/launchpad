@@ -41,19 +41,25 @@ where things live and how traffic flows between them.
 - **Dict `launchpad-call-history`**: one entry per **artifact_path**, the
   list of every grant the launcher ever made for it -- which calls belong
   to an artifact, said once, by the thing that made them.
-- **Dict `launchpad-call-logs`**: three entries per call_id, one writer
-  each: `{call_id}:launcher` (the launcher's own rows: the grant, a
-  cancel), `{call_id}:container` (every log row the call has produced so
-  far, republished whole on each beat) and `{call_id}:volume` (the file's
-  rows, read when the dashboard starts and on every persist pass).
-  The launcher's own log is two more keys of the same kind: `launcher`
-  (what the leasebook container has logged, republished whole every
-  heartbeat) and `launcher:volume` (its file's rows, `logs/launcher.jsonl`
-  at the volume root).
+- **Dict `launchpad-call-logs`**: one entry per call_id, storage and source,
+  keyed `{call_id}:{livedict|volume}:{worker|launcher|ambient}` and one writer
+  each. `livedict` is what a container has published, republished whole every
+  `HEARTBEAT_SECONDS`; `volume` is the rows its file holds, read when the
+  dashboard starts and on every persist pass. `worker` is the call's own
+  account of itself, `launcher` what the leasebook did to it (the grant, a
+  cancel, the start and end it was told about), `ambient` what a container
+  logged around it and no logger of ours stamped. Every row carries its own
+  `call_id` and `source`, so a channel is only where it is kept. The
+  leasebook's own log is the same keys under the call id `launcher`, its file
+  `logs/launcher.jsonl` at the volume root; a row it writes about a call is
+  filed under both, so the call's page has it and the launcher's log stays the
+  whole account of what that container did.
 - **Queue `launchpad-refreshes`**: two messages per call,
-  `{artifact_path, call_id, event}` -- `started`, once it holds the lease
-  and has published a first beat, and one naming how it ended (`done`,
-  `failed`, `lease lost`), after its `volume.commit()` and its last beat.
+  `{artifact_path, call_id, event}` -- `started`, from the heartbeat's first
+  pass and right after the beat it published, and one naming how it ended
+  (`done`, `failed`, `lease lost`), after its `volume.commit()` and its last
+  beat. A call that goes on to fail its lease has already said it started;
+  nothing is computed from a message, so it costs one refresh and no more.
   Put by the worker and taken by the one `leasebook` container, whose listener thread
   recomputes its state map when it finds one. The worker is the only writer,
   `leasebook` the only reader. Nothing is computed *from* a message: it says
@@ -117,6 +123,14 @@ its own, and JupyterLab's own autosave does the rest.
     nothing to the volume; at startup it runs `load_snapshot_from_volume`
     once so the Dicts and the files agree after any gap. Runs pinned to
     `REGION`, next to Modal's Dicts, so a Dict read is a short round trip.
+  - **An entry has two halves.** The durable half (type, parameters, status,
+    `done`, `ready`, `blocked_by`, `durable_progress`) can only change when
+    the volume does, so it changes only on a recompute. The live half
+    (`call_id`, `active`, `last_heartbeat`, `live_progress`, `verdict`) is
+    `main.liveness` over a grant and a beat -- Dict reads, no mount -- so
+    `/state` reads it again on every request for the calls the map found
+    under way. That is how a running job's progress and heartbeat move on
+    the page between recomputes.
   - **It is recomputed when something changed the volume or a lease**, never
     on a clock: a message on the `launchpad-refreshes` Queue (a worker's
     call started beating, or committed and exited, picked up by a listener
@@ -133,8 +147,12 @@ its own, and JupyterLab's own autosave does the rest.
     For what nothing announces -- a manifest declared from the lab.
   - `/state`: that map, one flat map of every artifact on the volume,
     polled by the page every two seconds. An artifact's own page reads its
-    type, parameters and dependencies out of this same map. In memory, so
-    polling it costs the volume nothing.
+    type, parameters and dependencies out of this same map. Served from
+    memory, plus two Dict reads for each call the map found under way (its
+    grant and its beat, for the live half above) -- so polling it costs the
+    volume nothing and an idle table costs nothing at all. A call whose beat
+    says it has exited is left alone: its ending is already on the queue,
+    and the recompute that reads its files is on the way.
   - `/artifact/{artifact_path:path}`: the artifact as this container's
     disk holds it, as the last recompute left it -- its `manifest.json`
     minus the dependency manifests nested in it, and its `train.jsonl` --
@@ -142,13 +160,12 @@ its own, and JupyterLab's own autosave does the rest.
     descriptor is closed before the request returns. The page fetches it
     only when the artifact's entry on the state map has changed.
   - `/logs/{artifact_path:path}`: live -- every call ever granted for the
-    artifact (`call_history`), each with all three channels of its log
-    read from the `call_logs` Dict now (`{call_id}:launcher`, `:container`,
-    `:volume`; the page dedupes). Dict reads only, never the mount, which
-    is what lets an open artifact page poll it.
-  - `/launcher-logs`: the launcher's own log, `call_logs["launcher"]` and
-    `["launcher:volume"]` as the Dict holds them (the page unions them),
-    polled by the dashboard's panel every two seconds. Dict reads only.
+    artifact (`call_history`), each with its log in both storages read from
+    the `call_logs` Dict now (`livedict`, every source together, and
+    `volume`; the page unions them and dedupes). Dict reads only, never the
+    mount, which is what lets an open artifact page poll it.
+  - `/launcher-logs`: the same two for the call id `launcher`, polled by the
+    dashboard's panel every two seconds. Dict reads only.
   - `/launch/{artifact_path:path}`: checks the lease, reloads the volume
     and reads the artifact's manifest and its direct dependencies' files to
     confirm it is declared and ready, then spawns `run_job` and writes the
@@ -163,19 +180,20 @@ its own, and JupyterLab's own autosave does the rest.
 - **`persist_logs`** is a scheduled function (`modal.Period`, every
   `PERSIST_LOGS_EVERY` seconds) in its own container with its own mount:
   the only writer of log files and `call_history.json`. Each pass is
-  stateless -- reload, rebuild the row-count cursor from the files
-  (`load_snapshot_from_volume`), append every call's new Dict rows
-  (`save_snapshot_to_volume`), commit. Schedules only fire on a deployed
-  app (`modal deploy`), not under `modal serve`.
+  stateless -- reload, then `persist_snapshot`: read the files back
+  (`load_snapshot_from_volume`), append every call's rows past what they
+  hold, commit. Schedules only fire on a deployed app (`modal deploy`), not
+  under `modal serve`.
 - **`run_job`** is its own Modal function, with its own container and its
   own mount of the volume: it writes locally and only publishes those
   writes with an explicit `volume.commit()` right before exiting. Nothing
   it writes is visible to any other reader, mounted or not, until that
   commit lands. The call puts one message on the `launchpad-refreshes` Queue
-  once it holds the lease and has beaten, and one after that commit and its
-  last beat, which it marks `exited` -- so every refresh the launcher makes
-  for a call is one where what it is about to read is already true, and a
-  finished call stops reading as live at once rather than a flatline later.
+  on its heartbeat's first pass, once that pass has beaten, and one after
+  that commit and its last beat, which it marks `exited` -- so every refresh
+  the launcher makes for a call is one where what it is about to read is
+  already true, and a finished call stops reading as live at once rather
+  than a flatline later.
 - **`lab.py`** runs *inside* a container that already has the volume
   mounted (the notebook server), so its functions touch `Path(STORAGE)`
   directly; `local.py` is how a laptop gets there, one `.remote()` call
@@ -255,7 +273,7 @@ sequenceDiagram
     J->>Q: PUT {artifact_path, call_id, event: started}
     J->>Le: confirm ("pre run")
     J->>J: run() -- resolve producing Job, write files; every log record lands in the buffer
-    J-->>B: PUT heartbeat; PUT {call_id}:container (daemon thread, every beat, all rows so far)
+    J-->>B: PUT heartbeat (daemon thread); PUT {call_id}:livedict:{worker,ambient} (its own thread, all rows so far)
     J->>Le: confirm ("pre vol commit")
     J->>Le: confirm ("commit")
     J->>V: commit()
@@ -268,7 +286,7 @@ sequenceDiagram
 
     Note over L,J: meanwhile, independently
     loop persist_logs, every PERSIST_LOGS_EVERY
-        Note over B,V: reload(); append new launcher + container rows to logs/{call_id}.jsonl, write call_history.json, commit()
+        Note over B,V: reload(); append every source's new rows to logs/{call_id}.jsonl, write call_history.json, commit()
     end
 ```
 
