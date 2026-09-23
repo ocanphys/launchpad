@@ -6,9 +6,10 @@ from config import APP_NAME
 
 # Four Dicts, not one shared store with prefixed keys: an artifact_path is
 # already a unique key in `leases` and `call_history`, a call_id is already a
-# unique key in `beats`, and `call_logs` holds three channels per call
-# (`:launcher`, `:container`, `:volume`, one writer each) and the launcher's
-# own log under `launcher` and `launcher:volume`, the same way.
+# unique key in `beats`, and `call_logs` holds one channel per call, storage
+# and source -- `{call_id}:{livedict|volume}:{worker|launcher|ambient}`,
+# the launcher's own log among them under the call id `launcher`
+# (system/logs.py).
 # Every key is a top-level key, and every key has one writer: the worker
 # never touches what the launcher writes and the other way round.
 # `call_logs` is its own Dict rather than a field of the beat so that a copy

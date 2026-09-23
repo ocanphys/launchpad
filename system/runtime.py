@@ -1,4 +1,4 @@
-"""One call, one worker: a logger, a lease, and a heartbeat that carries the log.
+"""One call, one worker: a logger, a lease, and a heartbeat.
 
 A job receives the wiring finished -- it never builds a `Lease`, never names a
 log file, and never calls `commit`:
@@ -8,23 +8,28 @@ log file, and never calls `commit`:
         worker.confirm_lease("before write")   # raises LeaseLost if superseded
         (root / self.artifact.artifact_path / "count.txt").write_text("3")
 
-The log is the root logger's records for this call, kept by the
-`BufferHandler` in `system.logs` and published whole on every heartbeat as
-`call_logs["{call_id}:container"]`; `persist_logs` is what files it on the
-volume, so the worker never holds its log open on the mount. Anything that goes
-through `logging` is in it, and anything that bypasses it (a bare `print`,
-tqdm on stderr) reaches only Modal's own capture.
+`worker.log` stamps every row it writes with this call's id and
+`source="worker"`, from any thread, so `start_logging` files it under
+`{call_id}:livedict:worker` and publishes that channel whole every
+HEARTBEAT_SECONDS. What the container logged around the call and no adapter
+stamped -- a library's warning -- is the same call's `ambient` source
+(`system.logs`). `persist_logs` files both on the volume, so the worker never
+holds its log open on the mount. A bare `print` reaches only Modal's own
+capture.
 
 A call puts two messages on the `refreshes` Queue, and the launcher recomputes
-its map on each: "started", once it holds the lease and has published a first
-beat, so the row it was granted stops saying it is starting; and, however the
-call ends, one naming that ending, after the commit that published its files
-and after the last beat, which is marked `exited` so a reader stops waiting
-out the flatline for a call that is already gone. Each message trails what it
-announces; a launcher sent to look any earlier would find what it already had.
+its map on each: "started", from the heartbeat's first pass and right after
+the beat that pass published, so the row it was granted stops saying it is
+starting; and, however the call ends, one naming that ending, after the commit
+that published its files and after the last beat, which is marked `exited` so
+a reader stops waiting out the flatline for a call that is already gone.
+
+Each message trails what it announces, so a launcher sent to look finds
+something new. A call that goes on to fail its lease has already said it
+started: the message is a prompt to read the volume, never something the map
+is computed from.
 """
 
-import contextvars
 import logging
 import threading
 import time
@@ -33,12 +38,13 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
+from itertools import count
 
 import modal
 
 from config import HEARTBEAT_SECONDS
-from system.lease_protocol import Lease, LeaseLost, beats, call_logs, refreshes
-from system.logs import BufferHandler, current_call_id, setup_logging
+from system.lease_protocol import Lease, LeaseLost, beats, refreshes
+from system.logs import WORKER, call_logger, current_call_id, start_logging, try_publish
 
 
 @dataclass(frozen=True)
@@ -51,7 +57,7 @@ class Worker:
 
     artifact_path: str
     call_id: str
-    log: logging.Logger
+    log: logging.LoggerAdapter
     confirm_lease: Callable[..., None]
     progress: dict
 
@@ -61,7 +67,7 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
     """Set up this call's logging and lease; on the way out, commit and tell
     the launcher.
 
-    The buffer and the heartbeat exist before anything touches the mount, so
+    The log and the heartbeat exist before anything touches the mount, so
     a call that dies on the reload itself still beats once and publishes the
     error as its log. The commit is unconditional: it is what lands the
     job's files, and a call that raised may have written some -- so the
@@ -69,27 +75,15 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
     call ended.
     """
     call_id = current_call_id()
-
-    setup_logging()
-    for noisy in ("modal", "grpc", "urllib3"):  # the heartbeat's own RPCs stay out of the log
-        logging.getLogger(noisy).setLevel(logging.WARNING)
-    root = logging.getLogger()
-    buffer = BufferHandler(call_id)
-    root.addHandler(buffer)
-    logger = logging.getLogger("job")
-    logger.setLevel(logging.DEBUG)  # everything; filtering is the reader's job
+    stop_logging = start_logging(call_id)
+    logger = call_logger("job", WORKER, call_id)
     lease = Lease(artifact_path, call_id, logger)
-
-    def publish(what: str, put: Callable[[], None]) -> None:
-        try:
-            put()
-        except Exception as exc:
-            logger.warning(f"{what} not published ({exc})")
 
     def announce(event: str) -> None:
         """Tells the launcher this call reached `event` and the volume is
         worth reading again. Nothing is computed from it."""
-        publish(event, partial(refreshes.put, {"artifact_path": artifact_path, "call_id": call_id, "event": event}))
+        message = {"artifact_path": artifact_path, "call_id": call_id, "event": event}
+        try_publish(event, partial(refreshes.put, message), logger)
 
     worker = Worker(
         artifact_path=artifact_path,
@@ -104,7 +98,9 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
     finished = threading.Event()
 
     def beat(exited: bool) -> None:
-        publish(
+        # This call is the only writer of every key it puts, so there is no
+        # read-modify-write.
+        try_publish(
             "beat",
             partial(beats.put, call_id, {
                 "artifact_path": artifact_path,
@@ -112,34 +108,36 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
                 "progress": dict(worker.progress) or None,
                 "exited": exited,
             }),
+            logger,
         )
 
-    def heartbeat():
-        # This call is the only writer of every key it puts, so there is no
-        # read-modify-write. The pass that sees `finished` still publishes,
-        # so the rows logged on the way out land -- and it is the one that
-        # marks the beat `exited`, which is how a reader tells a call that
-        # has ended from one whose beats are merely late.
-        while True:
-            stop = finished.wait(HEARTBEAT_SECONDS)
+    def heartbeat() -> None:
+        # The first pass beats before it waits, so the call is announced with a
+        # beat already readable rather than one interval from now; the pass that
+        # sees `finished` beats once more, and it is the one that marks the beat
+        # `exited`, which is how a reader tells a call that has ended from one
+        # whose beats are merely late.
+        for passes in count(1):
+            stop = finished.is_set()
             beat(exited=stop)
-            publish("log", lambda: call_logs.put(f"{call_id}:container", list(buffer.rows)))
+            if passes == 1:
+                announce("started")
             if stop:
                 return
+            finished.wait(HEARTBEAT_SECONDS)
 
-    # Under a copy of this call's context: the call id the handlers filter on
-    # is a contextvar, which a bare thread would not carry.
-    thread = threading.Thread(target=contextvars.copy_context().run, args=(heartbeat,), daemon=True)
+    # A bare thread: the call id every row is filed under rides on the record
+    # `worker.log` stamps, not on anything this thread would have to inherit.
+    # It beats and nothing else -- the log publishes on `start_logging`'s own
+    # thread. A beat is one small put; a publish is the whole channel and grows
+    # with the call, and sharing a pass would charge the beat's timeliness to
+    # the log's size: a call whose publish stalled would read as flatlined.
+    thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
     ending = "failed"
     try:
         volume.reload()
         lease.confirm("boot")
-        # The beat before the announcement, and both before the job runs: a
-        # launcher sent to look while this call still had no heartbeat would
-        # find the starting call it already knew about.
-        beat(exited=False)
-        announce("started")
         yield worker
         lease.confirm("commit")
         ending = "done"
@@ -160,10 +158,10 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
     finally:
         volume.commit()
         logger.info(f"committed ({ending}); telling the launcher")
-        root.removeHandler(buffer)
-        finished.set()  # after the commit: committing is still working
+        finished.set()
         thread.join()  # the pass this waits for is the one that marks the beat
-        # Last of all: by now the files are committed and the beat says the
-        # call is over, so the map the launcher builds on this message is the
-        # whole truth about the call rather than a call still starting.
+        # By now the files are committed and the beat says the call is over, so
+        # the map the launcher builds on this message is the whole truth about
+        # the call rather than a call still starting.
         announce(ending)
+        stop_logging()  # last: its final publish carries everything above

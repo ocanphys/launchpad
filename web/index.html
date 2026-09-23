@@ -15,11 +15,31 @@
 <script src="uPlot.iife.min.js"></script>
 <style>
   :root { color-scheme: light dark; }
+  /* Two frames, one page: the route's own view above, this container's
+     launcher log below, and a boundary that drags. The log's height is a
+     variable app.js's splitter writes; a fifth of the window until someone
+     drags it. Neither frame scrolls the other: the page scrolls inside #app. */
+  html { height: 100%; }
   body {
     font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    margin: 0 auto; padding: 2rem 1.5rem; max-width: 64rem;
+    margin: 0; height: 100%; overflow: hidden;
+    display: grid; grid-template-rows: minmax(0, 1fr) auto var(--log-height, 20vh);
   }
-  body.dashboard-page { max-width: 108rem; }
+  #app { overflow: auto; min-height: 0; }
+  #page { margin: 0 auto; padding: 2rem 1.5rem; max-width: 64rem; }
+  body.dashboard-page #page { max-width: 108rem; }
+  /* One artifact's page carries its own calls' log, so the container's would
+     be a second stream under it: the bottom frame is the dashboard's, and
+     the page takes the whole window everywhere else. */
+  body:not(.dashboard-page) { grid-template-rows: minmax(0, 1fr); }
+  body:not(.dashboard-page) #split,
+  body:not(.dashboard-page) #launcherPanel { display: none; }
+  #split {
+    height: 7px; cursor: row-resize; touch-action: none;
+    border-top: 1px solid rgba(128,128,128,.25);
+    background: rgba(128,128,128,.1);
+  }
+  #split:hover { background: rgba(128,128,128,.25); }
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .4rem; }
   h1 { font-size: 1rem; font-weight: 600; margin: 0; }
 
@@ -39,10 +59,15 @@
   #meta { opacity: .55; font-size: 11px; margin-bottom: 1rem; min-height: 1.2em; }
 
   table { border-collapse: collapse; width: 100%; table-layout: fixed; }
-  th, td { padding: .2rem .7rem; text-align: left; border-top: 1px solid rgba(128,128,128,.18); }
+  /* Cell padding is all a row's height is above its one line of text, so it
+     is what a denser table trades: .08rem puts a row at ~85% of what .2rem
+     gave, with the text itself untouched. */
+  th, td { padding: .08rem .7rem; text-align: left; border-top: 1px solid rgba(128,128,128,.18); }
   th { opacity: .55; font-weight: 600; font-size: 11px; border-top: none; }
   td.run { word-break: break-all; }
-  td.call { word-break: break-all; opacity: .8; }
+  /* Like the path column: one line, ellipsis, the whole of it on hover, so a
+     long payload never grows the row taller than every other row. */
+  td.progress { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dim { opacity: .45; }
 
   /* One dot per artifact row -- see dot() in render.js for what puts an
@@ -86,8 +111,8 @@
      for both -- only the color says which, matching the dot palette above:
      green for run, red for stop. */
   .launch-btn {
-    min-width: 2.6rem; padding: .15rem .3rem;
-    font: 9px/1 inherit; text-align: center;
+    min-width: 2.6rem; padding: .1rem .3rem;
+    font: 9px/1 inherit; text-align: center; vertical-align: middle;
     border: 1px solid; border-radius: 3px;
     background: transparent;
     cursor: pointer;
@@ -123,25 +148,18 @@
   a.artifact-link { color: inherit; text-decoration: none; }
   a.artifact-link:hover { text-decoration: underline; }
 
-  /* The dashboard gives the table most of the width and keeps launcher
-     logs in their own scroll area. Artifact drill-down keeps its width. */
-  #dashboard:not([hidden]) {
-    display: grid; grid-template-columns: minmax(0, 1fr) minmax(21.6rem, 30.6rem);
-    gap: 1.5rem; align-items: start;
-  }
+  /* The table takes the whole width of the page frame now that the launcher
+     log has a frame of its own below it. */
   .dashboard-artifacts { min-width: 0; overflow-x: auto; }
-  .dashboard-artifacts > table { min-width: 58rem; }
+  /* Four columns now: the three fixed ones plus room for progress before the
+     frame scrolls sideways instead of squeezing them. */
+  .dashboard-artifacts > table { min-width: 54rem; }
   #launcherPanel {
-    border: 1px solid rgba(128,128,128,.18); border-radius: 6px;
-    padding: .6rem; min-width: 0; max-height: calc(100vh - 10rem);
+    padding: .35rem .75rem .4rem; min-width: 0; min-height: 0;
     display: flex; flex-direction: column;
   }
   #launcherLogs { overflow: auto; min-height: 0; }
-  #launcherLogStatus { opacity: .55; font-size: 11px; padding-top: .4rem; }
-  @media (max-width: 90rem) {
-    #dashboard:not([hidden]) { grid-template-columns: minmax(0, 1fr); }
-    #launcherPanel { max-height: 28rem; }
-  }
+  #launcherLogStatus { opacity: .55; font-size: 11px; padding-top: .3rem; }
 
   /* --- one artifact's page --------------------------------------------- */
   #artifactView { font-size: 12px; }
@@ -163,8 +181,8 @@
   .summary-deps a { color: inherit; }
   .summary-deps a:hover { text-decoration: underline; }
 
-  /* Shared log rendering (logview.js): level filters and timestamped
-     messages, with call/source metadata for artifacts. */
+  /* Shared log rendering (logview.js): filters and labelled columns over one
+     line per record, in the artifact stream and the launcher panel alike. */
   .artifact-logs { margin-top: 1rem; }
   .log-heading { display: flex; flex-wrap: wrap; align-items: baseline; }
   /* A checkbox in a section heading: log levels, expanded parameters. */
@@ -177,7 +195,7 @@
   }
   /* One grid per line with fixed columns, so every line's cells sit under
      the previous line's: widths in ch, exact in the monospace font above
-     (DD/MM/YY-HH:mm:ss, an 8-char call id, "container", "CRITICAL"). */
+     (DD/MM/YY-HH:mm:ss, an 8-char call id, "heartbeat", "CRITICAL"). */
   .log-line {
     display: grid; grid-template-columns: 17ch 8ch 9ch 8ch 1fr;
     column-gap: 1ch; align-items: baseline; padding: .15rem 0;
@@ -188,10 +206,20 @@
   .log-source { opacity: .7; }
   .log-level { font-weight: 600; }
   .log-msg { white-space: pre-wrap; word-break: break-word; }
-  /* The side panel is dense: one short line per record, the logger name on
-     the message's hover. */
+  /* The column labels, in the same grid as the lines so each sits over its
+     column. */
+  .log-columns span { opacity: .45; font-weight: 400; }
+  /* The side panel is dense and narrow: one line per record still, with the
+     date dropped from the time (app.js's `compactTime`) to leave the message
+     room. Its labels are pinned to the top of the panel's scroll area, and
+     have to be opaque or the lines would scroll through them: the page's own
+     background, under the same tint `.log-lines` lays over it. */
   .launcher-logs .log-lines { font-size: 10px; line-height: 1.3; padding: .2rem .4rem; }
-  .launcher-logs .log-line { grid-template-columns: 17ch 8ch minmax(0, 1fr); padding: .04rem 0; }
+  .launcher-logs .log-line { grid-template-columns: 8ch 8ch 8ch 8ch minmax(0, 1fr); padding: .04rem 0; }
+  .launcher-logs .log-columns {
+    position: sticky; top: 0; z-index: 1;
+    background: linear-gradient(rgba(128,128,128,.06), rgba(128,128,128,.06)), Canvas;
+  }
   .launcher-logs .log-line + .log-line { border-top-color: rgba(128,128,128,.08); }
   /* Level and message take the level's color; time, call and source stay muted.
      INFO is the page's own text color (white on dark, black on light). */
@@ -214,6 +242,11 @@
 </head>
 <body>
 
+<!-- The top frame: everything the route switches between, scrolling on its
+     own so the launcher log below stays put. -->
+<div id="app">
+<div id="page">
+
 <header>
   <h1 id="title">artifacts</h1>
   <a id="labLink" href="/lab" target="_blank" rel="noopener">lab ↗</a>
@@ -224,16 +257,18 @@
 <div id="dashboard">
 <div class="dashboard-artifacts">
 <table>
+  <!-- Progress is the one column with no width of its own, so it takes
+       whatever the others leave: it is the one that gets long. The call and
+       its last heartbeat are the artifact label's hover (render.js's
+       callSummary), not columns. -->
   <colgroup>
     <col style="width: 13.5rem">
+    <col style="width: 26rem">
     <col>
-    <col style="width: 7.5rem">
-    <col style="width: 9rem">
-    <col style="width: 9rem">
     <col style="width: 5.5rem">
   </colgroup>
   <thead>
-    <tr><th>artifact</th><th>path</th><th>call</th><th>last heartbeat</th><th>progress</th><th></th></tr>
+    <tr><th>artifact</th><th>path</th><th>progress</th><th></th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -252,16 +287,26 @@
   </table>
 </details>
 </div>
-<aside id="launcherPanel" aria-label="launcher logs">
-  <div id="launcherLogs"></div>
-  <div id="launcherLogStatus">updates every 2s</div>
-</aside>
 </div>
 
 <!-- One artifact's own page, routed to by #/artifact/<path> -- see app.js's
      route() and artifactview.js. Hidden and empty until a route into it
      fires; #dashboard above is hidden in exchange. -->
 <div id="artifactView" hidden></div>
+
+</div>
+</div>
+
+<!-- The boundary between the two frames: dragging it writes --log-height,
+     which is the row the panel below sits in (app.js's splitter). -->
+<div id="split" role="separator" aria-orientation="horizontal" aria-label="resize launcher logs"></div>
+
+<!-- The bottom frame, on every route: what this leasebook container has
+     logged, its own doings and what it did to the calls it manages. -->
+<aside id="launcherPanel" aria-label="launcher logs">
+  <div id="launcherLogs"></div>
+  <div id="launcherLogStatus">updates every 2s</div>
+</aside>
 
 <!-- One entry point. type="module" gives us import/export with no bundler.
      Note: ES modules only load over http(s), not file:// — serve the folder

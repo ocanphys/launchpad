@@ -284,13 +284,25 @@ class StateTests(unittest.TestCase):
             with patch.object(main.Artifact, "load", side_effect=AssertionError("volume read")):
                 launched, message = main.attempt_launch(path, self.root)
             self.assertFalse(launched)
-            self.assertIn("already has a call under way", message)
+            self.assertIn("already a call running", message)
 
             self.lease(path, "fc-1", grant_age=STARTUP_GRACE_SECONDS)
             launched, message = main.attempt_launch(path, self.root)
             self.assertFalse(launched)
             self.assertIn("nothing declared", message)
         lookup.assert_not_called()
+
+    def test_a_launch_refused_by_a_running_call_is_logged_under_that_call(self):
+        """Not the launcher's own row: it belongs on the page of the call
+        holding the artifact, beside what that call was doing when someone
+        tried to relaunch it."""
+        declare(ODYSSEY, self.root)
+        self.lease("sources/odyssey", "fc-1", beat_age=0)
+        with self.assertLogs("leasebook") as captured:
+            launched, message = main.attempt_launch("sources/odyssey", self.root)
+        self.assertFalse(launched)
+        self.assertIn("already a call running", message)
+        self.assertEqual([(r.call_id, r.source) for r in captured.records], [("fc-1", "launcher")])
 
     def test_launch_refuses_what_the_map_would_not_call_runnable(self):
         declare(TOKENS, self.root)

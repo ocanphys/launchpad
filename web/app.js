@@ -32,6 +32,7 @@ const problemsEl = document.getElementById("problems");
 const problemCountEl = document.getElementById("problemCount");
 const problemRowsEl = document.getElementById("problemRows");
 const artifactViewEl = document.getElementById("artifactView");
+const splitEl = document.getElementById("split");
 const launcherLogsEl = document.getElementById("launcherLogs");
 const launcherLogStatusEl = document.getElementById("launcherLogStatus");
 
@@ -39,6 +40,9 @@ const launcherLogStatusEl = document.getElementById("launcherLogStatus");
 
 let lastPayload = null;
 const hiddenLauncherLevels = new Set(["DEBUG"]);
+// Empty, so the container's own noise shows with the leasebook's rows until a
+// reader turns it off.
+const hiddenLauncherSources = new Set();
 
 // Artifact paths the page has asked the server to act on, each with what
 // the button says meanwhile ("starting", "stopping"): the click's own
@@ -147,9 +151,24 @@ async function request(route, init = {}) {
   return body;
 }
 
-// The table view: the server's map and the launcher's own log, one tick
-// apiece. Both answer out of memory and the Dicts, so polling them costs
-// the volume nothing.
+// The bottom frame holds what the container did to the calls it manages as
+// well as what it did for itself, so every line names its call; the time
+// drops its date, the frame being short rather than wide.
+function drawLauncherLogs(logs, emptyText = "no launcher logs yet.") {
+  launcherLogsEl.replaceChildren(logStream(logs, {
+    title: "launcher logs",
+    className: "launcher-logs",
+    hiddenLevels: hiddenLauncherLevels,
+    hiddenSources: hiddenLauncherSources,
+    emptyText,
+    compactTime: true,
+  }));
+}
+
+// The table view: the server's map and the log frame under it, one tick
+// apiece. Both answer out of memory and the Dicts, so polling them costs the
+// volume nothing. The artifact view fetches neither -- it has its own calls'
+// stream, and the frame is not on screen there.
 async function fetchTable() {
   const token = routeToken;
   const [states, logs] = await Promise.all([request("state"), request("launcher-logs")]);
@@ -157,17 +176,9 @@ async function fetchTable() {
   lastPayload = states;
   stamp(states);
   draw(states);
-  drawLauncherLogs(union([logs.volume, logs.launcher]));
+  // Every row says who wrote it in its own `source`, so nothing is tagged here.
+  drawLauncherLogs(union([logs.volume, logs.livedict]));
   launcherLogStatusEl.textContent = "updates every 2s";
-}
-
-function drawLauncherLogs(logs, emptyText = "no launcher logs yet.") {
-  launcherLogsEl.replaceChildren(logStream(logs, {
-    title: "launcher logs",
-    className: "launcher-logs",
-    hiddenLevels: hiddenLauncherLevels,
-    emptyText,
-  }));
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -270,7 +281,6 @@ function route() {
     // Draw the last payload now rather than waiting on a fresh fetch, so
     // coming back from an artifact's page is instant.
     if (lastPayload) draw(lastPayload);
-    if (!launcherLogsEl.hasChildNodes()) drawLauncherLogs([], "loading launcher logs…");
     view = fetchTable;
   } else {
     titleEl.textContent = r.id;
@@ -287,6 +297,33 @@ function route() {
   poll();
 }
 
+// --- layout -------------------------------------------------------------------
+
+// The boundary between the two frames: dragging it writes `--log-height`, the
+// grid row the log frame sits in (index.html). The drag listens on the window,
+// not on the boundary, because the pointer spends the drag over the frames
+// either side and the release can land anywhere -- off the window, or as a
+// cancelled pointer. One AbortController unbinds the lot however it ends.
+const MIN_LOG_PX = 44; // one row and the status line stay readable
+const MIN_PAGE_PX = 140; // the header and a row of the page stay on screen
+
+splitEl.addEventListener("pointerdown", (event) => {
+  event.preventDefault(); // no text selection while dragging
+  const dragging = new AbortController();
+  const { signal } = dragging;
+  window.addEventListener("pointermove", (moved) => {
+    // A release nothing here saw would leave this bound, and the boundary
+    // would follow a bare hover. No button down means the drag is over.
+    if (!moved.buttons) return dragging.abort();
+    const height = Math.min(Math.max(window.innerHeight - moved.clientY, MIN_LOG_PX), window.innerHeight - MIN_PAGE_PX);
+    document.body.style.setProperty("--log-height", `${height}px`);
+  }, { signal });
+  for (const ended of ["pointerup", "pointercancel", "blur"]) {
+    window.addEventListener(ended, () => dragging.abort(), { signal });
+  }
+});
+
 refreshEl.addEventListener("click", () => load(refresh));
 window.addEventListener("hashchange", route);
+drawLauncherLogs([], "loading launcher logs…"); // the frame is there before the first answer
 route();

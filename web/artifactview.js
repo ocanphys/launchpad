@@ -8,9 +8,9 @@
 // no manifest), `page` what the server's disk holds for it
 // (`/artifact/<path>`: `manifest`, minus the dependency manifests nested
 // in it, and `train`, the leg's step log, only what a worker committed)
-// and `calls` every call that has ever worked on it with its three log
-// channels out of the `call_logs` Dict (`/logs/<path>`, polled while the
-// page is open; see docs/LOGGING.md).
+// and `calls` every call that has ever worked on it with its log in both
+// storages (`livedict`, `volume`) out of the `call_logs` Dict
+// (`/logs/<path>`, polled while the page is open; see docs/LOGGING.md).
 
 import { el } from "./el.js";
 import { logStream, union } from "./logview.js";
@@ -80,21 +80,19 @@ function summary(entry, manifest) {
 // Which levels the reader has switched off. Page state rather than DOM
 // state: every fetch rebuilds the view, and the choice has to outlive that.
 const hiddenLevels = new Set(["DEBUG"]);
+// Empty, so what the container logged around a call shows with the call's own
+// rows until a reader turns it off.
+const hiddenSources = new Set();
 
-// Every call's rows in one stream, each tagged with its call and with who
-// wrote it (`source`: the channel it came out of, or for a row read off the
-// file the channel the file recorded), newest first, so what is happening
-// now is at the top while the page polls. A call's last heartbeat is a row
-// too, so where an attempt stopped beating reads in sequence with what it
-// last said.
+// Every call's rows in one stream, newest first, so what is happening now is
+// at the top while the page polls. A row carries its own call id and its own
+// `source` -- worker, launcher, ambient -- so nothing is tagged here. A
+// call's last heartbeat is a row too, so where an attempt stopped beating
+// reads in sequence with what it last said.
 function logRows(calls) {
   return calls
     .flatMap((call) => [
-      ...union([
-        call.volume.map((row) => ({ ...row, source: row.source || "volume" })),
-        call.launcher.map((row) => ({ ...row, source: "launcher" })),
-        call.container.map((row) => ({ ...row, source: "container" })),
-      ]).map((row) => ({ ...row, call_id: call.call_id })),
+      ...union([call.volume, call.livedict]),
       call.last_heartbeat == null ? null : {
         ts: call.last_heartbeat, level: "INFO", logger: "heartbeat", msg: "last heartbeat",
         call_id: call.call_id, source: "heartbeat",
@@ -111,8 +109,8 @@ function logs(calls) {
     title: "logs",
     className: "artifact-logs",
     hiddenLevels,
+    hiddenSources,
     emptyText: "no call has ever worked on this artifact yet.",
-    callMetadata: true,
   });
 }
 

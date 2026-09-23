@@ -36,6 +36,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main
+from config import FLATLINE, HEARTBEAT_SECONDS, STARTUP_GRACE_SECONDS
+from system import logs
 
 # Every listener thread `leasebook` starts is a daemon that outlives the test
 # that made it, and it reads whatever `main.refreshes` names when it wakes.
@@ -68,6 +70,17 @@ class Queue(queue.Queue):
             except queue.Empty:
                 break
         return messages
+
+
+class Counting(dict):
+    """A Dict that counts the reads made of it, so a test can assert that a
+    route answered without asking Modal anything."""
+
+    gets = 0
+
+    def get(self, key, default=None):
+        self.gets += 1
+        return super().get(key, default)
 
 
 def until(predicate, timeout: float = 2.0) -> bool:
@@ -124,7 +137,7 @@ def client(**overrides):
     calls["state"] = 0
     calls["reload"] = 0
     calls["stop_logging"] = overrides.get("stop_logging", Mock())
-    main.start_launcher_logging = Mock(return_value=calls["stop_logging"])
+    main.start_logging = Mock(return_value=calls["stop_logging"])
 
     def state():
         calls["state"] += 1
@@ -163,9 +176,18 @@ def client(**overrides):
         ],
         "sources/tinyshakespeare": [{"call_id": "fc-2", "granted_ts": 70.0, "artifact_type": "Source"}],
     }
-    ROW = {"ts": 1757246400.0, "level": "INFO", "logger": "job", "msg": "boot: lease held"}
-    GRANTED = {"ts": 90.0, "level": "INFO", "logger": "launcher", "msg": "granted"}
-    main.call_logs = {"fc-1:launcher": [GRANTED], "fc-1:container": [ROW], "fc-1:volume": [ROW], "fc-9:volume": [ROW]}
+    ROW = {"ts": 1757246400.0, "call_id": "fc-1", "source": "worker", "level": "INFO", "logger": "job", "msg": "boot: lease held"}
+    GRANTED = {"ts": 90.0, "call_id": "fc-1", "source": "launcher", "level": "INFO", "logger": "leasebook", "msg": "granted"}
+    NOISE = {"ts": 1757246401.0, "call_id": "fc-1", "source": "ambient", "level": "WARNING", "logger": "urllib3", "msg": "retrying"}
+    # `stream` reads this one, so it is the logs module's the routes reach
+    # through, not a name of main's.
+    main.call_logs = logs.call_logs = {
+        "fc-1:livedict:launcher": [GRANTED],
+        "fc-1:livedict:worker": [ROW],
+        "fc-1:livedict:ambient": [NOISE],
+        "fc-1:volume:worker": [ROW],
+        "fc-9:volume:worker": [ROW],
+    }
     # The mount: a folder with one leg's manifest and step log on it.
     STEP = {"step": 1, "attempt": 1, "loss": 2.0, "grad_norm": 1.0, "learning_rate": 0.5}
     main.STORAGE = mkdtemp()
@@ -173,10 +195,13 @@ def client(**overrides):
     leg.mkdir(parents=True)
     (leg / "manifest.json").write_text(json.dumps({**MANIFEST, "dependencies": {"dataset": {"artifact": "artifacts.dataset.DataSet"}}}))
     (leg / "train.jsonl").write_text(json.dumps(STEP) + "\n")
-    main.beats = {
+    main.beats = Counting({
         "fc-1": {"artifact_path": "runs/toy/pretraining", "last_beat_ts": 100.0},
         "fc-2": {"artifact_path": "sources/tinyshakespeare", "last_beat_ts": 75.0},
-    }
+    })
+    # Only `/state`'s overlay reads this one, and only for a call the map
+    # found under way.
+    main.leases = Counting()
     # In the container `web/` is mounted at /web; locally it's the repo's own
     # copy, which is the same files and lets the static mount succeed.
     main.WEB_DIR = Path(__file__).resolve().parents[1] / "web"
@@ -208,15 +233,97 @@ def test_state_serves_the_computed_map():
     assert api.get("/state").json() == STATE
 
 
+# --- the live overlay ---------------------------------------------------------
+#
+# What the map holds for an artifact the last recompute found under way. Its
+# five live fields are the overlay's whole business; the rest is the volume's
+# and must come back untouched.
+RUNNING = {
+    "type": "Pretraining", "status": "partial", "error": None,
+    "depends_on": [], "parameters": {"run_id": "toy"},
+    "blocked_by": [], "done": False, "ready": True,
+    "verdict": "running", "call_id": "fc-1", "active": True,
+    "last_heartbeat": 100.0, "live_progress": {"step": 1, "end_step": 500},
+    "durable_progress": None,
+}
+LEG = "runs/toy/pretraining"
+DURABLE = ("type", "status", "error", "depends_on", "parameters", "blocked_by", "done", "ready", "durable_progress")
+
+
+def working(api, beat: dict | None = None, granted_age: float = 5.0) -> dict:
+    """`LEG`'s entry off `/state`, with the Dicts holding one grant for it and
+    `beat` -- `{"age": seconds since it was written, ...}`, or none at all."""
+    main.leases[LEG] = {"call_id": "fc-1", "granted_ts": time.time() - granted_age}
+    if beat is None:
+        main.beats.pop("fc-1", None)
+    else:
+        main.beats["fc-1"] = {"artifact_path": LEG, **beat, "last_beat_ts": time.time() - beat.pop("age")}
+    return api.get("/state").json()[LEG]
+
+
+def test_state_reads_a_running_calls_progress_on_every_request():
+    """The point of the overlay: the step count climbs on the page while
+    nothing recomputes the map or reloads the volume."""
+    api, calls = client(state={LEG: dict(RUNNING)})
+    first = working(api, {"age": 0.2, "progress": {"step": 120, "end_step": 500}})
+    assert first["live_progress"] == {"step": 120, "end_step": 500}
+    assert first["verdict"] == "running" and first["active"] is True
+
+    second = working(api, {"age": 0.1, "progress": {"step": 121, "end_step": 500}})
+    assert second["live_progress"] == {"step": 121, "end_step": 500}
+    assert second["last_heartbeat"] > first["last_heartbeat"]
+    # The volume's half of the entry is the map's, untouched by any of it.
+    assert {key: second[key] for key in DURABLE} == {key: RUNNING[key] for key in DURABLE}
+    assert calls["state"] == 1, "the map was recomputed"
+    assert calls["reload"] == 1, "the volume was reloaded after startup"
+
+
+def test_state_reads_nothing_for_artifacts_no_call_is_working_on():
+    """Bounded by the calls under way, not by the size of the map."""
+    api, _ = client()  # STATE: one done, one unreadable, neither with a call
+    assert api.get("/state").json() == STATE
+    assert (main.leases.gets, main.beats.gets) == (0, 0)
+
+
+def test_state_leaves_a_call_that_said_it_exited_to_the_queue():
+    """Its ending is already on the way; reading that beat here would call a
+    finished run "failed" for the moment before the recompute lands."""
+    api, _ = client(state={LEG: dict(RUNNING)})
+    entry = working(api, {"age": 0.1, "progress": {"step": 500}, "exited": True})
+    assert entry == RUNNING
+
+
+def test_state_fails_a_running_call_whose_beats_stopped():
+    """A container killed hard announces nothing, so no recompute is coming:
+    the flatline is what the row has to notice."""
+    api, _ = client(state={LEG: dict(RUNNING)})
+    entry = working(api, {"age": FLATLINE * HEARTBEAT_SECONDS + 1, "progress": {"step": 120}})
+    assert entry["verdict"] == "failed"
+    assert entry["active"] is False and entry["live_progress"] is None
+    assert entry["ready"] is True, "a failed artifact can still be run again"
+
+
+def test_state_expires_a_starting_calls_grace_without_a_recompute():
+    api, _ = client(state={LEG: {**RUNNING, "verdict": "starting", "active": False, "last_heartbeat": None, "live_progress": None}})
+    assert working(api, granted_age=STARTUP_GRACE_SECONDS - 1)["verdict"] == "starting"
+    assert working(api, granted_age=STARTUP_GRACE_SECONDS + 1)["verdict"] == "failed"
+
+
 def test_launcher_logs_are_live_and_do_not_refresh_state_or_storage():
     api, calls = client()
-    assert api.get("/launcher-logs").json() == {"launcher": [], "volume": []}
-    first = {"ts": 1.0, "level": "INFO", "logger": "leasebook", "msg": "started"}
-    main.call_logs["launcher"] = [first]
-    main.call_logs["launcher:volume"] = [first]
-    second = {"ts": 2.0, "level": "ERROR", "logger": "leasebook", "msg": "failed\ntraceback"}
-    main.call_logs["launcher"].append(second)
-    assert api.get("/launcher-logs").json() == {"launcher": [first, second], "volume": [first]}
+    assert api.get("/launcher-logs").json() == {"livedict": [], "volume": []}
+    row = lambda ts, msg, source="launcher": {
+        "ts": ts, "call_id": "launcher", "source": source,
+        "level": "INFO", "logger": "leasebook", "msg": msg,
+    }
+    first, second = row(1.0, "started"), row(2.0, "failed\ntraceback")
+    main.call_logs["launcher:livedict:launcher"] = [first, second]
+    main.call_logs["launcher:volume:launcher"] = [first]
+    # the noise around the leasebook's own rows is the same call's, told apart
+    # by `source` rather than by belonging to something else
+    noise = row(3.0, "GET /state", source="ambient")
+    main.call_logs["launcher:livedict:ambient"] = [noise]
+    assert api.get("/launcher-logs").json() == {"livedict": [first, second, noise], "volume": [first]}
     assert calls["state"] == 1
     assert calls["reload"] == 1
     assert "launcher" not in main.call_history
@@ -224,7 +331,7 @@ def test_launcher_logs_are_live_and_do_not_refresh_state_or_storage():
 
 def test_launcher_logging_is_stopped_on_asgi_shutdown():
     api, calls = client()
-    main.start_launcher_logging.assert_called_once_with()
+    main.start_logging.assert_called_once_with(logs.LAUNCHER)
     with api:
         assert api.get("/launcher-logs").status_code == 200
         calls["stop_logging"].assert_not_called()
@@ -247,8 +354,8 @@ def test_launcher_logging_is_stopped_after_logging_a_startup_failure():
 
 def test_request_failures_are_logged_with_their_traceback():
     api, _ = client()
-    main.call_logs = Mock()
-    main.call_logs.get.side_effect = RuntimeError("Dict unavailable")
+    logs.call_logs = Mock()
+    logs.call_logs.get.side_effect = RuntimeError("Dict unavailable")
     with TestCase().assertLogs("leasebook", level=logging.ERROR) as captured:
         try:
             api.get("/launcher-logs")
@@ -275,9 +382,10 @@ def test_state_is_computed_when_something_changed_it_and_never_on_a_read():
     assert api.post("/refresh").json() == {"artifacts": len(STATE)}
     assert calls["state"] == 2
 
-    main.call_logs["fc-1:container"] = [*main.call_logs["fc-1:container"], {"ts": 101.0, "level": "INFO", "logger": "job", "msg": "step 1"}]
+    main.call_logs["fc-1:livedict:worker"] = [*main.call_logs["fc-1:livedict:worker"],
+                                              {"ts": 101.0, "call_id": "fc-1", "source": "worker", "level": "INFO", "logger": "job", "msg": "step 1"}]
     body = api.get("/logs/runs/toy/pretraining").json()
-    assert [row["msg"] for row in body["calls"][2]["container"]] == ["boot: lease held", "step 1"]
+    assert [row["msg"] for row in body["calls"][2]["livedict"]] == ["boot: lease held", "step 1", "granted", "retrying"]
 
 
 def test_a_call_that_exited_recomputes_the_map_without_anyone_asking():
@@ -370,7 +478,7 @@ def test_the_lab_link_carries_the_token():
 def test_artifact_logs_aggregate_every_call_oldest_first():
     """`/logs/<path>` -- every call ever granted for this one artifact,
     not just its current holder, in the launcher's order, each with the
-    beat it left and all three channels of its log, out of the Dicts.
+    beat it left and its log in both storages, out of the Dicts.
     """
     api, _ = client()
     body = api.get("/logs/runs/toy/pretraining").json()
@@ -380,14 +488,18 @@ def test_artifact_logs_aggregate_every_call_oldest_first():
 
     by_id = {call["call_id"]: call for call in body["calls"]}
     assert by_id["fc-9"]["last_heartbeat"] is None and by_id["fc-9"]["granted_ts"] is None
-    # fc-0 was granted and never ran: listed, with nothing in any channel.
+    # fc-0 was granted and never ran: listed, with nothing in either storage.
     assert by_id["fc-0"]["last_heartbeat"] is None
-    assert (by_id["fc-0"]["launcher"], by_id["fc-0"]["container"], by_id["fc-0"]["volume"]) == ([], [], [])
-    assert by_id["fc-9"]["container"] == [] and len(by_id["fc-9"]["volume"]) == 1
+    assert (by_id["fc-0"]["livedict"], by_id["fc-0"]["volume"]) == ([], [])
+    assert by_id["fc-9"]["livedict"] == [] and len(by_id["fc-9"]["volume"]) == 1
     assert by_id["fc-1"]["last_heartbeat"] == 100.0
-    assert by_id["fc-1"]["launcher"][0]["msg"] == "granted"
-    assert by_id["fc-1"]["container"][0]["msg"] == "boot: lease held"
-    assert by_id["fc-1"]["volume"] == by_id["fc-1"]["container"]
+    # every source of a call's live log arrives together, each row saying which
+    # it is: what the call logged, what the launcher did to it, and what the
+    # container logged around it
+    assert [(r["source"], r["msg"]) for r in by_id["fc-1"]["livedict"]] == [
+        ("worker", "boot: lease held"), ("launcher", "granted"), ("ambient", "retrying"),
+    ]
+    assert [r["msg"] for r in by_id["fc-1"]["volume"]] == ["boot: lease held"]
 
     # A call that beat for a *different* artifact (fc-2, sources/tinyshakespeare)
     # never leaks into this one's aggregation.

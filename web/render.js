@@ -45,21 +45,16 @@ function dot(state) {
 }
 
 
-// Call ids are long and only their tail varies day to day -- show the last
-// 8 chars, full value on hover via the native title tooltip.
-function callId(state) {
-  if (!state.call_id) return dim("—");
-  const id = state.call_id;
-  const short = id.length > 8 ? id.slice(-8) : id;
-  return el("span", { title: id, text: short });
-}
-
-function heartbeat(state) {
-  if (!state.last_heartbeat) return dim("—");
+// Which call holds the artifact and when it last beat, as one string for the
+// hover of the artifact's own label rather than two columns of its own: both
+// are long, and neither is what the table is read for at a glance.
+// `undefined` for an artifact no call has touched, which `el` drops, so its
+// label carries no tooltip at all.
+function callSummary(state) {
+  if (!state.call_id) return undefined;
   // last_heartbeat is unix SECONDS; Date wants ms.
-  return document.createTextNode(
-    new Date(state.last_heartbeat * 1000).toLocaleTimeString()
-  );
+  const beat = state.last_heartbeat ? new Date(state.last_heartbeat * 1000).toLocaleTimeString() : "none";
+  return `call_id: ${state.call_id}, last heartbeat: ${beat}`;
 }
 
 // One payload -- main.py's live_progress (what a running job wrote) or
@@ -87,7 +82,10 @@ function formatProgress(p) {
 // meaningful once nothing's active anymore).
 function progressCell(state) {
   const text = formatProgress(state.live_progress) || formatProgress(state.durable_progress);
-  return text ? el("span", { text }) : dim("—");
+  // A generic payload prints every key it has and gets long; the column is
+  // the widest one for that reason, and what still overruns it truncates
+  // rather than wrapping the row taller, the whole of it on hover.
+  return text ? el("span", { text, title: text }) : dim("—");
 }
 
 // One square button per artifact, offering the one thing worth doing to it.
@@ -128,13 +126,13 @@ function actionButton(path, state, ctx) {
 }
 
 
-// One <tr> per declared artifact: status dot + type, path, call/heartbeat,
-// progress, and the button that launches or stops it.
+// One <tr> per declared artifact: status dot + type (its call and last beat
+// on hover), path, progress, and the button that launches or stops it.
 export function artifactRow(path, state, ctx) {
   return el("tr", { class: "artifact-row" },
     el("td", {},
       dot(state),
-      el("span", { class: "artifact-type", text: state.type }),
+      el("span", { class: "artifact-type", text: state.type, title: callSummary(state) }),
       // A MappedDataSet owns no bytes of its own, worth flagging inline
       // rather than making a reader infer it from the type name alone.
       state.type === "MappedDataSet" ? el("span", { class: "artifact-tag", text: " (Mapped)" }) : null,
@@ -142,9 +140,7 @@ export function artifactRow(path, state, ctx) {
     el("td", { class: "artifact-path dim" },
       el("a", { class: "artifact-link", href: "#/artifact/" + path, text: path, title: path }),
     ),
-    el("td", { class: "call" }, callId(state)),
-    el("td", {}, heartbeat(state)),
-    el("td", {}, progressCell(state)),
+    el("td", { class: "progress" }, progressCell(state)),
     el("td", {}, actionButton(path, state, ctx)),
   );
 }

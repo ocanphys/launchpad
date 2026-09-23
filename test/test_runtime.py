@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from system import lease_protocol, runtime
+from system import lease_protocol, logs, runtime
 
 
 class Dict(dict):
@@ -59,9 +59,10 @@ class InitializeWorkerTests(unittest.TestCase):
         self.refreshes.beats = self.beats
         self.patches = [
             patch("modal.current_function_call_id", return_value=None),  # the call is "local"
-            patch.object(runtime, "HEARTBEAT_SECONDS", 0.01),
+            patch.object(logs, "HEARTBEAT_SECONDS", 0.01),  # the log publisher's cadence
+            patch.object(runtime, "HEARTBEAT_SECONDS", 0.01),  # the heartbeat's own
+            patch.object(logs, "call_logs", self.call_logs),
             patch.object(runtime, "beats", self.beats),
-            patch.object(runtime, "call_logs", self.call_logs),
             patch.object(runtime, "refreshes", self.refreshes),
             patch.object(lease_protocol, "leases", {self.ARTIFACT: lease_protocol.new_grant("local", "Pretraining")}),
         ]
@@ -80,14 +81,14 @@ class InitializeWorkerTests(unittest.TestCase):
         return volume
 
     def container(self) -> list[str]:
-        return [row["msg"].splitlines()[0] for row in self.call_logs["local:container"]]
+        return [row["msg"].splitlines()[0] for row in self.call_logs["local:livedict:worker"]]
 
     def test_a_reload_that_fails_is_still_a_logged_call(self):
         volume = self.mount(reload_error=RuntimeError("open files on the mount"))
         with self.assertRaises(RuntimeError), runtime.initialize_worker(self.ARTIFACT, volume):
             self.fail("the body must not run on a mount that did not reload")
         self.assertEqual(self.container()[0], "failed under a held lease")
-        self.assertIn("open files on the mount", self.call_logs["local:container"][0]["msg"])
+        self.assertIn("open files on the mount", self.call_logs["local:livedict:worker"][0]["msg"])
         self.assertEqual(self.beats["local"]["artifact_path"], self.ARTIFACT)
         self.assertEqual(volume.commits, 1)
         self.assertEqual(self.refreshes[-1], {"artifact_path": self.ARTIFACT, "call_id": "local", "event": "failed", "commits": 1, "beat": "exited"})
@@ -136,25 +137,26 @@ class InitializeWorkerTests(unittest.TestCase):
 
     def test_a_running_call_announces_itself_with_a_beat_already_readable(self):
         """The message that turns the row the launcher granted from
-        "starting" into "running". The call publishes its own first beat
-        before sending it, rather than leaving it to the heartbeat's next
-        pass: a launcher that reloaded while this call had no heartbeat would
-        find the starting call it already knew about. Sent once, however long
-        the call runs."""
+        "starting" into "running". The heartbeat's first pass beats before it
+        sends it, rather than waiting out an interval first: a launcher that
+        reloaded while this call had no heartbeat would find the starting call
+        it already knew about. Sent once, however long the call runs."""
         with runtime.initialize_worker(self.ARTIFACT, self.mount()) as worker:
-            self.assertEqual(self.refreshes, [{"artifact_path": self.ARTIFACT, "call_id": "local", "event": "started", "commits": 0, "beat": "live"}])
             worker.log.info("working")
             beaten = set()
             while len(beaten) < 3:  # several heartbeat passes, none of which announces again
                 beaten.add(self.beats["local"]["last_beat_ts"])
+        self.assertEqual(self.refreshes[0], {"artifact_path": self.ARTIFACT, "call_id": "local", "event": "started", "commits": 0, "beat": "live"})
         self.assertEqual([message["event"] for message in self.refreshes], ["started", "done"])
 
     def test_a_call_shorter_than_one_heartbeat_announces_both_ends(self):
-        """Neither message waits on the heartbeat thread, so a call that is
-        over before its first pass still tells the launcher twice."""
+        """Neither message waits out a heartbeat interval, so a call that is
+        over before the first wait still tells the launcher twice, and the
+        beat the last one trails says the call has gone."""
         with patch.object(runtime, "HEARTBEAT_SECONDS", 30), runtime.initialize_worker(self.ARTIFACT, self.mount()):
             pass
-        self.assertEqual([(message["event"], message["beat"]) for message in self.refreshes], [("started", "live"), ("done", "exited")])
+        self.assertEqual([message["event"] for message in self.refreshes], ["started", "done"])
+        self.assertEqual(self.refreshes[-1]["beat"], "exited")
 
     def test_the_last_beat_says_the_call_has_exited(self):
         """What keeps a finished call from reading as live until its beats
