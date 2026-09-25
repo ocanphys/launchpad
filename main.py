@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import os
 import queue
@@ -6,6 +8,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import modal
 
@@ -290,8 +293,8 @@ def artifact_calls(artifact_path: str) -> list[dict]:
     volumes={STORAGE: volume},
     max_containers=1,
     region=REGION,
-    # Only for the lab's token, so `/lab` can hand it straight to Jupyter --
-    # nothing else in here reads a secret.
+    # The password every route here is behind, and the lab's token, which
+    # `/lab` hands straight to Jupyter.
     secrets=[modal.Secret.from_name(LAB_SECRET)],
 )
 @modal.asgi_app()
@@ -302,9 +305,13 @@ def leasebook():
     URLs on two subdomains: the page would have to be told where its data lives,
     and the browser would treat the answer as cross-origin and refuse to read it.
     Served together, `state` is just a relative path, and no CORS question arises.
+
+    Every route but `/login` is behind DASHBOARD_PASSWORD, out of LAB_SECRET.
+    A missing key is a container that refuses to start rather than one serving
+    in the open.
     """
-    from fastapi import FastAPI
-    from fastapi.responses import RedirectResponse
+    from fastapi import FastAPI, Request
+    from fastapi.responses import HTMLResponse, RedirectResponse, Response
     from fastapi.staticfiles import StaticFiles
 
     # Everything below is this container's whole setup and its whole life --
@@ -337,9 +344,57 @@ def leasebook():
                 log_launcher.exception(f"{request.method} {request.url.path} failed")
                 raise
 
+        # One password over the whole app: it launches and cancels jobs, and
+        # `/lab` redirects with the lab's token attached, so an open URL here
+        # is an open shell on the volume. DASHBOARD_PASSWORD is the one a
+        # person types and picks; JUPYTER_TOKEN stays whatever random string
+        # the secret was made with, because it travels in a URL.
+        #
+        # The cookie is the password's own digest: no session store, nothing
+        # to expire, and a container that restarts leaves every browser that
+        # had logged in still logged in. Registered after the logger, which
+        # puts it outside: Starlette wraps in reverse registration order.
+        token = os.environ["JUPYTER_TOKEN"]
+        session = hashlib.sha256(os.environ["DASHBOARD_PASSWORD"].encode()).hexdigest()
+        COOKIE = "launchpad"
+
+        @api.middleware("http")
+        async def require_password(request, call_next):
+            # Bytes, not str: a cookie is whatever was sent, and `compare_digest`
+            # refuses a str that isn't ASCII rather than saying no to it.
+            cookie = request.cookies.get(COOKIE, "").encode("utf-8", "replace")
+            if request.url.path == "/login" or hmac.compare_digest(cookie, session.encode()):
+                return await call_next(request)
+            # A browser navigating gets the form; a fetch from the page gets a
+            # status it can report, not a login page parsed as JSON.
+            if request.method == "GET":
+                return RedirectResponse("/login", status_code=303)
+            return Response(status_code=401)
+
+        # The only route in front of the password. What the form posts is
+        # compared as a digest and kept as one: the password itself is never
+        # written down, here or in the browser.
+        login_html = (WEB_DIR / "login.html").read_text()
+
+        @api.get("/login")
+        def login_page() -> HTMLResponse:
+            return HTMLResponse(login_html)
+
+        # The body is read rather than declared as a `Form(...)` field: form
+        # parsing pulls in python-multipart, and one urlencoded field out of
+        # `parse_qs` is the whole of what that dependency would do here.
+        @api.post("/login")
+        async def login(request: Request) -> Response:
+            given = parse_qs((await request.body()).decode()).get("password", [""])[0]
+            if not hmac.compare_digest(hashlib.sha256(given.encode()).hexdigest(), session):
+                return HTMLResponse(login_html.replace("<!--note-->", "wrong password"), status_code=401)
+            answer = RedirectResponse("/", status_code=303)
+            answer.set_cookie(COOKIE, session, max_age=30 * 86400, httponly=True, secure=True, samesite="lax")
+            return answer
+
         # The files on the volume and the Dicts reconciled once, so a
         # dashboard that comes back after any gap lists what was filed.
-        root = Path(STORAGE)
+        root = STORAGE
         volume.reload()
         log_launcher.info(f"synced {len(load_snapshot_from_volume(root))} log channels off the volume")
 
@@ -434,9 +489,7 @@ def leasebook():
         # -- the anchor in index.html is a plain relative href.
         @api.get("/lab")
         def lab_redirect() -> RedirectResponse:
-            url = jupyter.get_web_url()
-            token = os.environ.get("JUPYTER_TOKEN")
-            return RedirectResponse(f"{url}/lab?token={token}" if token else url)
+            return RedirectResponse(f"{jupyter.get_web_url()}/lab?token={token}")
 
         # :path, not a plain path segment -- an artifact_path contains its own
         # /s (runs/my-run/pretraining), which a plain segment can't match.
@@ -739,12 +792,12 @@ def attempt_launch(artifact_path: str, root: Path = STORAGE) -> tuple[bool, str]
             return refuse(str(error))
         if artifact.producer is None:
             return refuse(f"{artifact_path}: nothing produces it -- done when its dependencies are")
-        if all(artifact.status(root).completion.values()):
+        if artifact.status(root).complete:
             return refuse(f"{artifact_path}: already done")
         blocked_by = [
             dep.artifact_path.as_posix()
             for dep in artifact.deps()
-            if not (footprint := dep.status(root)).manifest or not all(footprint.completion.values())
+            if not (footprint := dep.status(root)).manifest or not footprint.complete
         ]
     if blocked_by:
         return refuse(f"{artifact_path}: blocked on {blocked_by}")
@@ -771,11 +824,17 @@ def attempt_launch(artifact_path: str, root: Path = STORAGE) -> tuple[bool, str]
 def cancel_call(artifact_path: str) -> tuple[bool, str]:
     """Stop the call currently holding `artifact_path`, or say there wasn't one.
 
-    The lease is released first: releasing it is what a worker between
-    checkpoints notices (`Lease.confirm` raises on the next one) even if the
-    cancel itself never lands, and a lease left behind on a killed call reads
-    as one that went stale -- red on the dashboard, for something that was
-    stopped on purpose.
+    The lease goes first, then the request to Modal. Dropping the lease is the
+    stop that arrives immediately: the call's next `Lease.confirm` finds no
+    grant and raises, and every job takes one inside `worker.publishing`,
+    between writing a file and renaming it into place. So a cancel lands before
+    the artifact can complete even though Modal delivers its own cancellation
+    on the container's heartbeat, seconds later.
+
+    Until that container notices, two calls can be writing this artifact: the
+    lease is gone, so a launch made in the meantime is granted. Both write into
+    `worker.publishing`'s own temporary file, which carries the call id, and
+    only the one holding the lease renames.
 
     A cancel request can arrive after the call is over. What the call's own
     output says once the request has been sent is what the logged outcome

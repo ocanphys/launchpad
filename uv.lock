@@ -766,7 +766,7 @@ requires-dist = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "regex", specifier = ">=2026.8.31" },
     { name = "ruff", specifier = ">=0.16.3" },
-    { name = "torch", specifier = ">=2.13.0" },
+    { name = "torch", specifier = ">=2.11.0" },
     { name = "tqdm", specifier = ">=4.70.0" },
 ]
 

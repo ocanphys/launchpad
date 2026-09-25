@@ -16,7 +16,9 @@ where things live and how traffic flows between them.
   JSON row per log record (see [docs/LOGGING.md](docs/LOGGING.md)). At
   the root, `call_history.json`: every grant ever made, per artifact_path,
   written on the same pass. A leg's `train.jsonl` is the worker's own
-  file, one row per step, visible once the worker commits under its lease.
+  file, one row per step, appended to as it trains rather than published
+  like an output: it completes nothing, so it is the one thing a job writes
+  that does not go through `worker.publishing`.
   - **Shared roots** -- `sources/`, `tokenizers/`, `tokenized/`, `datasets/`,
     `mappeddatasets/` -- hold artifacts with no `run_id` in their
     parameters: reused across runs rather than rebuilt per run.
@@ -35,7 +37,8 @@ where things live and how traffic flows between them.
     embedded in the run's own manifest, not nested under the run's folder.
 - **Dict `launchpad-leases`**: one entry per **artifact_path** (not per
   run -- see artifacts/core/spec.md §7), naming the call_id currently
-  holding that artifact.
+  holding that artifact. Removing the entry is how a call is stopped: the
+  call's own next lease check finds no grant and raises.
 - **Dict `launchpad-beats`**: one entry per call_id, the timestamp of its
   last heartbeat -- how a reader tells a live call from a dead one.
 - **Dict `launchpad-call-history`**: one entry per **artifact_path**, the
@@ -57,8 +60,8 @@ where things live and how traffic flows between them.
 - **Queue `launchpad-refreshes`**: two messages per call,
   `{artifact_path, call_id, event}` -- `started`, from the heartbeat's first
   pass and right after the beat it published, and one naming how it ended
-  (`done`, `failed`, `lease lost`), after its `volume.commit()` and its last
-  beat. A call that goes on to fail its lease has already said it started;
+  (`done`, `failed`, `lease lost`), after its `volume.commit()`
+  and its last beat. A call that goes on to fail its lease has already said it started;
   nothing is computed from a message, so it costs one refresh and no more.
   Put by the worker and taken by the one `leasebook` container, whose listener thread
   recomputes its state map when it finds one. The worker is the only writer,
@@ -71,6 +74,15 @@ The web app (`leasebook`) serves a small dashboard: one table, one row per
 artifact on the volume, a live launcher-log side panel, and a drill-down page per artifact. No build step,
 no framework. Full writeup: [docs/UI.md](docs/UI.md).
 
+Both URLs are public, so both are behind the secret below. Every dashboard
+route but `/login` wants a cookie; without one a navigation lands on a login
+page (one field, [web/login.html](web/login.html)) that takes
+`DASHBOARD_PASSWORD` -- yours to pick, since it is the one a person types --
+and leaves a cookie holding its digest, so neither the password nor a session
+list is stored anywhere. JupyterLab takes `JUPYTER_TOKEN` instead, which
+nobody types: the header's `/lab` link carries it, and it travels in a URL, so
+it stays a random string.
+
 ## The lab
 
 A `jupyter` function serves JupyterLab with the volume mounted, in its own
@@ -81,10 +93,15 @@ token already attached. `lab_image` carries every dependency
 notebook running there can import and run anything in the repo (`torch`
 included), not only what `worker_image` is trimmed to.
 
-Requires a one-time secret, per Modal workspace/environment:
+Requires a one-time secret, per Modal workspace/environment. Both containers
+mount it, and neither starts without it:
 ```
-modal secret create launchpad-lab JUPYTER_TOKEN=$(openssl rand -hex 24)
+modal secret create launchpad-lab \
+  DASHBOARD_PASSWORD='pick-one' \
+  JUPYTER_TOKEN=$(openssl rand -hex 24)
 ```
+`--force` on that command replaces a secret that already exists, which is
+how the password is changed; both containers pick it up on the next deploy.
 
 The API those notebooks import is [lab.py](lab.py), and it has one entry
 point, declaration. Everything else stays on the artifact classes, reading
@@ -171,11 +188,17 @@ its own, and JupyterLab's own autosave does the rest.
     confirm it is declared and ready, then spawns `run_job` and writes the
     new grant -- returns immediately, it doesn't wait for the job to finish.
     An accepted launch recomputes the map before answering.
-  - `/cancel/{artifact_path:path}`: releases the artifact's lease and cancels
-    the call holding it -- the lease first, so a worker between checkpoints
-    discovers it lost the artifact even if the cancel itself never lands.
-    What the call's output says once the request is sent is what the row
-    logged under it says, so a request that arrived after the job finished
+  - `/cancel/{artifact_path:path}`: releases the artifact's lease, then asks
+    Modal to cancel the call holding it -- the lease first, because that is
+    the stop that lands immediately. The call's next lease check finds no
+    grant and raises, and every job takes one inside `worker.publishing`
+    between writing a file and renaming it into place, so the artifact cannot
+    complete even though Modal delivers its own cancellation on the
+    container's heartbeat seconds later. Until the container notices, a launch
+    made in the meantime is granted and two calls write the same artifact:
+    each stages through its own temporary file and only the lease holder
+    renames. What the call's output says once the request is sent is what the
+    row logged under it says, so a request that arrived after the job finished
     doesn't read as one that stopped it. Recomputes the map, like a launch.
 - **`persist_logs`** is a scheduled function (`modal.Period`, every
   `PERSIST_LOGS_EVERY` seconds) in its own container with its own mount:
@@ -272,7 +295,7 @@ sequenceDiagram
     J->>B: PUT first heartbeat
     J->>Q: PUT {artifact_path, call_id, event: started}
     J->>Le: confirm ("pre run")
-    J->>J: run() -- resolve producing Job, write files; every log record lands in the buffer
+    J->>J: run() -- resolve producing Job, write each file through worker.publishing (open tmp, confirm, rename); every log record lands in the buffer
     J-->>B: PUT heartbeat (daemon thread); PUT {call_id}:livedict:{worker,ambient} (its own thread, all rows so far)
     J->>Le: confirm ("pre vol commit")
     J->>Le: confirm ("commit")
@@ -290,17 +313,27 @@ sequenceDiagram
     end
 ```
 
-Four confirms, not two: `initialize_worker` (`runtime.py`) brackets the
-whole call with "boot" (before anything runs) and "commit" (right after,
-before `volume.commit()`); `run_job` itself adds "pre run" (before
-resolving and calling the job) and "pre vol commit" (right after) -- each
-one a fresh re-read of the grant, so whichever of two racing launches lost
-discovers it as early as the next checkpoint, not only at the very end.
+Four confirms around the job, and one inside it per file published:
+`initialize_worker` (`runtime.py`) brackets the whole call with "boot"
+(before anything runs) and "commit" (right after, before `volume.commit()`);
+`run_job` itself adds "pre run" (before resolving and calling the job) and
+"pre vol commit" (right after); and `worker.publishing` confirms once more
+before each rename it makes, which for a training leg is every failsafe as
+well as `model.pt`. Each one is a fresh re-read of the grant, so whichever
+of two racing launches lost discovers it at its next checkpoint rather than
+only at the very end.
 
-A job's writes are private until `commit()` publishes them to the volume --
-its output files live only on that one container's own disk until then; its
-log never touches that disk at all, and reaches the volume through the
-Dict, on `persist_logs`'s schedule. `leasebook` keeps a separate copy of
+A job's writes are not private until `commit()`: every mount runs with
+background commits, so what a job has written can reach the volume before
+its call ends, and the `commit()` on the way out of `initialize_worker`
+makes that moment definite rather than making it happen at all. What a job
+does control is which files exist to be committed: every one of them is
+written through `worker.publishing`, which opens a `{filename}.{call_id}.tmp`,
+hands the job that open file, then confirms the lease and renames it into
+place. A `.tmp` satisfies no completion, it carries the call so two calls on
+one artifact never write the same one, and a job never names one, opens one or
+renames one. Its log never touches that disk at all, and reaches
+the volume through the Dict, on `persist_logs`'s schedule. `leasebook` keeps a separate copy of
 its own, refreshed by its own `reload()` -- so the dashboard's view is
 exactly as old as its last recompute, and never less than one commit behind
 whatever the job is actually doing. Which is why each message trails the

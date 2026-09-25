@@ -107,6 +107,16 @@ class Footprint:
     outputs: dict[str, bool]
     completion: dict[Path, bool]
 
+    @property
+    def complete(self) -> bool:
+        """Whether every file that makes this artifact done is there.
+
+        Ask this, not `all(outputs.values())`: the two name the same files for
+        everything that owns its bytes, and differ for exactly the artifacts
+        where getting it wrong is silent.
+        """
+        return all(self.completion.values())
+
 
 # frozen: identity is its fields, so it must be hashable/immutable
 @dataclass(frozen=True)
