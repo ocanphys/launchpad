@@ -1,18 +1,18 @@
 """Does every route `leasebook` is supposed to serve actually answer?
 
-`import main` proves nothing about the web app: the routes are registered
-inside `leasebook()`, which only runs when a container starts, and a handler's
-body only runs when a request arrives. So a deleted route, a name that no
-longer exists, or a handler that raises are all invisible to an import -- and
-one deletion that took `/launch` and `/cancel` with it is why this file
-exists.
+Importing `launcher.leasebook` proves nothing about the web app: the routes are
+registered inside `build_api()`, which only runs when a container starts, and a
+handler's body only runs when a request arrives. So a deleted route, a name
+that no longer exists, or a handler that raises are all invisible to an
+import -- and one deletion that took `/launch` and `/cancel` with it is why
+this file exists.
 
-Nothing here talks to Modal. `leasebook`'s raw function is built against stubs:
-`state` returns a fixed map, the volume-reading helpers return fixed
-answers, and launching/cancelling record what they were asked rather than
-spawning anything. What's left under test is the wiring -- which routes exist,
-what shape they answer, and whether the handlers reference anything that isn't
-there any more.
+Nothing here talks to Modal. The app is built through `leasebook`'s raw
+function, so what is under test is the wiring main.py hands `build_api` too.
+The stubs go into the namespace each name is read from: `state`,
+`attempt_launch` and the Dicts are `launcher.leasebook`'s, `artifact_calls`
+reads `launcher.state`'s, and `run_job`/`jupyter`/`WEB_DIR` are main's own,
+since those reach `build_api` as arguments.
 
 Plain functions named test_*, plain assert -- `python test/test_routes.py`,
 same shape as the rest of test/. Needs `fastapi` and `httpx` locally (the
@@ -20,8 +20,10 @@ deployed image has both; `uv pip install fastapi httpx` if a bare checkout
 doesn't).
 """
 
+import hashlib
 import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -37,22 +39,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main
 from config import FLATLINE, HEARTBEAT_SECONDS, STARTUP_GRACE_SECONDS
+from launcher import leasebook
+from launcher import state as launcher_state
 from system import logs
 
-# Every listener thread `leasebook` starts is a daemon that outlives the test
-# that made it, and it reads whatever `main.refreshes` names when it wakes.
-# Standing in for the real Queue here, before any test saves the module's
-# vars, is what keeps one of those threads from ever reaching Modal's.
-main.refreshes = None
+# Every listener thread `build_api` starts is a daemon that outlives the test
+# that made it, and it reads whatever `leasebook.refreshes` names when it
+# wakes. Standing in for the real Queue here, before any test saves the
+# module's vars, is what keeps one of those threads from ever reaching Modal's.
+leasebook.refreshes = None
 
 
-# `client` swaps the stubs straight into `main`; this hands the module back
-# after each test, so test_state gets the real `state` and `volume`.
+# `client` swaps the stubs into the modules the routes read them from; this
+# hands each one back after the test, so test_state gets the real `state`,
+# `volume` and Dicts.
 @pytest.fixture(autouse=True)
-def restore_main():
-    saved = dict(vars(main))
+def restore_modules():
+    saved = [(module, dict(vars(module))) for module in (main, leasebook, launcher_state)]
     yield
-    vars(main).update(saved)
+    for module, names in saved:
+        vars(module).update(names)
 
 
 # --- the stubs ---------------------------------------------------------------
@@ -122,6 +128,14 @@ MANIFEST = {
     "parameters": {"run_id": "toy"},
 }
 
+# The two keys LAB_SECRET supplies: the password the app is behind, and the
+# token `/lab` carries to Jupyter. `SESSION` is the cookie a login leaves,
+# which is that password's digest -- sent by hand here, since the one the app
+# sets is Secure and this client speaks http.
+PASSWORD = "s3cret"
+TOKEN = "deadbeef"
+SESSION = {"Cookie": f"launchpad={hashlib.sha256(PASSWORD.encode()).hexdigest()}"}
+
 
 def client(**overrides):
     """A TestClient over `leasebook`'s real ASGI app, with everything that
@@ -137,7 +151,7 @@ def client(**overrides):
     calls["state"] = 0
     calls["reload"] = 0
     calls["stop_logging"] = overrides.get("stop_logging", Mock())
-    main.start_logging = Mock(return_value=calls["stop_logging"])
+    leasebook.start_logging = Mock(return_value=calls["stop_logging"])
 
     def state():
         calls["state"] += 1
@@ -145,17 +159,17 @@ def client(**overrides):
             raise overrides["state_error"]
         return overrides.get("state", STATE)
 
-    main.state = state
+    leasebook.state = state
     # What a worker puts a message on when its call exits, and the listener
     # thread blocks on. Its wait is long enough that an idle listener stays
     # parked on its own queue for the rest of the session instead of waking
-    # up to read whichever one `main.refreshes` names by then.
-    calls["refreshes"] = main.refreshes = Queue()
-    main.REFRESH_WAIT_SECONDS = 300
-    main.attempt_launch = lambda path: (
+    # up to read whichever one `leasebook.refreshes` names by then.
+    calls["refreshes"] = leasebook.refreshes = Queue()
+    leasebook.REFRESH_WAIT_SECONDS = 300
+    leasebook.attempt_launch = lambda path, run_job: (
         calls["launched"].append(path) or (overrides.get("launched", True), f"granted {path}")
     )
-    main.cancel_call = lambda path: (
+    leasebook.cancel_call = lambda path: (
         calls["cancelled"].append(path) or (overrides.get("cancelled", True), f"cancelled {path}")
     )
     main.jupyter = type("Stub", (), {"get_web_url": staticmethod(lambda: "https://lab.test")})()
@@ -163,12 +177,12 @@ def client(**overrides):
     def reload():
         calls["reload"] += 1
 
-    main.volume = type("Stub", (), {"reload": staticmethod(reload)})()
-    main.load_snapshot_from_volume = lambda root: {}
+    leasebook.volume = type("Stub", (), {"reload": staticmethod(reload)})()
+    leasebook.load_snapshot_from_volume = lambda root: {}
     # A plain dict answers `.get()`/`.items()` the same way the Dict does.
     # Every call the launcher ever granted, per artifact, oldest first: fc-9
     # is a grant made up for a log file, fc-0 never beat, fc-1 is running.
-    main.call_history = {
+    leasebook.call_history = launcher_state.call_history = {
         "runs/toy/pretraining": [
             {"call_id": "fc-9", "granted_ts": None, "artifact_type": None},
             {"call_id": "fc-0", "granted_ts": 40.0, "artifact_type": "Pretraining"},
@@ -180,8 +194,8 @@ def client(**overrides):
     GRANTED = {"ts": 90.0, "call_id": "fc-1", "source": "launcher", "level": "INFO", "logger": "leasebook", "msg": "granted"}
     NOISE = {"ts": 1757246401.0, "call_id": "fc-1", "source": "ambient", "level": "WARNING", "logger": "urllib3", "msg": "retrying"}
     # `stream` reads this one, so it is the logs module's the routes reach
-    # through, not a name of main's.
-    main.call_logs = logs.call_logs = {
+    # through, not a name of the leasebook's.
+    leasebook.call_logs = logs.call_logs = {
         "fc-1:livedict:launcher": [GRANTED],
         "fc-1:livedict:worker": [ROW],
         "fc-1:livedict:ambient": [NOISE],
@@ -190,23 +204,27 @@ def client(**overrides):
     }
     # The mount: a folder with one leg's manifest and step log on it.
     STEP = {"step": 1, "attempt": 1, "loss": 2.0, "grad_norm": 1.0, "learning_rate": 0.5}
-    main.STORAGE = Path(mkdtemp())
-    leg = main.STORAGE / "runs/toy/pretraining"
+    leasebook.STORAGE = Path(mkdtemp())
+    leg = leasebook.STORAGE / "runs/toy/pretraining"
     leg.mkdir(parents=True)
     (leg / "manifest.json").write_text(json.dumps({**MANIFEST, "dependencies": {"dataset": {"artifact": "artifacts.dataset.DataSet"}}}))
     (leg / "train.jsonl").write_text(json.dumps(STEP) + "\n")
-    main.beats = Counting({
+    leasebook.beats = launcher_state.beats = Counting({
         "fc-1": {"artifact_path": "runs/toy/pretraining", "last_beat_ts": 100.0},
         "fc-2": {"artifact_path": "sources/tinyshakespeare", "last_beat_ts": 75.0},
     })
     # Only `/state`'s overlay reads this one, and only for a call the map
     # found under way.
-    main.leases = Counting()
+    leasebook.leases = Counting()
     # In the container `web/` is mounted at /web; locally it's the repo's own
     # copy, which is the same files and lets the static mount succeed.
     main.WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+    # What LAB_SECRET puts in the container's environment. Every client below
+    # arrives logged in, so the tests exercise the routes rather than the
+    # middleware in front of them.
+    os.environ["DASHBOARD_PASSWORD"], os.environ["JUPYTER_TOKEN"] = PASSWORD, TOKEN
 
-    return TestClient(main.leasebook.get_raw_f()(), follow_redirects=False), calls
+    return TestClient(main.leasebook.get_raw_f()(), follow_redirects=False, headers=SESSION), calls
 
 
 # --- the routes --------------------------------------------------------------
@@ -216,6 +234,7 @@ def test_every_route_is_registered():
     api, _ = client()
     paths = {route.path for route in api.app.routes}
     for expected in (
+        "/login",
         "/refresh",
         "/state",
         "/launcher-logs",
@@ -253,11 +272,11 @@ DURABLE = ("type", "status", "error", "depends_on", "parameters", "blocked_by", 
 def working(api, beat: dict | None = None, granted_age: float = 5.0) -> dict:
     """`LEG`'s entry off `/state`, with the Dicts holding one grant for it and
     `beat` -- `{"age": seconds since it was written, ...}`, or none at all."""
-    main.leases[LEG] = {"call_id": "fc-1", "granted_ts": time.time() - granted_age}
+    leasebook.leases[LEG] = {"call_id": "fc-1", "granted_ts": time.time() - granted_age}
     if beat is None:
-        main.beats.pop("fc-1", None)
+        leasebook.beats.pop("fc-1", None)
     else:
-        main.beats["fc-1"] = {"artifact_path": LEG, **beat, "last_beat_ts": time.time() - beat.pop("age")}
+        leasebook.beats["fc-1"] = {"artifact_path": LEG, **beat, "last_beat_ts": time.time() - beat.pop("age")}
     return api.get("/state").json()[LEG]
 
 
@@ -282,7 +301,7 @@ def test_state_reads_nothing_for_artifacts_no_call_is_working_on():
     """Bounded by the calls under way, not by the size of the map."""
     api, _ = client()  # STATE: one done, one unreadable, neither with a call
     assert api.get("/state").json() == STATE
-    assert (main.leases.gets, main.beats.gets) == (0, 0)
+    assert (leasebook.leases.gets, leasebook.beats.gets) == (0, 0)
 
 
 def test_state_leaves_a_call_that_said_it_exited_to_the_queue():
@@ -317,21 +336,21 @@ def test_launcher_logs_are_live_and_do_not_refresh_state_or_storage():
         "level": "INFO", "logger": "leasebook", "msg": msg,
     }
     first, second = row(1.0, "started"), row(2.0, "failed\ntraceback")
-    main.call_logs["launcher:livedict:launcher"] = [first, second]
-    main.call_logs["launcher:volume:launcher"] = [first]
+    leasebook.call_logs["launcher:livedict:launcher"] = [first, second]
+    leasebook.call_logs["launcher:volume:launcher"] = [first]
     # the noise around the leasebook's own rows is the same call's, told apart
     # by `source` rather than by belonging to something else
     noise = row(3.0, "GET /state", source="ambient")
-    main.call_logs["launcher:livedict:ambient"] = [noise]
+    leasebook.call_logs["launcher:livedict:ambient"] = [noise]
     assert api.get("/launcher-logs").json() == {"livedict": [first, second, noise], "volume": [first]}
     assert calls["state"] == 1
     assert calls["reload"] == 1
-    assert "launcher" not in main.call_history
+    assert "launcher" not in leasebook.call_history
 
 
 def test_launcher_logging_is_stopped_on_asgi_shutdown():
     api, calls = client()
-    main.start_logging.assert_called_once_with(logs.LAUNCHER)
+    leasebook.start_logging.assert_called_once_with(logs.LAUNCHER)
     with api:
         assert api.get("/launcher-logs").status_code == 200
         calls["stop_logging"].assert_not_called()
@@ -382,7 +401,7 @@ def test_state_is_computed_when_something_changed_it_and_never_on_a_read():
     assert api.post("/refresh").json() == {"artifacts": len(STATE)}
     assert calls["state"] == 2
 
-    main.call_logs["fc-1:livedict:worker"] = [*main.call_logs["fc-1:livedict:worker"],
+    leasebook.call_logs["fc-1:livedict:worker"] = [*leasebook.call_logs["fc-1:livedict:worker"],
                                               {"ts": 101.0, "call_id": "fc-1", "source": "worker", "level": "INFO", "logger": "job", "msg": "step 1"}]
     body = api.get("/logs/runs/toy/pretraining").json()
     assert [row["msg"] for row in body["calls"][2]["livedict"]] == ["boot: lease held", "step 1", "granted", "retrying"]
@@ -433,7 +452,7 @@ def test_the_artifact_route_and_a_recompute_never_read_the_mount_at_once():
         api.get("/artifact/runs/toy/pretraining")
         answered.set()
 
-    with main.mount_lock:
+    with leasebook.mount_lock:
         threading.Thread(target=read, daemon=True).start()
         assert not answered.wait(0.2), "the route read the mount while the lock was held"
     assert answered.wait(2), "the route never answered after the lock was released"
@@ -472,7 +491,46 @@ def test_a_path_that_walks_out_of_the_volume_is_refused():
 def test_the_lab_link_carries_the_token():
     api, _ = client()
     root = api.get("/lab")
-    assert root.status_code == 307 and "lab.test" in root.headers["location"]
+    assert root.status_code == 307 and root.headers["location"] == f"https://lab.test/lab?token={TOKEN}"
+
+
+def test_every_route_is_behind_the_password():
+    """A browser with no cookie, and the page itself: the lab's token is on
+    the other side of `/lab`, so this is the only thing keeping an open URL
+    from being an open shell. A navigation is sent to the form; anything the
+    page fetches is refused where the page can see it."""
+    from fastapi.testclient import TestClient
+
+    api, calls = client()
+    anonymous = TestClient(api.app, follow_redirects=False)
+    for path in ("/", "/state", "/lab", "/artifact/runs/toy/pretraining"):
+        answer = anonymous.get(path)
+        assert answer.status_code == 303 and answer.headers["location"] == "/login", f"{path}: {answer.status_code}"
+    assert anonymous.post("/launch/runs/toy/pretraining").status_code == 401
+    assert calls["launched"] == [], "a logged-out POST reached the launcher"
+    stale = {"Cookie": "launchpad=" + hashlib.sha256(b"wrong").hexdigest()}
+    assert TestClient(api.app, headers=stale, follow_redirects=False).get("/state").status_code == 303
+
+
+def test_the_login_form_takes_the_password_and_nothing_else():
+    """The form is the one route in front of the password, and a correct
+    post leaves the cookie every other route wants."""
+    from fastapi.testclient import TestClient
+
+    api, _ = client()
+    anonymous = TestClient(api.app, follow_redirects=False)
+    assert anonymous.get("/login").status_code == 200, "no form to log in with"
+
+    refused = anonymous.post("/login", data={"password": "not it"})
+    assert refused.status_code == 401 and "wrong password" in refused.text
+    assert "set-cookie" not in refused.headers, "a wrong password still logged someone in"
+
+    accepted = anonymous.post("/login", data={"password": PASSWORD})
+    assert accepted.status_code == 303 and accepted.headers["location"] == "/"
+    cookie = accepted.headers["set-cookie"]
+    assert SESSION["Cookie"] in cookie, cookie
+    # The password is what the browser posted, never what it stores or resends.
+    assert PASSWORD not in cookie and "HttpOnly" in cookie and "Secure" in cookie
 
 
 def test_artifact_logs_aggregate_every_call_oldest_first():

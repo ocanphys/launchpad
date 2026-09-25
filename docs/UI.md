@@ -5,7 +5,7 @@
 No build step, no bundler, no framework. `web/index.html` loads
 `web/app.js` as an ES module; everything else is `import`ed from there.
 Served as static files by the same ASGI app that answers the API
-(`main.py`'s `leasebook`), so the page's own fetches (`state`,
+(`launcher/leasebook.py`), so the page's own fetches (`state`,
 `launch/...`) are same-origin relative paths -- no URL to configure, no
 CORS.
 
@@ -43,7 +43,7 @@ poll.
 
 One `<table>` in `index.html`, one row per artifact on the volume, by path,
 built from `artifactRow`/`actionButton`/`dot` in `render.js`. It comes from
-one endpoint, `/state`, backed by one function, `main.py`'s `state()`: one
+one endpoint, `/state`, backed by one function, `launcher.state.state()`: one
 `volume.reload()`, one lease snapshot, one glob of the manifests, and one
 flat `{artifact_path: state}` map. There is no grouping by run, source or
 dataset; a manifest `state()` could not read lands in the collapsed

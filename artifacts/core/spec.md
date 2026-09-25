@@ -159,7 +159,7 @@ Omitting `root` uses `STORAGE`; an explicit root overrides it for that call. Nor
 
 An artifact is a pure function of its manifest, so decoding is memoizable by the manifest. `memo` is one dict a caller keeps across calls: a subtree seen before, nested inside another manifest, comes back as the same instance instead of being decoded again, which is what keeps a run's legs, each embedding every leg before it, linear to decode. Instances are frozen, so sharing them is safe; the one thing a shared instance must not be is bound, which is why `bind` never passes a memo.
 
-A definition at a path is immutable once declared, and a scan of the volume shows nothing from a manifest but its definition, so the launcher keeps what each path decoded to for its whole life (`main.resolved`) and reads a manifest only the first time it sees the path. What may change on a redeclaration, the resources, is read fresh by launching, which loads the manifest itself.
+A definition at a path is immutable once declared, and a scan of the volume shows nothing from a manifest but its definition, so the launcher keeps what each path decoded to for its whole life (`launcher.state.resolved`) and reads a manifest only the first time it sees the path. What may change on a redeclaration, the resources, is read fresh by launching, which loads the manifest itself.
 
 The round-trip contract is definition agreement, plus preservation of recorded commit and resources. Path equality alone is too weak to test serialization.
 
@@ -412,7 +412,7 @@ what's missing and leaves what's already there untouched.
 state(root=STORAGE) -> dict[str, dict]
 ```
 
-`main.py`'s whole-volume read, keyed by artifact path as a string since the
+`launcher.state.state()`, the whole-volume read, keyed by artifact path as a string since the
 map is what `/state` serves. Computes the current state of every artifact
 under `root` over one glob -- no dependency resolution, no DAG walk:
 
@@ -492,7 +492,7 @@ An entry on that map has two halves, and only one of them is as old as the
 recompute. The durable half comes from the volume and cannot change without
 one. The live half -- which call holds the artifact, its last beat, what
 that call reports of its own progress, and the verdict those imply -- is a
-function of a grant and a beat alone (`main.liveness`), so `/state` reads it
+function of a grant and a beat alone (`launcher.state.liveness`), so `/state` reads it
 again on every request for the calls the map found under way: a running
 job's progress reaches the page on the browser's own poll, and the map is
 recomputed only when the volume itself has something new to say. The read is
@@ -503,7 +503,7 @@ container, which recomputes when it grants one.
 A reload and a read cannot both be in flight on the same mount: a read
 landing mid-reload sees a path that is briefly absent, and a file descriptor
 still open when a reload starts fails the reload. Neither presents as an
-error. What keeps them apart is one lock (`main.mount_lock`), taken by
+error. What keeps them apart is one lock (`launcher.state.mount_lock`), taken by
 everything in that container which reloads the mount or opens a file on it,
 and the fact that no request holds a descriptor past its own block. The lock
 is never held across the listener's blocking read of the Queue, and the
@@ -524,8 +524,8 @@ A job is eligible when its declaration and dependency graph are valid, it has a 
 
 For an eligible artifact, the executor:
 
-1. Refuses while a call is active or starting on its path (`main.attempt_launch`, reading the `leases` and `beats` Dicts).
-2. Refreshes storage and checks readiness (`main.attempt_launch`: the manifest at the path, each direct dependency's manifest and completion files), spawns a worker using resources from the authoritative manifest (`main.resource_options`, `run_job.spawn`), and records the grant naming that call (`leases.put`, `call_history`).
+1. Refuses while a call is active or starting on its path (`launcher.leasebook.attempt_launch`, reading the `leases` and `beats` Dicts).
+2. Refreshes storage and checks readiness (`attempt_launch`: the manifest at the path, each direct dependency's manifest and completion files), spawns a worker using resources from the authoritative manifest (`resource_options`, `run_job.spawn`), and records the grant naming that call (`leases.put`, `call_history`).
 3. In the worker, refreshes storage and confirms the grant names this call (`system.runtime.initialize_worker`, `Lease.confirm("boot")`), loads the authoritative manifest (`Artifact.load`) and resolves its producer (`Artifact.job`), all in `main.run_job`.
 4. Calls `Job(artifact).run(root, worker)`. Inputs come from the artifact's direct dependencies; the job binds what it consumes.
 5. Confirms the grant again after the run and before the commit (`Lease.confirm("pre vol commit")`, `("commit")`), commits (`volume.commit` in `initialize_worker`), and logs the outcome under the call (`call_logs["{call_id}:livedict:worker"]`). Exceptions propagate; failed attempts are not reported as success.

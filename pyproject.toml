@@ -25,4 +25,4 @@ build-backend = "setuptools.build_meta"
 py-modules = ["config", "lab", "local", "main"]
 
 [tool.setuptools.packages.find]
-include = ["artifacts*", "models*", "system*"]
+include = ["artifacts*", "launcher*", "models*", "system*"]

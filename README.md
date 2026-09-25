@@ -67,6 +67,23 @@ where things live and how traffic flows between them.
   recomputes its state map when it finds one. The worker is the only writer,
   `leasebook` the only reader. Nothing is computed *from* a message: it says
   only that the volume and the Dicts are worth looking at again.
+- **[main.py](main.py)**: the deployment and nothing else -- the app, the
+  volume, the three images, and the four containers (`leasebook`,
+  `persist_logs`, `run_job`, `jupyter`) with the resources each one gets.
+  What those containers run is `launcher/`, one module per job:
+  - [launcher/state.py](launcher/state.py) reads the volume and the Dicts
+    into the `state` map, and owns `volume`, `mount_lock` and `resolved`.
+  - [launcher/leasebook.py](launcher/leasebook.py) is the launcher and its
+    dashboard: `attempt_launch` and `cancel_call`, and the routes that are
+    their only callers.
+  - [launcher/gate.py](launcher/gate.py) is the password in front of those
+    routes, and [launcher/lab_server.py](launcher/lab_server.py)
+    JupyterLab's own setup.
+- **[system/](system/)**: the plumbing under all of that, artifact-agnostic
+  by construction -- the Dicts and the Queue
+  ([lease_protocol.py](system/lease_protocol.py)), the log channels
+  ([logs.py](system/logs.py)) and what a worker does around a job
+  ([runtime.py](system/runtime.py)).
 
 ## Dashboard
 
@@ -144,7 +161,7 @@ its own, and JupyterLab's own autosave does the rest.
     `done`, `ready`, `blocked_by`, `durable_progress`) can only change when
     the volume does, so it changes only on a recompute. The live half
     (`call_id`, `active`, `last_heartbeat`, `live_progress`, `verdict`) is
-    `main.liveness` over a grant and a beat -- Dict reads, no mount -- so
+    `launcher.state.liveness` over a grant and a beat -- Dict reads, no mount -- so
     `/state` reads it again on every request for the calls the map found
     under way. That is how a running job's progress and heartbeat move on
     the page between recomputes.
@@ -248,7 +265,7 @@ actually names.
 Declaring (writing `manifest.json` files ahead of the work, for a whole
 dependency tree at once) and launching (granting a lease and spawning the
 job that fills one manifest in) are separate steps -- see `lab.declare`
-(over `artifacts.core.resolve`) and `main.attempt_launch`. There's no
+(over `artifacts.core.resolve`) and `launcher.leasebook.attempt_launch`. There's no
 per-job `resources` block in a config file; a job's resource ask lives on
 its own artifact (`allocated_resources: Resources`, e.g.
 `Resources(gpu_type="A100")`), turned into `Function.with_options(...)`

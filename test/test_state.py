@@ -16,13 +16,13 @@ from typing import ClassVar
 from unittest.mock import patch
 
 import lab
-import main
 from artifacts.core.artifact import MANIFEST, Artifact
 from artifacts.dataset import DataSet
 from artifacts.sources import SourceURL
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
 from config import FLATLINE, HEARTBEAT_SECONDS, STARTUP_GRACE_SECONDS
+from launcher import leasebook, state
 
 ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
 TOKENIZER = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(ODYSSEY,))
@@ -67,17 +67,28 @@ class StateTests(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.root = Path(self.directory.name)
-        main.leases, main.beats = {}, {}  # plain dicts answer .items() like the Dicts do
-        main.resolved.clear()  # every test declares its own root under the same paths
-        clock = patch.object(main.time, "time", lambda: NOW)
+        self.dicts({}, {})
+        state.resolved.clear()  # every test declares its own root under the same paths
+        clock = patch.object(state.time, "time", lambda: NOW)
         clock.start()
         self.addCleanup(clock.stop)
+
+    def dicts(self, leases, beats):
+        """Points both modules that read the Dicts at these stand-ins.
+
+        Plain dicts answer `.items()` the way the Dicts do. `state` and
+        `leasebook` each imported the names, so setting one and not the other
+        leaves that one reading the real Modal Dict.
+        """
+        self.leases, self.beats = leases, beats
+        for module in (state, leasebook):
+            module.leases, module.beats = leases, beats
 
     def tearDown(self):
         self.directory.cleanup()
 
     def state(self):
-        return main.state(self.root)
+        return state.state(self.root)
 
     def build(self, artifact, count=None):
         """Touches `count` of `artifact`'s files (all of them by default)."""
@@ -86,9 +97,9 @@ class StateTests(unittest.TestCase):
 
     def lease(self, path, call_id, beat_age=None, progress=None, grant_age=STARTUP_GRACE_SECONDS + 1):
         """One granted lease, beating `beat_age` seconds ago, or never."""
-        main.leases[path] = {"call_id": call_id, "granted_ts": NOW - grant_age}
+        self.leases[path] = {"call_id": call_id, "granted_ts": NOW - grant_age}
         if beat_age is not None:
-            main.beats[call_id] = {"last_beat_ts": NOW - beat_age, "progress": progress}
+            self.beats[call_id] = {"last_beat_ts": NOW - beat_age, "progress": progress}
 
     # --- the map ---------------------------------------------------------------
 
@@ -195,7 +206,7 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.state()["sources/odyssey"]["type"], "SourceURL")
         (self.root / "sources/odyssey" / MANIFEST).write_text("{not json")
         self.assertEqual(self.state()["sources/odyssey"]["type"], "SourceURL")
-        main.resolved.clear()
+        state.resolved.clear()
         self.assertEqual(self.state()["sources/odyssey"]["verdict"], "failed")
 
     # --- leases and beats --------------------------------------------------------
@@ -224,7 +235,7 @@ class StateTests(unittest.TestCase):
 
     def test_a_recent_lease_starts_without_a_modal_lookup(self):
         declare(ODYSSEY, self.root)
-        with patch.object(main.modal.FunctionCall, "from_id", side_effect=AssertionError("Modal lookup")) as lookup:
+        with patch.object(leasebook.modal.FunctionCall, "from_id", side_effect=AssertionError("Modal lookup")) as lookup:
             self.assertEqual(self.state()["sources/odyssey"]["verdict"], "runnable")
             self.lease("sources/odyssey", "fc-1", grant_age=0)
             entry = self.state()["sources/odyssey"]
@@ -237,7 +248,7 @@ class StateTests(unittest.TestCase):
 
     def test_startup_expires_at_the_configured_grace_boundary(self):
         declare(ODYSSEY, self.root)
-        with patch.object(main, "STARTUP_GRACE_SECONDS", 10):
+        with patch.object(state, "STARTUP_GRACE_SECONDS", 10):
             for age, verdict in ((9.999, "starting"), (10, "failed"), (11, "failed")):
                 with self.subTest(age=age):
                     self.lease("sources/odyssey", "fc-1", grant_age=age)
@@ -252,12 +263,12 @@ class StateTests(unittest.TestCase):
         declare(ODYSSEY, self.root)
         for grant in ({"call_id": "fc-1"}, {"call_id": "fc-1", "granted_ts": None}):
             with self.subTest(grant=grant):
-                main.leases["sources/odyssey"] = grant
+                self.leases["sources/odyssey"] = grant
                 self.assertEqual(self.state()["sources/odyssey"]["verdict"], "failed")
 
     def test_any_heartbeat_ends_startup_even_before_the_grace_expires(self):
         declare(ODYSSEY, self.root)
-        with patch.object(main, "STARTUP_GRACE_SECONDS", FLATLINE_SECONDS * 3):
+        with patch.object(state, "STARTUP_GRACE_SECONDS", FLATLINE_SECONDS * 3):
             for beat_age, verdict in ((1, "running"), (FLATLINE_SECONDS + 1, "failed")):
                 with self.subTest(beat_age=beat_age):
                     self.lease("sources/odyssey", "fc-1", beat_age=beat_age,
@@ -271,7 +282,7 @@ class StateTests(unittest.TestCase):
         paths = (ODYSSEY.artifact_path.as_posix(), other.artifact_path.as_posix())
         for starting_path, idle_path in (paths, paths[::-1]):
             with self.subTest(starting_path=starting_path):
-                main.leases.clear()
+                self.leases.clear()
                 self.lease(starting_path, "fc-1", grant_age=0)
                 entries = self.state()
                 self.assertEqual(entries[starting_path]["verdict"], "starting")
@@ -279,15 +290,15 @@ class StateTests(unittest.TestCase):
 
     def test_launch_checks_declaration_only_after_startup_grace_expires(self):
         path = "sources/odyssey"
-        with patch.object(main.modal.FunctionCall, "from_id", side_effect=AssertionError("Modal lookup")) as lookup:
+        with patch.object(leasebook.modal.FunctionCall, "from_id", side_effect=AssertionError("Modal lookup")) as lookup:
             self.lease(path, "fc-1", grant_age=STARTUP_GRACE_SECONDS - 0.001)
-            with patch.object(main.Artifact, "load", side_effect=AssertionError("volume read")):
-                launched, message = main.attempt_launch(path, self.root)
+            with patch.object(leasebook.Artifact, "load", side_effect=AssertionError("volume read")):
+                launched, message = leasebook.attempt_launch(path, None, self.root)
             self.assertFalse(launched)
             self.assertIn("already a call running", message)
 
             self.lease(path, "fc-1", grant_age=STARTUP_GRACE_SECONDS)
-            launched, message = main.attempt_launch(path, self.root)
+            launched, message = leasebook.attempt_launch(path, None, self.root)
             self.assertFalse(launched)
             self.assertIn("nothing declared", message)
         lookup.assert_not_called()
@@ -299,7 +310,7 @@ class StateTests(unittest.TestCase):
         declare(ODYSSEY, self.root)
         self.lease("sources/odyssey", "fc-1", beat_age=0)
         with self.assertLogs("leasebook") as captured:
-            launched, message = main.attempt_launch("sources/odyssey", self.root)
+            launched, message = leasebook.attempt_launch("sources/odyssey", None, self.root)
         self.assertFalse(launched)
         self.assertIn("already a call running", message)
         self.assertEqual([(r.call_id, r.source) for r in captured.records], [("fc-1", "launcher")])
@@ -307,10 +318,10 @@ class StateTests(unittest.TestCase):
     def test_launch_refuses_what_the_map_would_not_call_runnable(self):
         declare(TOKENS, self.root)
         self.build(ODYSSEY)
-        launched, message = main.attempt_launch(TOKENS.artifact_path.as_posix(), self.root)
+        launched, message = leasebook.attempt_launch(TOKENS.artifact_path.as_posix(), None, self.root)
         self.assertFalse(launched)
         self.assertEqual(message, f"{TOKENS.artifact_path.as_posix()}: blocked on ['{TOKENIZER_PATH}']")
-        launched, message = main.attempt_launch("sources/odyssey", self.root)
+        launched, message = leasebook.attempt_launch("sources/odyssey", None, self.root)
         self.assertFalse(launched)
         self.assertEqual(message, "sources/odyssey: already done")
 
@@ -328,7 +339,7 @@ class StateTests(unittest.TestCase):
         declare(ODYSSEY, self.root)
         self.lease("sources/odyssey", "fc-1", beat_age=FLATLINE_SECONDS)
         self.assertFalse(self.state()["sources/odyssey"]["active"])
-        main.beats["fc-1"]["last_beat_ts"] = NOW - FLATLINE_SECONDS + 0.001
+        self.beats["fc-1"]["last_beat_ts"] = NOW - FLATLINE_SECONDS + 0.001
         self.assertTrue(self.state()["sources/odyssey"]["active"])
 
     def test_a_slow_snapshot_does_not_age_a_beat(self):
@@ -341,8 +352,8 @@ class StateTests(unittest.TestCase):
                 clock[0] += FLATLINE_SECONDS * 2
                 return dict.items(self)
 
-        main.beats = Slow(main.beats)
-        with patch.object(main.time, "time", lambda: clock[0]):
+        self.dicts(self.leases, Slow(self.beats))
+        with patch.object(state.time, "time", lambda: clock[0]):
             self.assertTrue(self.state()["sources/odyssey"]["active"])
 
     def test_a_beat_from_the_future_is_live(self):
@@ -356,7 +367,7 @@ class StateTests(unittest.TestCase):
         later -- while its files, committed just before, are already there."""
         declare(ODYSSEY, self.root)
         self.lease("sources/odyssey", "fc-1", beat_age=0)
-        main.beats["fc-1"]["exited"] = True
+        self.beats["fc-1"]["exited"] = True
         entry = self.state()["sources/odyssey"]
         self.assertFalse(entry["active"])
         self.assertEqual(entry["last_heartbeat"], NOW)
@@ -367,14 +378,14 @@ class StateTests(unittest.TestCase):
     def test_a_beat_with_no_progress_is_live_without_one(self):
         declare(ODYSSEY, self.root)
         self.lease("sources/odyssey", "fc-1", beat_age=1)
-        del main.beats["fc-1"]["progress"]
+        del self.beats["fc-1"]["progress"]
         entry = self.state()["sources/odyssey"]
         self.assertTrue(entry["active"])
         self.assertEqual(entry["live_progress"], None)
 
     def test_a_beat_whose_lease_was_released_is_no_call_at_all(self):
         declare(ODYSSEY, self.root)
-        main.beats["fc-1"] = {"last_beat_ts": NOW, "progress": {"bytes": 3}}
+        self.beats["fc-1"] = {"last_beat_ts": NOW, "progress": {"bytes": 3}}
         entry = self.state()["sources/odyssey"]
         self.assertEqual(entry["call_id"], None)
         self.assertFalse(entry["active"])

@@ -71,6 +71,15 @@ class MappedDataSetTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, f"MappedDataSet.{split}"):
                     MappedDataSet.from_sources(NO_EOT, train, valid)
 
+    def test_a_dataset_with_no_sources_at_all_is_refused(self):
+        """It owns no files and borrows completion from its sources, so with
+        neither split filled `status(root).complete` would be vacuously true
+        and the thing would read as done on an empty volume. One empty split
+        is still fine: the other one's tokens are what it is done by."""
+        with self.assertRaisesRegex(ValueError, "no sources"):
+            MappedDataSet.from_sources(TOKENIZER, (), ())
+        self.assertEqual(MappedDataSet.from_sources(TOKENIZER, (FIRST,), ()).valid_set, ())
+
     def test_order_and_separator_are_identity(self):
         one_way = MappedDataSet.from_sources(TOKENIZER, (FIRST, SECOND), ())
         other_way = MappedDataSet.from_sources(TOKENIZER, (SECOND, FIRST), ())

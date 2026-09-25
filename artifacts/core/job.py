@@ -64,7 +64,7 @@ class Job(ABC):
     def run(self, root: Path, worker: "Worker") -> None:
         """Do the work, writing self.artifact's files under root.
 
-        `worker` is what main.py's run_job holds for the call this job is
+        `worker` is what main.py's `run_job` holds for the call this job is
         running under (see system.runtime.Worker) -- its `.log` is the logger
         whose records are filed under this call, boot/heartbeat/done lines
         included, so a job's own narration belongs there too, not in a

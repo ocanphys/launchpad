@@ -46,9 +46,10 @@ check in `resume` cannot catch this, since the step is still `end_step`.
 
 The idempotence of the loop was checked by patching `set_learning_rate` to
 raise before a chosen step (any crash point, not only after a failsafe) and
-`write_atomic` to die between the `.tmp` save and the rename, or during a
-strip rewrite, then comparing the final checkpoint against an uninterrupted
-run in a separate root. Scenarios worth keeping: crash after every failsafe,
+`torch.save` to die while writing the file `worker.publishing` handed it, or
+during a strip rewrite, then comparing the final checkpoint against an
+uninterrupted run in a separate root. Scenarios worth keeping: crash after
+every failsafe,
 crash mid-interval, crash before the first failsafe, crash during strip,
 stale `.tmp`, crash on the final write, rerun after completion, a multi-leg
 chain with crashes in every leg, and random crash points. The runnable
@@ -161,8 +162,8 @@ directions bite: the thread's reload while `/artifact/<path>` has
 mid-reload sees files being swapped under it (a half-written manifest reads
 as a conflict that is not real).
 
-`main.mount_lock` is what holds them apart, and everything in that process
-which reloads the mount or opens a file on it takes it: `state()`,
+`launcher.state.mount_lock` is what holds them apart, and everything in that
+process which reloads the mount or opens a file on it takes it: `state()`,
 `attempt_launch`'s readiness read, and the `/artifact` route. Two rules keep
 it from becoming its own problem: never hold it across the listener's
 blocking queue read (that wait is `REFRESH_WAIT_SECONDS` long, and a request
@@ -209,3 +210,55 @@ What this costs: a `tokens.bin` built before the rewrite is not reproducible
 by rebuilding it. Don't diff one against a fresh one to decide whether a
 tokenizer changed -- compare `tokenizer.json`, or decode both and compare
 the text.
+
+## A cancel is a request, and it arrives late
+
+`FunctionCall.cancel()` returns at once, but the container only learns about
+it on its own `ContainerHeartbeat` to Modal, which is also where an
+`InputCancellation` is raised into the call. How late that is has no bound
+worth relying on -- a slow or failed heartbeat postpones it, and anything the
+container does on Modal's own event loop can cause one -- so nothing here is
+built on a cancel being timely. Cancelling
+`runs/RUN2/pretraining/1000-2000-aa9fdbfce0` took 13.3 seconds to land: the
+job trained steps 1900 and 2000, wrote `model.pt` and logged "training
+complete" in the meantime, and only then was interrupted. The leg was
+complete on the volume and its call was recorded as `failed`.
+
+Three things were wrong and each is fixed where it belongs:
+
+- A grant that was simply gone read as `UNKNOWN` -- silence -- so the worker
+  slept through five backoffs and reported "ownership never confirmed". A read
+  that succeeded and found nothing is an answer: no one holds this artifact,
+  and we are no one. This is what makes dropping the lease a usable stop
+  signal, and a cancel is nothing more than that: `cancel_call` removes the
+  grant, then asks Modal to stop the call.
+- The one confirm that could have stopped it ran *after* `model.pt` was
+  written. Every file a job writes now goes through `worker.publishing`, which
+  opens the temporary file, confirms the lease and renames -- so the confirm is
+  between the bytes and the publication of every file, and no job names a
+  `.tmp` or calls `replace` itself.
+- Nothing stopped a second call being granted the path while the cancelled
+  container was still writing, and both would have written the same
+  `tokens.bin.tmp`. The temporary file carries the call id, so overlapping
+  calls never mix bytes and only the lease holder renames. This is the cost of
+  releasing ownership at the moment of the request rather than holding it
+  until the call is known to be over: two containers can run, but only one can
+  publish.
+
+The thing to know before moving any of those confirms: **`volume.commit()` is
+not what publishes a file.** `_volume_to_mount_proto` hard-codes
+`allow_background_commits=True` on every mount (modal 1.5.4, no way to turn it
+off), and the container's own exit path commits every such volume on the way
+out. So bytes on the mount reach the volume whether or not the call lives to
+call `commit`, and "write the file, check the lease, then commit only if we
+still hold it" would publish exactly the same artifact, just later and with
+nothing in the record. What *is* ours to withhold is the rename: a `.tmp`
+satisfies no completion, so the confirm goes between writing the bytes and
+renaming them into place, and that pairing lives in one context manager on
+the worker rather than in each job.
+
+Even that cannot be airtight: a lease dropped between the confirm and the
+rename still lets that rename through, so a cancel can still lose by the width
+of one rename and leave a complete artifact behind. That is accepted. A
+cancellation is recorded as `lease lost`, which is what it is here -- the
+launcher took the artifact away.

@@ -40,8 +40,9 @@ row:
   those are its `ambient` source.
 - `call_logger(name, source, call_id)`, which stamps the rest. A job gets one
   as `worker.log` (`runtime.initialize_worker`, source `worker`); the
-  leasebook binds the two it needs once, in main.py: `log_launcher` for its
-  own doings and `log_call(call_id)` for a call it manages.
+  launcher binds the two it needs once, at the top of
+  `launcher/leasebook.py`: `log_launcher` for that container's own doings
+  and `log_call(call_id)` for a call it manages.
 
 So which channel a row lands in is the logger it was written with, never a
 second function next to the first. What the launcher does to a call it manages

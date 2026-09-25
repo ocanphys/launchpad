@@ -221,6 +221,12 @@ class StatusTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             virtual = Virtual(sources=(ODYSSEY,))
+            # Owning no outputs, `all(outputs.values())` is vacuously true
+            # while the file this is actually done by is still missing. Which
+            # half `complete` reads is the whole difference here.
+            self.assertEqual(virtual.status(root).outputs, {})
+            self.assertFalse(virtual.status(root).complete)
+
             build(ODYSSEY, root)
             footprint = virtual.status(root)
             # complete, yet undeclared and owning nothing: the two questions
@@ -228,6 +234,14 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(footprint.outputs, {})
             self.assertEqual(list(footprint.completion.values()), [True])
             self.assertFalse(footprint.manifest)
+            self.assertTrue(footprint.complete)
+
+    def test_complete_follows_the_completion_files(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertFalse(ODYSSEY.status(root).complete)
+            build(ODYSSEY, root)
+            self.assertTrue(ODYSSEY.status(root).complete)
 
     def test_an_artifact_nothing_produces_has_no_job(self):
         with self.assertRaisesRegex(ValueError, "declares no producer"):

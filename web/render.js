@@ -18,7 +18,7 @@ function dim(text) {
   return el("span", { class: "dim", text });
 }
 
-// One status light per artifact: the server's `verdict` (see main.py's
+// One status light per artifact: the server's `verdict` (see launcher/state.py's
 // `state`) as a color, with the reason on hover.
 //   green  (done)     : status is "done"
 //   blue   (running)  : an active call is working on it
@@ -57,7 +57,7 @@ function callSummary(state) {
   return `call_id: ${state.call_id}, last heartbeat: ${beat}`;
 }
 
-// One payload -- main.py's live_progress (what a running job wrote) or
+// One payload -- launcher/state.py's live_progress (what a running job wrote) or
 // durable_progress (what its artifact read off the volume) -- into one compact
 // line: "phase: done/total", or just "done/total" for a payload that doesn't
 // name a phase.

@@ -4,7 +4,7 @@
 // render.js, artifactview.js and logview.js; DOM building to el.js.
 //
 // The page mirrors the server and decides nothing. `/state` is the map the
-// leasebook container holds in memory (main.py's `latest`), which it
+// leasebook container holds in memory (launcher/leasebook.py's `latest`), which it
 // recomputes when a worker's call exits, when it grants or releases a lease,
 // and when the refresh button POSTs /refresh. The page just refetches the
 // current view on a clock and redraws what changed.

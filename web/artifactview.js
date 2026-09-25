@@ -101,7 +101,7 @@ function logRows(calls) {
     .filter(Boolean);
 }
 
-// Every call that has ever worked on this artifact (see main.py's
+// Every call that has ever worked on this artifact (see launcher/state.py's
 // artifact_calls), as one stream with a level filter above it: one
 // checkbox per level present, DEBUG off until switched on.
 function logs(calls) {
