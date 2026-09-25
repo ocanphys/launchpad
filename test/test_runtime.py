@@ -2,6 +2,7 @@
 out, with the Modal Dicts and the mount stubbed."""
 
 import logging
+import time
 import unittest
 import weakref
 from pathlib import Path
@@ -9,6 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
+from modal.exception import InputCancellation
 
 from system import lease_protocol, logs, runtime
 
@@ -134,6 +136,49 @@ class InitializeWorkerTests(unittest.TestCase):
         with self.assertRaises(lease_protocol.LeaseLost), runtime.initialize_worker(self.ARTIFACT, self.mount()):
             self.fail("the body must not run under a lease held by another call")
         self.assertEqual(self.refreshes[-1]["event"], "lease lost")
+
+    def test_a_cancelled_call_is_a_call_that_lost_its_lease(self):
+        """`cancel_call` drops the grant and then asks Modal to stop the call,
+        so a cancel reaches the container as a fence that finds no grant. A
+        read that succeeded and found nothing is an answer, so the call stops
+        on the first try rather than waiting out LEASE_RETRIES backoffs."""
+        lease_protocol.leases.clear()
+        started = time.monotonic()
+        with self.assertRaises(lease_protocol.LeaseLost), runtime.initialize_worker(self.ARTIFACT, self.mount()):
+            self.fail("the body must not run with no grant naming this call")
+        self.assertLess(time.monotonic() - started, lease_protocol.LEASE_BACKOFF)
+        self.assertIn("this call was cancelled", self.container()[0])
+        self.assertEqual(self.refreshes[-1]["event"], "lease lost")
+
+    def test_the_cancellation_modal_delivers_is_the_same_ending(self):
+        """Modal raises its own cancellation into the call whenever the
+        container's heartbeat next reaches it, which can be after the fence has
+        already stopped the job -- or, between fences, before it."""
+        with self.assertRaises(InputCancellation), runtime.initialize_worker(self.ARTIFACT, self.mount()):
+            raise InputCancellation("Input was cancelled by user")
+        self.assertEqual(self.refreshes[-1]["event"], "lease lost")
+
+    def test_two_calls_on_one_artifact_stage_through_different_files(self):
+        """The window `cancel_call` opens: it drops the lease before Modal stops
+        the container, so a launch made in between is granted while the old call
+        may still be writing. Each call stages through its own temporary file,
+        so their bytes never mix, and only the one holding the lease renames."""
+        def lost(label: str) -> None:
+            raise lease_protocol.LeaseLost(label)
+
+        path = self.root / "tokens.bin"
+        log = logging.getLogger("test")
+        holder = runtime.Worker(self.ARTIFACT, "fc-new", log, lambda label: None, {})
+        superseded = runtime.Worker(self.ARTIFACT, "fc-old", log, lost, {})
+        with self.assertRaises(lease_protocol.LeaseLost):
+            with superseded.publishing(path) as stale, holder.publishing(path) as fresh:
+                stale.write(b"stale")
+                fresh.write(b"fresh")
+                staged = sorted(p.name for p in self.root.iterdir())
+
+        self.assertEqual(staged, ["tokens.bin.fc-new.tmp", "tokens.bin.fc-old.tmp"])
+        self.assertEqual(path.read_bytes(), b"fresh")
+        self.assertEqual(list(self.root.glob("*.tmp")), [], "the superseded call left its file behind")
 
     def test_a_running_call_announces_itself_with_a_beat_already_readable(self):
         """The message that turns the row the launcher granted from

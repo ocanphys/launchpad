@@ -10,7 +10,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 import regex as re
 
@@ -293,19 +293,20 @@ class TokenizerJob(Job):
             vocab[offset + index] = bytes(self.special_tokens[index].encode("utf-8"))
         worker.log.info(f"appended {len(self.special_tokens)} special tokens at {offset}")
 
-        self.save(root, vocab, merges)
         path = self.artifact.paths(root)["tokenizer"]
+        with worker.publishing(path) as out:
+            self.save(out, vocab, merges)
         worker.log.info(
             f"trained, vocab has {len(vocab)} entries -- wrote {path.name}, "
             f"{path.stat().st_size} bytes"
         )
 
     def save(
-        self, root: Path, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]]
+        self, out: BinaryIO, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]]
     ) -> None:
-        """Write vocab/merges into the folder self.artifact owns -- the last
-        thing training does, and the inverse of Tokenizer._load."""
-        self.artifact.paths(root)["tokenizer"].write_text(
+        """Write vocab/merges to the file `worker.publishing` handed over --
+        the last thing training does, and the inverse of Tokenizer._load."""
+        out.write(
             json.dumps(
                 {
                     "vocab_size": len(vocab),
@@ -319,6 +320,6 @@ class TokenizerJob(Job):
                     ],
                 },
                 indent=2,
-            )
+            ).encode()
         )
 

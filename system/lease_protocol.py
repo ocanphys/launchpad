@@ -61,12 +61,15 @@ def fence(artifact_path: str, my_call_id: str) -> tuple[str, dict | None]:
     The grant comes back with the verdict: the read already fetched it, and callers
     want to name *who* holds the artifact, not just whether we do.
 
-    - MATCH / MISMATCH are real answers. Someone else's id means stop at once;
-      asking again is just hoping it changes.
-    - UNKNOWN (no key, or the read failed) is silence, not a no -- a Dict outage,
-      or a call never granted anything. Denying on silence takes down the fleet
-      on one blip; granting on it lets a zombie write. So callers wait a bounded
-      time, then give up.
+    - MATCH / MISMATCH are real answers. Someone else's id and no grant at all
+      are both a MISMATCH: stop at once, asking again is just hoping it
+      changes. No grant at all is how a cancel reaches us -- the launcher drops
+      the lease before it asks Modal to stop the call.
+    - UNKNOWN is a read that failed: silence, not a no -- a Dict outage. Denying
+      on silence takes down the fleet on one blip; granting on it lets a zombie
+      write. So callers wait a bounded time, then give up. A read that succeeded
+      and found nothing is not silence: it says no one holds this artifact, and
+      we are no one.
 
     Always the module's own `leases` Dict. Nothing here runs anywhere but inside a
     container, which has a real Dict to reach.
@@ -75,9 +78,9 @@ def fence(artifact_path: str, my_call_id: str) -> tuple[str, dict | None]:
         grant = leases.get(artifact_path)
     except Exception:
         return UNKNOWN, None
-    if grant is None:
-        return UNKNOWN, None
-    return (MATCH if grant["call_id"] == my_call_id else MISMATCH), grant
+    if grant is None or grant["call_id"] != my_call_id:
+        return MISMATCH, grant
+    return MATCH, grant
 
 
 class Lease:
@@ -125,11 +128,17 @@ class Lease:
                 )
                 return
             if verdict == MISMATCH:
+                if grant is None:
+                    raise LeaseLost(
+                        f"{label}: no grant holds this artifact -- this call was cancelled, "
+                        f"or a launch took it"
+                    )
                 # Which kind of holder matters to whoever reads this log: a
                 # different artifact_type means someone else is now producing
                 # this artifact under us, i.e. we were superseded.
                 raise LeaseLost(
-                    f"{label}: another {grant['artifact_type']} holds this artifact ({grant['call_id']})"
+                    f"{label}: another {grant['artifact_type']} holds this artifact "
+                    f"({grant['call_id']}) -- its writes will overtake ours"
                 )
             if i == self.tries:
                 raise LeaseLost(

@@ -36,5 +36,6 @@ class DataSetJob(Job):
                 if index:
                     merged.extend(separator)
                 merged.frombytes(tokenized_source.paths(root)["tokens"].read_bytes())
-            path.write_bytes(merged.tobytes())
+            with worker.publishing(path) as out:
+                out.write(merged.tobytes())
         worker.log.info("done")

@@ -15,6 +15,7 @@ from artifacts.dataset.jobs import DataSetJob
 from artifacts.sources import SourceURL
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
+from system.runtime import Worker
 
 FIRST = SourceURL(name="first", url="https://example.org/first.txt")
 SECOND = SourceURL(name="second", url="https://example.org/second.txt")
@@ -25,6 +26,13 @@ TOKENIZER = Tokenizer(
     sources=(FIRST, SECOND, THIRD),
 )
 NO_EOT = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(FIRST,))
+
+
+def worker() -> Worker:
+    """A real `Worker` with the lease no-opped: a job writes every file
+    through `worker.publishing`, so the stand-in has to be one that publishes.
+    Its log and confirm are Mocks, for tests that read either back."""
+    return Worker(artifact_path="", call_id="local", log=Mock(), confirm_lease=Mock(), progress={})
 
 
 class DataSetTests(unittest.TestCase):
@@ -80,7 +88,7 @@ class DataSetTests(unittest.TestCase):
                 with self.subTest(train=train, valid=valid):
                     dataset = DataSet.from_sources(NO_EOT, train, valid)
                     (root / dataset.artifact_path).mkdir(parents=True)  # as declaration would
-                    DataSetJob(dataset).run(root, Mock())
+                    DataSetJob(dataset).run(root, worker())
                     self.assertEqual(
                         dataset.paths(root)["training set"].read_bytes(),
                         content if train else b"",
@@ -125,7 +133,7 @@ class DataSetTests(unittest.TestCase):
                         path = source.paths(root)["tokens"]
                         path.parent.mkdir(parents=True, exist_ok=True)
                         path.write_bytes(array("H", tokens).tobytes())
-                    DataSetJob(dataset).run(root, Mock())
+                    DataSetJob(dataset).run(root, worker())
                     for split, expected in (
                         ("training set", expected_train),
                         ("validation set", expected_valid),
@@ -146,7 +154,7 @@ class DataSetTests(unittest.TestCase):
             path = dataset.train_set[0].paths(root)["tokens"]
             path.parent.mkdir(parents=True)
             path.write_bytes(array("H", [7, 300, 65535]).tobytes())
-            DataSetJob(dataset).run(root, Mock())
+            DataSetJob(dataset).run(root, worker())
             self.assertFalse(dataset.bound)
             with self.assertRaisesRegex(RuntimeError, "bind"):
                 dataset.train_tokens

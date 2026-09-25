@@ -5,8 +5,8 @@ log file, and never calls `commit`:
 
     def run(self, root, worker):
         worker.log.info("counting")
-        worker.confirm_lease("before write")   # raises LeaseLost if superseded
-        (root / self.artifact.artifact_path / "count.txt").write_text("3")
+        with worker.publishing(root / self.artifact.artifact_path / "count.txt") as out:
+            out.write(b"3")
 
 `worker.log` stamps every row it writes with this call's id and
 `source="worker"`, from any thread, so `start_logging` files it under
@@ -34,13 +34,16 @@ import logging
 import threading
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from itertools import count
+from pathlib import Path
+from typing import BinaryIO
 
 import modal
+from modal.exception import InputCancellation
 
 from config import HEARTBEAT_SECONDS
 from system.lease_protocol import Lease, LeaseLost, beats, refreshes
@@ -60,6 +63,43 @@ class Worker:
     log: logging.LoggerAdapter
     confirm_lease: Callable[..., None]
     progress: dict
+
+    @contextmanager
+    def publishing(self, path: Path) -> Generator[BinaryIO, None, None]:
+        """An open binary file to write `path`'s contents into, closed and
+        renamed into place on the way out under a confirmed lease.
+
+            with worker.publishing(self.artifact.paths(root)["tokens"]) as out:
+                array("H", ids).tofile(out)
+
+        Every file that has to appear whole or not at all is written this way,
+        and a job never names a temporary path, opens one or renames one. The
+        rename is what publishes a file, and `volume.commit()` is not: every
+        mount runs with background commits, so bytes written to it reach the
+        volume whether or not the call lives to commit, while a `.tmp` nothing
+        renamed satisfies no completion. So the confirm sits between the write
+        and the rename, the last instant at which a cancelled or superseded
+        call can be stopped from finishing an artifact (LESSONS.md).
+
+        Nothing this call wrote survives it not publishing: a body that raises
+        and a lease lost at the confirm both delete the temporary file.
+
+        The name is `{filename}.{call_id}.tmp` -- appended, never substituted,
+        and carrying the call. Two owned files that share a stem cannot stage
+        through one temporary name, and neither can two calls that overlap on
+        one artifact, which is reachable for as long as a cancelled container
+        takes to notice (LESSONS.md): each writes its own file and only the one
+        holding the lease renames.
+        """
+        tmp = path.with_name(f"{path.name}.{self.call_id}.tmp")
+        try:
+            with tmp.open("wb") as out:  # closed before the rename, which is what makes it safe
+                yield out
+            self.confirm_lease(f"before publishing {path.name}")
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        tmp.replace(path)
 
 
 @contextmanager
@@ -142,9 +182,12 @@ def initialize_worker(artifact_path: str, volume: modal.Volume):
         lease.confirm("commit")
         ending = "done"
     except BaseException as exc:
-        if isinstance(exc, LeaseLost):
+        # A cancellation is a lease lost: the launcher drops the grant before it
+        # asks Modal to stop the call, so the fence usually raises first and the
+        # signal Modal delivers later means the same thing.
+        if isinstance(exc, (LeaseLost, InputCancellation)):
             ending = "lease lost"
-            logger.error(f"{exc} -- stopping; the holder's writes will overtake ours")
+            logger.error(f"{exc} -- stopping")
         else:
             logger.exception("failed under a held lease")
         # The traceback pins every frame it unwound through, and their locals

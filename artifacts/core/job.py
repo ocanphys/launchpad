@@ -7,6 +7,15 @@ One job, one artifact. That artifact may comprise several files, but they
 all live in its folder, and declaration (`lab.declare`) has already created
 that folder, writing the manifest into it, before run() is called -- so no
 job makes its own folder, only subfolders inside it.
+
+Every path in the artifact's `completion_paths` -- the files whose presence
+means it is done -- is written through `worker.publishing`, which opens the
+file, closes it and renames it into place under a confirmed lease. Nothing a
+job writes to the volume that has to appear whole or not at all is written
+any other way. A
+file that completes nothing is not one of those: a step log is appended to as
+the job runs. A checkpoint still goes through it, since a half-written one
+would poison the resume that reads it.
 """
 
 from abc import ABC, abstractmethod

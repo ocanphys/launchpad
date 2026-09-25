@@ -5,7 +5,7 @@ docstring for how to copy this whole family and what has to stay unique.
 import json
 from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 from artifacts.core.job import Job
 from artifacts.tokenizers.template import UNKNOWN, TemplateTokenizer
@@ -54,13 +54,14 @@ class TemplateTokenizerJob(Job):
         vocab = {idx: token for idx, token in enumerate(reserved + learned)}
         # --------------------------------------------------------------------
 
-        self.save(root, vocab)
+        with worker.publishing(self.artifact.paths(root)["tokenizer"]) as out:
+            self.save(out, vocab)
         worker.log.info(f"trained, vocab has {len(vocab)} entries")
 
-    def save(self, root: Path, vocab: dict[int, str]) -> None:
-        """Write vocab into the folder self.artifact owns -- the last thing
-        training does, and the inverse of TemplateTokenizer._load."""
-        self.artifact.paths(root)["tokenizer"].write_text(
+    def save(self, out: BinaryIO, vocab: dict[int, str]) -> None:
+        """Write vocab to the file `worker.publishing` handed over -- the last
+        thing training does, and the inverse of TemplateTokenizer._load."""
+        out.write(
             json.dumps(
                 {
                     "vocab_size": len(vocab),
@@ -68,6 +69,6 @@ class TemplateTokenizerJob(Job):
                     "vocab": {str(idx): tok for idx, tok in vocab.items()},
                 },
                 indent=2,
-            )
+            ).encode()
         )
 

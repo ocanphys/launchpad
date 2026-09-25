@@ -27,17 +27,14 @@ class TokenizeSourceJob(Job):
         total_bytes = body.stat().st_size
         worker.log.info(f"tokenizing {self.source.name}, {total_bytes} bytes")
 
-        # Published by rename: a tokens.bin at its final path is what makes this
-        # artifact done, so a half-written one must never sit there.
         tokens = self.artifact.paths(root)["tokens"]
-        tmp = tokens.with_suffix(".tmp")
 
         # uint16: every id is below vocab_size, and vocab_size is expected to
         # stay under 2**16 -- two bytes, no header, so a dataset can copy or
         # map these with uint16 separators between sources.
         buffered = array("H")
         written = logged_bytes = 0
-        with open(body, "rb") as handle, open(tmp, "wb") as out:
+        with worker.publishing(tokens) as out, open(body, "rb") as handle:
             # A line at a time, so neither the text nor its ids are ever held
             # whole -- the source runs to gigabytes, and a list of ids for one
             # costs about ten times what its tokens.bin does.
@@ -61,7 +58,6 @@ class TokenizeSourceJob(Job):
             buffered.tofile(out)
             written += len(buffered)
 
-        tmp.replace(tokens)
         worker.log.info(
             f"wrote {written} tokens for {self.source.name}, "
             f"{tokens.stat().st_size} bytes"

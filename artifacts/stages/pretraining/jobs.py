@@ -48,10 +48,10 @@ class PretrainJob(TrainingJob):
         )
         return self.loss_function(model(inputs).transpose(1, 2), targets)
 
-    def evaluate(self, model, dataset, step, loss, learning_rate, grad_norm, worker: "Worker") -> None:
-        """Reports the state of training after `step` completed steps to
-        worker.progress and the log: the last training step's loss, learning rate and
-        gradient norm, and the validation loss."""
+    def evaluate(self, model, dataset, step, loss, learning_rate, grad_norm, worker: "Worker") -> float:
+        """Returns the validation loss after `step` completed steps, having reported it
+        to worker.progress and the log along with the last training step's loss,
+        learning rate and gradient norm."""
         model.eval()
         with torch.no_grad():
             val_loss = self.batch_loss(model, dataset.valid_tokens, step).item()
@@ -64,10 +64,11 @@ class PretrainJob(TrainingJob):
             f"step {step}/{end_step} "
             + " ".join(f"{name}={value:.4g}" for name, value in metrics.items())
         )
+        return val_loss
 
     def run(self, root: Path, worker: "Worker") -> None:
         end_step = self.artifact.end_step
-        if self.artifact.paths(root)["model"].exists(): # return if already done.
+        if self.artifact.status(root).complete:  # a finished leg is never rerun (LESSONS.md)
             worker.log.info(f"model.pt exists, leg already complete at step {end_step}")
             return
         folder = root / self.artifact.artifact_path
@@ -93,20 +94,24 @@ class PretrainJob(TrainingJob):
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             optimizer.step()
             optimizer.zero_grad()
-            steplog.record(step, loss, grad_norm, learning_rate)
-            worker.progress["step"] = step
-
-            if step % self.loop_config.val_every == 0:
+            val_loss = (
                 self.evaluate(model, dataset, step, loss, learning_rate, grad_norm, worker)
+                if step % self.loop_config.val_every == 0
+                else None
+            )
+            steplog.record(step, loss, grad_norm, learning_rate, val_loss)
+            worker.progress["step"] = step
+            if val_loss is not None:
                 steplog.flush()
 
             if step % self.loop_config.checkpoint_every == 0:
-                self.failsafe(folder / "checkpoints", model, optimizer, step)
+                self.failsafe(folder / "checkpoints", model, optimizer, step, worker)
                 worker.log.info(f"checkpoint saved at step {step}/{end_step}")
 
         steplog.flush()
-        self.write_atomic(
-            self.artifact.paths(root)["model"],
-            {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": end_step},
-        )
+        with worker.publishing(self.artifact.paths(root)["model"]) as out:
+            torch.save(
+                {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": end_step},
+                out,
+            )
         worker.log.info(f"training complete at step {end_step}")

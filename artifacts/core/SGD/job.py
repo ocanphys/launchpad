@@ -129,26 +129,22 @@ class TrainingJob(Job):
         self.set_learning_rate(optimizer, step)
         return model, optimizer, step
 
-    def write_atomic(self, path: Path, state: dict) -> None:
-        """Writes state to path atomically: a reader never sees a half-written file."""
-        tmp = path.with_suffix(".tmp")
-        torch.save(state, tmp)
-        tmp.replace(path)
-
-    def failsafe(self, checkpoints: Path, model, optimizer, step: int) -> None:
+    def failsafe(self, checkpoints: Path, model, optimizer, step: int, worker: "Worker") -> None:
         """Writes checkpoints/{step}.pt with model and optimizer state and, under
         the "latest" policy, drops the optimizer from every earlier failsafe."""
         previous = list(checkpoints.glob("*.pt"))
-        self.write_atomic(
-            checkpoints / f"{step}.pt",
-            {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "step": step,
-            },
-        )
+        with worker.publishing(checkpoints / f"{step}.pt") as out:
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "step": step,
+                },
+                out,
+            )
         if self.loop_config.optimizer_checkpoint_policy == "latest":
             for path in previous:
                 state = torch.load(path, map_location="cpu", mmap=True)
                 if state.pop("optimizer", None) is not None:
-                    self.write_atomic(path, state)
+                    with worker.publishing(path) as out:
+                        torch.save(state, out)

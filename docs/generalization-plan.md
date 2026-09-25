@@ -22,7 +22,7 @@ Decisions taken:
 
 ### What generalizes as is
 
-- Checkpoint file format, `write_atomic`, `failsafe`, the optimizer-stripping policy,
+- Checkpoint file format, `failsafe`, the optimizer-stripping policy,
   `model.pt` as the completion file, the resolver waiting on it.
 - Model and optimizer construction: `resume` builds both from `model`,
   `model_parameters` and `training_parameters`, so an SFT job inherits them.
