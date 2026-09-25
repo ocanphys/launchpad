@@ -107,7 +107,9 @@ took it, written by `artifacts/core/SGD/steplog.py`) is the worker's own file
 and nothing else: it reaches the volume when the worker commits under its
 lease, and `/artifact/<path>` reads it off leasebook's mount as the last
 reload left it. No attempt's rows are streamed before that commit. The page
-draws every row, one uPlot line per attempt.
+draws every row, one uPlot line per metric per attempt, with the validation
+loss -- null on the steps no validation ran on -- over the training loss on
+one chart.
 
 ## Levels
 
@@ -136,8 +138,9 @@ and keeps going -- the next attempt may well succeed.
 **ERROR** -- the call's work is lost or it crashed: lease lost, unhandled
 exception under a held lease.
 Example: `runtime.py` logs a `LeaseLost` at ERROR (the call's writes are
-about to be discarded) and any other exception via `logger.exception` at
-ERROR (with traceback) before re-raising.
+about to be discarded), in one line and without a traceback -- a cancel
+arrives this way too, since `cancel_call` drops the lease -- and any other
+exception via `logger.exception` at ERROR (with traceback) before re-raising.
 
 **CRITICAL** -- reserved for infra-level failures that abort more than one
 call (e.g. the artifact store itself unreachable). Unused today; don't

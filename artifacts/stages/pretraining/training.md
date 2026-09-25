@@ -73,6 +73,13 @@ back to the starting checkpoint (or a fresh model) when there is none. They
 also record the trajectory inside the leg, but that is a side effect, not a
 contract.
 
+Nothing calls `volume.commit()` between one failsafe and the next, and nothing
+needs to: every volume mount runs with background commits, so a failsafe
+reaches the volume whether or not the call lives to commit. What a failsafe
+does need is the lease, which `worker.publishing` confirms between writing the
+`.tmp` and renaming it into place: the rename is the publication, and it is
+the last point at which a cancelled call can be stopped from publishing.
+
 ### Optimizer state at failsafes
 
 `loop_config.optimizer_checkpoint_policy`:
@@ -111,7 +118,8 @@ initialization.
 
 Every step's loss, gradient norm and learning rate go to `train.jsonl` in the
 leg's folder through `StepLog` (`artifacts/core/SGD/steplog.py`), one JSON
-row per step tagged with the attempt that took it. Rows are kept as device
+row per step tagged with the attempt that took it, and the validation loss
+on the rows `evaluate` ran on, null on the rest. Rows are kept as device
 tensors and read back in one batch when the loop flushes, after each
 `evaluate` and once after the loop, so the only CPU/GPU sync points are those
 flushes and `evaluate`'s `.item()` calls. Every
@@ -139,11 +147,6 @@ the first real run.
 - **Validation set.** One random batch per `val_every`, so the curve is noisy.
   A fixed set of K batches from `default_rng(seed)` averaged under
   `torch.inference_mode()` gives a readable curve.
-- **Failsafes and the volume.** Nothing commits the volume between
-  `failsafe()` and the container dying. `system.runtime` commits once, on the
-  way out of `initialize_worker`, which a hard kill (OOM, preemption, timeout)
-  skips. Either confirm Modal background-commits this volume type, or give
-  `Worker` a commit hook that `failsafe` calls.
 - **`mmap=True` on the volume mount.** Stripping optimizers maps each earlier
   failsafe and renames over it. Whether Modal's FUSE mount supports the map
   and the rename under it needs a check on the real mount. Fallback: plain
@@ -162,9 +165,17 @@ the first real run.
   `foreach`, `capturable`) come from the saved leg, since the re-apply covers
   only `lr`, `betas`, `eps`, `weight_decay`. Bites when a torch upgrade
   between legs changes a default.
-- **Stale `.tmp` files.** A crash mid-write leaves `{step}.tmp` beside the
-  failsafes. Ignored by the `*.pt` glob, overwritten if that step is written
-  again, otherwise permanent litter.
+- **Sweeping stale `.tmp` files.** `worker.publishing` deletes its temporary
+  file whenever it does not publish, so an ordinary failure and a lost lease
+  both clean up after themselves. A hard kill (OOM, preemption, timeout) runs
+  no Python and leaves `{step}.pt.{call_id}.tmp` beside the failsafes, and
+  because the name carries a call id that will never recur, no later attempt
+  ever overwrites it: unlike a shared temporary name, this litter accumulates,
+  one checkpoint-sized file per killed attempt. Ignored by the `*.pt` glob, so
+  it costs space and nothing else. A sweep is the fix and needs one decision
+  before it is written -- a superseded call that is still alive may be writing
+  one of those files, so whoever sweeps must either hold the lease and accept
+  breaking that call's rename, or skip files younger than some age.
 
 ## Naming and identity
 

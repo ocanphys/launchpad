@@ -17,9 +17,10 @@ Files split by responsibility:
 - **[render.js](../web/render.js)** -- the artifact row and its cells.
 - **[artifactview.js](../web/artifactview.js)** -- one artifact's own page:
   its type, parameters and dependency links, its training curves when its
-  job keeps a step log (one uPlot chart per metric, one line per attempt,
-  every row of `train.jsonl` as read off the volume; drag to zoom, click a
-  legend entry to hide an attempt), and every call's log. It retains the
+  job keeps a step log (one uPlot chart per metric, loss and validation loss
+  sharing one with validation dashed, one line per metric per attempt, every
+  row of `train.jsonl` as read off the volume; drag to zoom, click a legend
+  entry to hide a line), and every call's log. It retains the
   reader's parameter and artifact log filter choices between redraws.
 - **[logview.js](../web/logview.js)** -- shared timestamp formatting, level
   filters and safe log rows for artifact streams and the launcher panel.
@@ -158,6 +159,14 @@ disabled and reads `starting` (or `stopping`) from the click until the
 server answers. The server recomputes its map before answering an accepted
 launch or cancel, so the fetch right after already knows what was asked
 for, and a refused request lands on a map that says why.
+
+A cancelled row goes back to **run** at once, because the lease it was
+holding is what `/cancel` removes and the row's liveness is read off that
+grant. The container can still be finishing for seconds afterwards, invisible
+here: Modal delivers its cancellation on the container's own heartbeat, and
+the call is only stopped for certain at its next lease check. Clicking **run**
+in that gap is allowed and grants a second call, which is safe but does mean
+two containers briefly working on one artifact (README, `/cancel`).
 
 A call that has been granted but not yet beaten reads as `starting` while
 its lease is younger than `STARTUP_GRACE_SECONDS`

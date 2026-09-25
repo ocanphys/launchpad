@@ -116,7 +116,11 @@ function logs(calls) {
 
 // --- training curves ----------------------------------------------------------
 
-const METRICS = ["loss", "grad_norm", "learning_rate"];
+// One chart per entry, every metric in it drawn on the same axes: training
+// and validation loss share a chart, so the gap between them reads off the
+// curves rather than off two charts side by side.
+const CHARTS = [["loss", "val_loss"], ["grad_norm"], ["learning_rate"]];
+const METRICS = CHARTS.flat();
 // One color per attempt, cycling: attempt 1 is always the first color, so a
 // leg's history reads the same on every visit.
 const ATTEMPT_COLORS = ["#0969da", "#cf222e", "#1a7f37", "#8250df", "#bf8700", "#e16f24"];
@@ -139,16 +143,16 @@ function columns(train) {
   const ys = Object.fromEntries(METRICS.map((m) => [m, attempts.map(() => new Array(steps.length).fill(null))]));
   for (const row of train) {
     const i = attempts.indexOf(row.attempt), j = at.get(row.step);
-    for (const metric of METRICS) ys[metric][i][j] = row[metric];
+    for (const metric of METRICS) ys[metric][i][j] = row[metric] ?? null;
   }
   return { steps, attempts, ys };
 }
 
-// One metric against step, every attempt its own line. Drag to zoom x,
-// double-click to reset, click a legend entry to hide that attempt; the
-// cursor is synced across the leg's charts so hovering one reads the step
-// off all three.
-function chart(metric, { steps, attempts, ys }) {
+// One chart's metrics against step, every attempt its own color and every
+// metric after the first dashed. Drag to zoom x, double-click to reset,
+// click a legend entry to hide that line; the cursor is synced across the
+// leg's charts so hovering one reads the step off all three.
+function chart(metrics, { steps, attempts, ys }) {
   const node = el("div", { class: "curve" });
   const axis = {
     stroke: getComputedStyle(document.body).color,
@@ -159,21 +163,25 @@ function chart(metric, { steps, attempts, ys }) {
   new uPlot(
     {
       ...CHART,
-      title: metric,
+      title: metrics.join(" / "),
       cursor: { sync: { key: "curves" }, drag: { x: true, y: false } },
       scales: { x: { time: false } },
       axes: [axis, { ...axis, size: 52, values: (u, vals) => vals.map(fmt) }],
       series: [
         { label: "step" },
-        ...attempts.map((a, i) => ({
-          label: `attempt ${a}`,
+        ...metrics.flatMap((metric, m) => attempts.map((a, i) => ({
+          label: metrics.length > 1 ? `${metric} ${a}` : `attempt ${a}`,
           stroke: ATTEMPT_COLORS[i % ATTEMPT_COLORS.length],
+          dash: m > 0 ? [5, 4] : undefined,
+          // validation is measured every val_every steps, so its line has to
+          // cross the steps in between rather than break at each of them
+          spanGaps: m > 0,
           width: 1.2,
           value: (u, v) => (v == null ? "" : fmt(v)),
-        })),
+        }))),
       ],
     },
-    [steps, ...ys[metric]],
+    [steps, ...metrics.flatMap((metric) => ys[metric])],
     node,
   );
   return node;
@@ -186,8 +194,8 @@ function chart(metric, { steps, attempts, ys }) {
 let drawnTrain = null, drawnCurves = null;
 
 // The leg's training curves, from the step log's rows (see
-// docs/LOGGING.md): one chart per metric, one line per attempt. Absent
-// for anything whose job keeps no step log.
+// docs/LOGGING.md): one line per metric per attempt, grouped into charts by
+// CHARTS. Absent for anything whose job keeps no step log.
 function curvesSection(train) {
   if (!train.length) return null;
   if (train !== drawnTrain) {
@@ -195,7 +203,7 @@ function curvesSection(train) {
     drawnTrain = train;
     drawnCurves = el("div", { class: "artifact-curves" },
       el("div", { class: "summary-type", text: "training" }),
-      el("div", { class: "curve-row" }, ...METRICS.map((metric) => chart(metric, data))),
+      el("div", { class: "curve-row" }, ...CHARTS.map((metrics) => chart(metrics, data))),
     );
   }
   return drawnCurves;

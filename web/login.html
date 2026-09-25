@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>launchpad</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%230969da'/></svg>">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: 0; height: 100vh;
+    display: grid; place-items: center;
+  }
+  form { display: grid; gap: .75rem; width: 16rem; }
+  h1 { font-size: 13px; font-weight: 600; margin: 0; }
+  input, button {
+    font: inherit; padding: .5rem .6rem; border-radius: 6px;
+    border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit;
+  }
+  button { border-color: #0969da; color: #0969da; cursor: pointer; }
+  button:hover { background: rgba(9,105,218,.1); }
+  /* Empty until a rejected POST writes into it, and it takes no room then. */
+  p { margin: 0; color: #cf222e; min-height: 1.6em; }
+</style>
+</head>
+<body>
+<form method="post" action="/login">
+  <h1>launchpad</h1>
+  <input type="password" name="password" autofocus autocomplete="current-password" placeholder="password">
+  <button type="submit">enter</button>
+  <p><!--note--></p>
+</form>
+</body>
+</html>

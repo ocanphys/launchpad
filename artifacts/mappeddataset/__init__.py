@@ -49,6 +49,14 @@ class MappedDataSet(Artifact):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        # Completion is borrowed from the sources, and every file of an empty
+        # borrowing is present: with neither split filled this artifact would
+        # read as done before anything existed. One split may still be empty.
+        if not (self.train_set or self.valid_set):
+            raise ValueError(
+                "MappedDataSet has no sources -- it owns no files, so there would be "
+                "nothing anywhere for it to be done by"
+            )
         require_separator("train_set", self.train_set)
         require_separator("valid_set", self.valid_set)
 

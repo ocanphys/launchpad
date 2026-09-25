@@ -27,7 +27,15 @@ class StepLog:
         previous = [json.loads(line)["attempt"] for line in self.path.read_text().splitlines()] if self.path.exists() else []
         self.attempt = max(previous, default=0) + 1
 
-    def record(self, step: int, loss: torch.Tensor, grad_norm: torch.Tensor, learning_rate: float) -> None:
+    def record(
+        self,
+        step: int,
+        loss: torch.Tensor,
+        grad_norm: torch.Tensor,
+        learning_rate: float,
+        val_loss: float | None,
+    ) -> None:
+        """Adds one row for `step`; `val_loss` is None on a step no validation ran on."""
         self.rows.append(
             {
                 "step": step,
@@ -35,6 +43,7 @@ class StepLog:
                 "loss": loss.detach(),
                 "grad_norm": grad_norm,
                 "learning_rate": learning_rate,
+                "val_loss": val_loss,
             }
         )
 
