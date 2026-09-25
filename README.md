@@ -195,7 +195,7 @@ its own, and JupyterLab's own autosave does the rest.
   already true, and a finished call stops reading as live at once rather
   than a flatline later.
 - **`lab.py`** runs *inside* a container that already has the volume
-  mounted (the notebook server), so its functions touch `Path(STORAGE)`
+  mounted (the notebook server), so its functions touch `STORAGE`
   directly; `local.py` is how a laptop gets there, one `.remote()` call
   into a container that has the mount.
 

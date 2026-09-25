@@ -190,8 +190,8 @@ def client(**overrides):
     }
     # The mount: a folder with one leg's manifest and step log on it.
     STEP = {"step": 1, "attempt": 1, "loss": 2.0, "grad_norm": 1.0, "learning_rate": 0.5}
-    main.STORAGE = mkdtemp()
-    leg = Path(main.STORAGE) / "runs/toy/pretraining"
+    main.STORAGE = Path(mkdtemp())
+    leg = main.STORAGE / "runs/toy/pretraining"
     leg.mkdir(parents=True)
     (leg / "manifest.json").write_text(json.dumps({**MANIFEST, "dependencies": {"dataset": {"artifact": "artifacts.dataset.DataSet"}}}))
     (leg / "train.jsonl").write_text(json.dumps(STEP) + "\n")

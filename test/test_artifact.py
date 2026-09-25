@@ -188,6 +188,12 @@ class LoadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be an absolute path"):
             Artifact.load("sources/odyssey", Path("storage"))
 
+    def test_a_string_root_is_refused(self):
+        with self.assertRaisesRegex(TypeError, "must be a Path"):
+            Artifact.load("sources/odyssey", "/storage")
+        with self.assertRaisesRegex(TypeError, "must be a Path"):
+            ODYSSEY.status("/storage")
+
     def test_nothing_declared_says_so(self):
         with TemporaryDirectory() as directory:
             missing = self.assertRaisesRegex(FileNotFoundError, "nothing declared")

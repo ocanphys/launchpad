@@ -73,7 +73,7 @@ def safe_relpath(path: str) -> bool:
     """Is `path` safe to join under STORAGE -- non-empty, not absolute, no
     `..` component that could walk it outside the volume. Every route that
     takes a path from the URL (an artifact_path or a run_id) checks this
-    before it ever reaches `Path(STORAGE) / path`.
+    before it ever reaches `STORAGE / path`.
 
     safe_relpath("runs/toy/pretraining") -> True
     safe_relpath("../../etc/passwd") -> False
@@ -170,7 +170,7 @@ resolved: dict[str, Artifact] = {}
 mount_lock = threading.Lock()
 
 
-def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
+def state(root: Path = STORAGE) -> dict[str, dict]:
     """The current state of every declared artifact under `root`, keyed by
     artifact path: one reload, one glob, one status apiece, one lease and
     heartbeat snapshot for the whole scan, and a manifest read only the
@@ -206,7 +206,7 @@ def state(root: Path = Path(STORAGE)) -> dict[str, dict]:
     # newer than `now` and reads as live, which is the true answer.
     now = time.time()
     with mount_lock:
-        if root == Path(STORAGE):
+        if root == STORAGE:
             volume.reload()
         beat_records = dict(beats.items())
         grants = dict(leases.items())
@@ -527,7 +527,7 @@ def persist_logs() -> None:
     lag. Fires only on a deployed app (`modal deploy`), not under `modal serve`.
     """
     volume.reload()
-    persist_snapshot(Path(STORAGE), volume)
+    persist_snapshot(STORAGE, volume)
 
 
 @app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
@@ -541,9 +541,9 @@ def run_job(artifact_path: str) -> None:
     """
     with initialize_worker(artifact_path, volume) as worker:
         worker.confirm_lease("pre run")
-        artifact = Artifact.load(artifact_path, Path(STORAGE))
+        artifact = Artifact.load(artifact_path, STORAGE)
         job = artifact.job()
-        job.run(Path(STORAGE), worker)
+        job.run(STORAGE, worker)
         worker.confirm_lease("pre vol commit")
 
 
@@ -680,7 +680,7 @@ def resource_options(resources: Resources) -> dict:
     return options
 
 
-def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool, str]:
+def attempt_launch(artifact_path: str, root: Path = STORAGE) -> tuple[bool, str]:
     """Grant `artifact_path` to one call of `run_job`, or refuse and say why.
 
     What the web `/launch` route does, which cannot wait on the call -- a
@@ -731,7 +731,7 @@ def attempt_launch(artifact_path: str, root: Path = Path(STORAGE)) -> tuple[bool
 
     log_launcher.debug(f"launch {artifact_path}: no current call for artifact; preflight check from volume")
     with mount_lock:
-        if root == Path(STORAGE):
+        if root == STORAGE:
             volume.reload()
         try:
             artifact = Artifact.load(artifact_path, root)

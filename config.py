@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 APP_NAME = "launchpad"
 VOLUME_NAME = "trainvols"
-STORAGE = "/storage"  # the container mount name for the volume
+STORAGE = Path("/storage")  # where the volume is mounted in the container
 CONTAINER_LIFETIME = 3600  # seconds; no container lives beyond this
 # Where the launcher-side containers run, not the GPU worker, which goes
 # wherever its GPU is. Modal serves Dicts and Volumes from us-east, and a Dict

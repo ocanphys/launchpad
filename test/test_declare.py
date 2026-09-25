@@ -71,7 +71,7 @@ class DeclareTests(unittest.TestCase):
         # no commit, and a preview simply reports what is (not) there.
         from config import STORAGE
 
-        report = declare(ODYSSEY, Path(STORAGE))
+        report = declare(ODYSSEY, STORAGE)
         self.assertEqual(states(report), {"sources/odyssey": "new"})
 
     def test_preview_against_empty_storage_writes_nothing(self):

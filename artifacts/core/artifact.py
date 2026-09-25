@@ -64,14 +64,17 @@ def _digest(*parts: object) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:10]
 
 
-def _root(root: Path | str | None) -> Path:
+def _root(root: Path | None) -> Path:
     """The root a call reads, STORAGE when none is given.
 
-    Absolute always: `root / artifact_path` silently discards a relative root
-    rather than failing, so the mistake would surface as a missing file
-    somewhere else entirely.
+    A Path, and absolute. A string is rejected rather than converted, so one
+    type reaches every join, glob and relative_to downstream; a relative root
+    is discarded by `root / artifact_path` rather than failing, so the mistake
+    would surface as a missing file somewhere else entirely.
     """
-    resolved = Path(root) if root is not None else Path(STORAGE)
+    resolved = root if root is not None else STORAGE
+    if not isinstance(resolved, Path):
+        raise TypeError(f"root must be a Path, got {type(resolved).__name__} {resolved!r}")
     if not resolved.is_absolute():
         raise ValueError(f"root must be an absolute path, got {resolved}")
     return resolved
@@ -202,7 +205,7 @@ class Artifact(ABC):
 
     @staticmethod
     def load(
-        artifact_path: Path | str, root: Path | str | None = None, memo: dict[str, Artifact] | None = None
+        artifact_path: Path | str, root: Path | None = None, memo: dict[str, Artifact] | None = None
     ) -> Artifact:
         """The artifact declared at `root / artifact_path`, always unbound --
         even when every one of its files is there. Bind it to use them.
@@ -230,7 +233,7 @@ class Artifact(ABC):
             raise ValueError(f"{path} describes {artifact.artifact_path}, not {wanted}")
         return artifact
 
-    def status(self, root: Path | str | None = None) -> Footprint:
+    def status(self, root: Path | None = None) -> Footprint:
         """What `root` holds for this artifact, as files.
 
         A filesystem observation and nothing else: no manifest parsed, no
@@ -245,7 +248,7 @@ class Artifact(ABC):
             completion={path: path.is_file() for path in self.completion_paths(at)},
         )
 
-    def bind(self, root: Path | str | None = None) -> Self:
+    def bind(self, root: Path | None = None) -> Self:
         """This artifact with what its files hold loaded onto it, ready to be
         used rather than just named. The object bind was called on is left
         untouched, and never becomes usable because something else bound it.

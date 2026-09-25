@@ -236,13 +236,13 @@ def current_notebook() -> bytes | None:
         path = kernel.user_ns.get("__vsc_ipynb_file__") if kernel else None
     if path is None:
         return None
-    return (Path(STORAGE) / path).read_bytes()  # absolute `path` wins the join
+    return (STORAGE / path).read_bytes()  # absolute `path` wins the join
 
 
 def declare(
     artifact: Artifact,
     *,
-    root: Path | str = STORAGE,
+    root: Path = STORAGE,
     commit: bool = False,
     strict_commit: bool = False,
     verbose: bool = False,
@@ -267,8 +267,7 @@ def declare(
     kernel's own by default, or the bytes handed in as `notebook` by a
     caller that has them and no kernel (`local.declare_on_volume`).
     """
-    root = Path(root)
-    on_volume = root == Path(STORAGE) and not modal.is_local()
+    on_volume = root == STORAGE and not modal.is_local()
     graph = resolve(artifact)
     if commit and notebook is None:
         notebook = current_notebook()

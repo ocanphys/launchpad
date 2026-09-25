@@ -199,19 +199,26 @@ just the wrong file or a missing one. `root` is therefore a parameter on
 every internal call, and the `STORAGE` default is consumed only at the top:
 a notebook in the lab container, or the launcher.
 
-**`STORAGE` and every `root` are always absolute. `artifact_path` is always
-relative (§2).** Every join in this contract (`root / artifact_path`, §3,
-§6, §7) depends on that pairing -- pathlib's `/` silently discards the left
-side if the right side is itself absolute, so a relative root or an
-absolute `artifact_path` would not raise, it would resolve to the wrong
-file. Nothing else in this spec makes storage location a matter of the
-current working directory.
+**`STORAGE` and every `root` are always an absolute `Path`. `artifact_path`
+is always relative (§2).** Every join in this contract (`root /
+artifact_path`, §3, §6, §7) depends on that pairing -- pathlib's `/`
+silently discards the left side if the right side is itself absolute, so a
+relative root or an absolute `artifact_path` would not raise, it would
+resolve to the wrong file. Nothing else in this spec makes storage location
+a matter of the current working directory.
+
+A root given as a string raises rather than being converted. A converting
+root would leave two types in circulation for one thing, and the conversion
+sits at the bottom of the call chain while the mistake is made at the top:
+the caller that wrote `"/storage"` also wrote `root.rglob(...)` or `root /
+path` somewhere the seam never sees. One type reaches every join, glob and
+`relative_to` downstream.
 
 ### Status is a filesystem observation
 
-`artifact.status(root=None)` reads the given root, defaulting to `STORAGE`, and returns a small footprint: manifest presence, which owned outputs exist, and which required completion files exist. It does not parse manifests, compare definitions, inspect leases, import jobs, or load output contents.
+`artifact.status(root=None)` reads the given root, defaulting to `STORAGE`, and returns a small footprint: manifest presence, which owned outputs exist, and which required completion files exist. It does not parse manifests, compare definitions, inspect leases, import jobs, or load output contents. `footprint.complete` is the one question most callers have, and it reads the completion files, never the owned outputs: the two name the same files for every artifact that owns its bytes, and differ precisely where confusing them is silent.
 
-Ordinarily, `completion_paths(root)` is the set of owned output paths. A virtual artifact such as `MappedDataSet` owns no outputs and overrides this to name the files it consumes from direct dependencies. It has no producer; completion follows those files. An empty completion set is satisfied immediately, subject to the type's parameter validation.
+Ordinarily, `completion_paths(root)` is the set of owned output paths. A virtual artifact such as `MappedDataSet` owns no outputs and overrides this to name the files it consumes from direct dependencies. It has no producer; completion follows those files. An empty completion set is satisfied immediately, so a type whose completion is borrowed must reject, in its own parameter validation, a definition that borrows from nothing: such an artifact would read as `done` against an empty volume. `MappedDataSet` requires at least one source across its two splits for this reason, one empty split being ordinary.
 
 Only regular files at final paths count. Temporary files, logs, and nested artifact folders do not count. Declaration classifies a footprint as follows:
 
