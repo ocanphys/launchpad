@@ -34,3 +34,8 @@ def locate(path: str) -> Any:
             obj = getattr(obj, attr)
         return obj
     raise ImportError(f"could not resolve {path!r}")
+
+
+def dotted(cls: type) -> str:
+    """Returns the dotted path `locate` resolves back to `cls`."""
+    return f"{cls.__module__}.{cls.__qualname__}"

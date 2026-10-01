@@ -133,6 +133,13 @@ Artifact.load("tokenizers/bpe-3.0k-e4649eb4ff")   # what's declared there, unbou
 Tokenizer(vocab_size=3000, ...).bind()            # the built object, ready to use
 ```
 
+Parameters and dependencies can contain `Sweep((choice_a, choice_b))` from
+`artifacts.core.sweep`. Constructors transparently retain unresolved declarations;
+`resolve` and `lab.declare` expand independent choices recursively and deduplicate
+the resulting concrete dependency graph. `resolve` still returns `list[Artifact]`.
+See [Artifact sweeps](docs/sweeps.md) for examples using plain frozen parameter dataclasses with
+fields such as `lr: float`, given `lr=Sweep((1e-3, 1e-4))`.
+
 There is nothing to initialize and no environment detection. The mount
 exists only inside a container, so a laptop works against a folder of its
 own by passing `root=` -- the same mechanism a test uses with a `tmp_path`.

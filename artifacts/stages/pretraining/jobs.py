@@ -34,7 +34,7 @@ class PretrainJob(TrainingJob):
     def __init__(self, artifact: Pretraining):
         super().__init__(artifact)
         self.dataset = artifact.dataset
-        self.sequence_length = artifact.model_parameters.sequence_length
+        self.sequence_length = artifact.model.sequence_length
         self.loss_function = torch.nn.CrossEntropyLoss()
 
     def batch_loss(self, model: torch.nn.Module, data, step: int) -> torch.Tensor:
@@ -48,23 +48,62 @@ class PretrainJob(TrainingJob):
         )
         return self.loss_function(model(inputs).transpose(1, 2), targets)
 
+    def validation_loss(self, model: torch.nn.Module, data, worker: "Worker") -> tuple[torch.Tensor, torch.Tensor]:
+        """(mean, variance) of the losses of data's consecutive, non-overlapping
+        batches of batch_size sequences, as scalar tensors on device.
+
+        A split shorter than one batch is scored as one batch of the sequences
+        it holds, and the tail too short to fill a batch is not scored. The
+        variance is across the batches scored, so 0 for a single batch. While
+        it runs, worker.progress carries phase/done/total, which the UI shows
+        ahead of step."""
+        sequences = (len(data) - 1) // self.sequence_length
+        if sequences == 0:
+            raise ValueError(
+                f"the validation split holds {len(data)} tokens, fewer than one "
+                f"sequence of {self.sequence_length} and its next token"
+            )
+        size = min(self.training_parameters.batch_size, sequences) * self.sequence_length
+        total = (len(data) - 1) // size
+        worker.progress.update({"phase": "validation loss", "done": 0, "total": total})
+        losses = []
+        try:
+            for batch in range(total):
+                # one contiguous slice: TokenStream serves nothing else
+                tokens = torch.from_numpy(data[batch * size : (batch + 1) * size + 1].astype(np.int64)).to(self.device)
+                inputs = tokens[:-1].reshape(-1, self.sequence_length)
+                targets = tokens[1:].reshape(-1, self.sequence_length)
+                losses.append(self.loss_function(model(inputs).transpose(1, 2), targets))
+                worker.progress["done"] = batch + 1
+        finally:
+            for key in ("phase", "done", "total"):
+                del worker.progress[key]
+        losses = torch.stack(losses)
+        return losses.mean(), losses.var(correction=0)
+
     def evaluate(self, model, dataset, step, loss, learning_rate, grad_norm, worker: "Worker") -> float:
         """Returns the validation loss after `step` completed steps, having reported it
-        to worker.progress and the log along with the last training step's loss,
-        learning rate and gradient norm."""
+        and its variance across batches to worker.progress and the log along with the
+        last training step's loss, learning rate and gradient norm."""
         model.eval()
         with torch.no_grad():
-            val_loss = self.batch_loss(model, dataset.valid_tokens, step).item()
+            val_loss, val_loss_var = self.validation_loss(model, dataset.valid_tokens, worker)
         model.train()
         # the only .item() calls in the loop: each one waits for the GPU
-        metrics = {"loss": loss.item(), "val_loss": val_loss, "learning_rate": learning_rate, "grad_norm": grad_norm.item()}
+        metrics = {
+            "loss": loss.item(),
+            "val_loss": val_loss.item(),
+            "val_loss_var": val_loss_var.item(),
+            "learning_rate": learning_rate,
+            "grad_norm": grad_norm.item(),
+        }
         end_step = self.artifact.end_step
         worker.progress.update({"end_step": end_step, **metrics})
         worker.log.info(
             f"step {step}/{end_step} "
             + " ".join(f"{name}={value:.4g}" for name, value in metrics.items())
         )
-        return val_loss
+        return metrics["val_loss"]
 
     def run(self, root: Path, worker: "Worker") -> None:
         end_step = self.artifact.end_step

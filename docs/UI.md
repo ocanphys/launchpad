@@ -22,6 +22,8 @@ Files split by responsibility:
   row of `train.jsonl` as read off the volume; drag to zoom, click a legend
   entry to hide a line), and every call's log. It retains the
   reader's parameter and artifact log filter choices between redraws.
+- **[filter.js](../web/filter.js)** -- the filter bar over the table and
+  which rows pass it (see "Filtering" below).
 - **[logview.js](../web/logview.js)** -- shared timestamp formatting, level
   filters and safe log rows for artifact streams and the launcher panel.
 - **[el.js](../web/el.js)** -- the one DOM-building primitive everything
@@ -80,6 +82,35 @@ also reads on that call's artifact page. The noise around them -- uvicorn,
 grpc -- is the container's `ambient` source, under the same **ambient** box
 the artifact stream has: on by default, and off leaves the leasebook's own
 rows.
+
+## Filtering
+
+Above the table, the filter bar walks an artifact's manifest one level of its
+JSON at a time, read off the `/state` map with no request of its own. The top
+level is the manifest's `artifact`, picked by its class name (the entry's
+`type`), "every artifact" to begin with. Picking one keeps only its rows, all
+of them the same shape from there down, and shows its two filterable keys,
+both closed:
+
+- **parameters** -- the manifest's `parameters` as it nests, unchanged
+  (`training_parameters`, `model`, `model.d_model`, down to `batch_size`).
+- **dependencies** -- every dependency's path (`depends_on`) across the rows,
+  one set of choices, which is how a leg is filtered by the dataset it trains
+  on.
+
+Every key is a level, closed until clicked, indented under the one it opened
+from. One holding an object opens onto its keys; any other is a leaf, with
+the number of distinct values it holds beside it (more than one is a tuned
+parameter), and opens onto those values: a min/max range when all are
+numbers, blank for an open end, and one checkbox a line otherwise. Only an open level filters:
+closing one closes every level under it and drops their choices. Within a
+leaf any checked value matches, across leaves every leaf has to, and a row
+without the leaf never does.
+
+The choices live in the page's memory (a reload clears them) and survive
+polls: the bar is rebuilt only when the class, the open levels or the
+manifests under them change, never under an input being typed into.
+Unreadable manifests below the table ignore the filters.
 
 ## Fetching
 

@@ -7,6 +7,7 @@ alone.
 """
 
 import io
+import json
 import unittest
 from contextlib import redirect_stdout
 from dataclasses import dataclass
@@ -382,6 +383,14 @@ class StateTests(unittest.TestCase):
         entry = self.state()["sources/odyssey"]
         self.assertTrue(entry["active"])
         self.assertEqual(entry["live_progress"], None)
+
+    def test_a_non_finite_progress_value_reads_as_none_and_state_stays_json(self):
+        declare(ODYSSEY, self.root)
+        self.lease("sources/odyssey", "fc-1", beat_age=1)
+        self.beats["fc-1"]["progress"] = {"step": 3, "loss": float("nan"), "val_loss": float("inf"), "lr": 0.5}
+        entries = self.state()
+        self.assertEqual(entries["sources/odyssey"]["live_progress"], {"step": 3, "loss": None, "val_loss": None, "lr": 0.5})
+        json.dumps(entries, allow_nan=False)  # what Starlette's JSONResponse does
 
     def test_a_beat_whose_lease_was_released_is_no_call_at_all(self):
         declare(ODYSSEY, self.root)

@@ -1,120 +1,101 @@
 """Artifact <-> manifest dict <-> bytes on disk.
 
-The one place field annotations are interpreted, and the seam to replace if
-the codec ever changes: artifact.py calls `to_manifest`, `parameters`,
-`from_manifest` and `dependencies`, and nothing else in the repo reaches
-past those. Nothing here touches storage.
+A parameter is encoded and decoded by pydantic against its field's annotation
+(artifacts.core.schema), so its annotation alone says how to rebuild it; a
+dependency is a nested manifest naming its own class. `normalize` is the round
+trip every constructor runs, so a concrete artifact already equals what its
+manifest decodes to. Nothing here touches storage.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import fields, is_dataclass
+from contextlib import contextmanager
 from functools import cache
-from types import UnionType
-from typing import TYPE_CHECKING, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING
 
-from artifacts.core.locate import locate
+from pydantic import BaseModel, ConfigDict, ValidationError, create_model
+
+from artifacts.core.locate import dotted, locate
+from artifacts.core.schema import annotations, dependencies, is_artifact, polymorphic
 
 if TYPE_CHECKING:
     from artifacts.core.artifact import Artifact
 
-
-def _is_artifact(cls: object) -> bool:
-    """Whether `cls` is an Artifact subclass.
-
-    The only thing this module asks of artifact.py, imported at call time
-    because artifact.py imports this module.
-    """
-    from artifacts.core.artifact import Artifact
-
-    return isinstance(cls, type) and issubclass(cls, Artifact)
-
-
-def _holds_artifacts(annotation: object) -> bool:
-    """Whether `annotation` names artifacts, ignoring an optional None arm."""
-    if get_origin(annotation) in (UnionType, Union):
-        arms = [arm for arm in get_args(annotation) if arm is not type(None)]
-    else:
-        arms = [annotation]
-    return bool(arms) and all(_is_artifact(arm) for arm in arms)
+# strict: no str as int, bool as int or list as tuple, though an int still
+# becomes a float. revalidate_instances: a record is checked field by field,
+# never trusted for its type.
+_STRICT = ConfigDict(
+    strict=True, extra="forbid", allow_inf_nan=False, revalidate_instances="always"
+)
 
 
 @cache
-def dependencies(cls: type) -> dict[str, type | None]:
-    """Which of `cls`'s fields hold artifacts, and what holds them: `tuple`,
-    `frozenset`, or None for a single artifact. Sorted by field name.
+def _field(annotation: object) -> type[BaseModel]:
+    """Returns a model whose one field, `value`, is annotated `annotation`.
 
-    The container declares whether order identifies the artifact: a tuple is a
-    sequence, so its order and its repeats are part of what the artifact is; a
-    frozenset is a set, so neither is. Read off annotations, not values, so an
-    empty `sources=frozenset()` is still a dependency.
+    pydantic takes no config for a bare dataclass, while a model's config
+    reaches every record nested in its field.
     """
-    hints = get_type_hints(cls)
-    found: dict[str, type | None] = {}
-    for f in sorted(fields(cls), key=lambda f: f.name):
-        annotation = hints[f.name]
-        container = get_origin(annotation)
-        if container in (tuple, frozenset):
-            annotation = get_args(annotation)[0]
-        else:
-            container = None
-        if _holds_artifacts(annotation):
-            found[f.name] = container
-    return found
+    return create_model("Field", __config__=_STRICT, value=(annotation, ...))
 
 
-def _encode(value: object) -> object:
-    """A field value as JSON, artifacts nesting as whole manifests.
+@contextmanager
+def _named(path: str):
+    """Reraises a ValidationError as a TypeError, or a ValueError where a
+    validator refused the value, naming `path` and the field inside it."""
+    try:
+        yield
+    except ValidationError as error:
+        first = error.errors(include_url=False)[0]
+        inside = "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in first["loc"][1:])
+        kind = ValueError if first["type"] in ("value_error", "finite_number") else TypeError
+        raise kind(f"{path}{inside}: {first['msg']}") from error
 
-    A set becomes an array sorted by artifact path, since JSON has no set
-    type. That order is a rendering `_decode` cannot notice; it exists to keep
-    the file diffable. Every dict comes out sorted by key.
+
+def _encode(value: object, annotation: object) -> object:
+    """Returns `value`, annotated `annotation`, as JSON data with keys sorted.
+
+    Adding 0.0 turns -0.0 into 0.0: the two compare equal, so they must encode
+    equal.
     """
-    if _is_artifact(type(value)):
-        return to_manifest(value)
-    if isinstance(value, frozenset):
-        return [_encode(item) for item in sorted(value, key=lambda a: a.artifact_path.as_posix())]
-    if isinstance(value, tuple):
-        return [_encode(item) for item in value]
-    if is_dataclass(value):
-        return {
-            f.name: _encode(getattr(value, f.name))
-            for f in sorted(fields(value), key=lambda f: f.name)
-        }
-    if isinstance(value, dict):
-        return {key: _encode(item) for key, item in sorted(value.items())}
-    return value
+    text = _field(annotation).model_construct(value=value).model_dump_json()
+    return json.loads(
+        text,
+        parse_float=lambda s: float(s) + 0.0,
+        object_pairs_hook=lambda pairs: dict(sorted(pairs)),
+    )["value"]
 
 
-def _decode(annotation: object, value: object, memo: dict[str, Artifact] | None) -> object:
-    """One field value rebuilt from JSON, shaped by its declared type.
+def _decode(data: object, annotation: object, path: str) -> object:
+    """Returns the value JSON `data` encodes as `annotation`, validated
+    strictly; `path` names it in an error."""
+    with _named(path):
+        return _field(annotation).model_validate_json(json.dumps({"value": data})).value
 
-    JSON can't tell a tuple from a set from a list, or a nested config from
-    any other dict. A union of artifact types isn't ambiguous -- every
-    manifest names its own concrete type -- but any other multi-arm union is.
 
-    _decode(tuple[str, ...], ["<pad>", "<unk>"], None) -> ("<pad>", "<unk>")
+def normalize(value: object, annotation: object, path: str) -> object:
+    """Returns `value` as its manifest decodes it: ints in float fields as
+    floats, -0.0 as 0.0, records rebuilt through their constructors.
+
+    Raises unless `value` is exactly an `annotation`: a bool is not an int, a
+    list is not a tuple, and a subclass is not the record its field names.
     """
-    if get_origin(annotation) in (UnionType, Union):
-        if value is None:
-            return None
-        if _holds_artifacts(annotation):
-            return from_manifest(value, memo)
-        arms = [arm for arm in get_args(annotation) if arm is not type(None)]
-        if len(arms) != 1:
-            raise TypeError(f"can't decode into {annotation}: more than one arm")
-        return _decode(arms[0], value, memo)
-    if get_origin(annotation) is tuple:
-        return tuple(_decode(get_args(annotation)[0], item, memo) for item in value)
-    if get_origin(annotation) is frozenset:
-        return frozenset(_decode(get_args(annotation)[0], item, memo) for item in value)
-    if _is_artifact(annotation):
-        return from_manifest(value, memo)
-    if is_dataclass(annotation):
-        hints = get_type_hints(annotation)
-        return annotation(**{k: _decode(hints[k], v, memo) for k, v in value.items()})
-    return value
+    with _named(path):
+        validated = _field(annotation).model_validate({"value": value}).value
+    restored = _decode(_encode(validated, annotation), annotation, path)
+    if restored != value:
+        expected = getattr(annotation, "__qualname__", annotation)
+        raise TypeError(f"{path}: expected exactly {expected}, got {value!r}")
+    return restored
+
+
+def members(value: object, container: type | None) -> list[Artifact]:
+    """Returns a dependency field's artifacts in manifest order: a set's
+    sorted by artifact path, never by set iteration."""
+    if container is None:
+        return [] if value is None else [value]
+    return sorted(value, key=lambda a: a.artifact_path.as_posix()) if container is frozenset else list(value)
 
 
 def parameters(artifact: Artifact) -> dict:
@@ -125,12 +106,19 @@ def parameters(artifact: Artifact) -> dict:
     the same split regardless of what a field happens to hold. `commit` and
     `allocated_resources` are neither, being about running and not state.
     """
-    dep_fields = dependencies(type(artifact))
-    return {
-        f.name: _encode(getattr(artifact, f.name))
-        for f in sorted(fields(artifact), key=lambda f: f.name)
-        if f.name not in dep_fields and f.name not in ("commit", "allocated_resources")
-    }
+    cls = type(artifact)
+    deps, tagged = dependencies(cls), polymorphic(cls)
+    encoded = {}
+    for name, annotation in sorted(annotations(cls).items()):
+        if name in deps or name in ("commit", "allocated_resources"):
+            continue
+        value = getattr(artifact, name)
+        if name in tagged and value is not None:
+            # "class" is a Python keyword, so no field can be named it
+            encoded[name] = dict(sorted({"class": dotted(type(value)), **_encode(value, type(value))}.items()))
+        else:
+            encoded[name] = _encode(value, annotation)
+    return encoded
 
 
 def to_manifest(artifact: Artifact) -> dict:
@@ -140,17 +128,28 @@ def to_manifest(artifact: Artifact) -> dict:
 
     Key order is fixed -- the five here as written, everything below sorted
     -- so the file stays a pure function of the artifact even when a
-    dataclass's fields are reordered.
+    dataclass's fields are reordered. A set of artifacts is an array in
+    `members` order, since JSON has no set type.
     """
+    from artifacts.core.artifact import Artifact
+
+    Artifact.require_concrete(artifact)
     cls = type(artifact)
+    deps = {}
+    for name, container in dependencies(cls).items():
+        value = getattr(artifact, name)
+        if container is None:
+            deps[name] = None if value is None else to_manifest(value)
+        else:
+            deps[name] = [to_manifest(item) for item in members(value, container)]
     return {
-        "artifact": f"{cls.__module__}.{cls.__qualname__}",
+        "artifact": dotted(cls),
         "commit": artifact.commit,
-        "allocated_resources": _encode(artifact.allocated_resources),
+        "allocated_resources": _encode(
+            artifact.allocated_resources, annotations(cls)["allocated_resources"]
+        ),
         "parameters": parameters(artifact),
-        "dependencies": {
-            name: _encode(getattr(artifact, name)) for name in dependencies(cls)
-        },
+        "dependencies": deps,
     }
 
 
@@ -160,25 +159,39 @@ def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifa
     Each node keeps the commit recorded for it, so a subtree produced by
     older code stays visibly older.
 
-    `memo` maps a manifest's JSON to the artifact it decoded to. One dict
-    across many calls hands back the same instance for a subtree they share
-    (the dataset under every leg of a run, each leg under the next) instead
-    of decoding it again; the instances are frozen, so sharing them changes
-    nothing but the work.
+    `memo`, one dict across many calls, hands back the same instance for a
+    subtree they share (the dataset under every leg of a run, each leg under
+    the next) instead of decoding it again; the instances are frozen, so
+    sharing them changes nothing but the work.
     """
-    key = json.dumps(data, sort_keys=True) if memo is not None else None
-    if key is not None and key in memo:
-        return memo[key]
     cls = locate(data["artifact"])
-    hints = get_type_hints(cls)
-    plugged = {
-        "commit": data["commit"],
-        "allocated_resources": data["allocated_resources"],
-        **data["parameters"],
-        **data["dependencies"],
+    if not is_artifact(cls):
+        raise TypeError(f"manifest target must be an Artifact, got {cls}")
+    hints, deps, tagged = annotations(cls), dependencies(cls), polymorphic(cls)
+    held = {
+        name: [from_manifest(item, memo) for item in value] if deps[name]
+        else None if value is None else from_manifest(value, memo)
+        for name, value in data["dependencies"].items()
     }
-    artifact = cls(**{name: _decode(hints[name], value, memo) for name, value in plugged.items()})
-    if key is not None:
+    own = {"commit": data["commit"], "allocated_resources": data["allocated_resources"], **data["parameters"]}
+    if memo is not None:
+        # a node's own fields and the instances its dependencies decoded to,
+        # which the memo already keys by their own subtrees
+        ids = {name: list(map(id, v)) if isinstance(v, list) else id(v) for name, v in held.items()}
+        key = json.dumps([data["artifact"], own, ids], sort_keys=True)
+        if key in memo:
+            return memo[key]
+    inputs = {}
+    for name, value in own.items():
+        annotation = hints[name]
+        if name in tagged and value is not None:
+            value = dict(value)
+            annotation = locate(value.pop("class"))
+        inputs[name] = _decode(value, annotation, f"{cls.__qualname__}.{name}")
+    for name, value in held.items():
+        inputs[name] = deps[name](value) if deps[name] else value
+    artifact = cls(**inputs)
+    if memo is not None:
         memo[key] = artifact
     return artifact
 

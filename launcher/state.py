@@ -6,6 +6,7 @@ function of a root and the Dicts, so a test points it at a `tmp_path` and a
 container points it at the mount.
 """
 
+import math
 import threading
 import time
 from pathlib import Path
@@ -92,11 +93,17 @@ def liveness(entry: dict, grant: dict | None, beat: dict | None, now: float) -> 
     has this answer without a reload.
     """
     active = is_active(grant, beat, now)
+    progress = beat.get("progress") if beat and active else None
     return {
         "call_id": grant["call_id"] if grant else None,
         "active": active,
         "last_heartbeat": beat["last_beat_ts"] if beat else None,
-        "live_progress": beat.get("progress") if beat and active else None,
+        # JSON has no NaN or infinity, and one in a response fails the whole
+        # of /state: a diverged loss reads as no value
+        "live_progress": progress and {
+            key: None if isinstance(value, float) and not math.isfinite(value) else value
+            for key, value in progress.items()
+        },
         "verdict": (
             "done" if entry["done"]
             else "running" if active

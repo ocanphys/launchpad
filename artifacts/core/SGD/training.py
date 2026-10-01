@@ -1,26 +1,44 @@
 """The training leg (Training) and the parameters it is declared with, shared
 by every stage (artifacts/stages/*) that trains a model with an SGD-variant
-optimizer. The model is a parameter, not a family: a leg names a package under
-models/ by dotted path and holds that package's ModelParameters, so no stage
-is tied to an architecture. The loop that runs a leg is job.py's TrainingJob;
-this module stays free of torch so declaring an artifact never imports it.
+optimizer. The model is a parameter, not a family: a leg holds a Model from
+a package under models/, such as models.transformer.Transformer, so no stage is
+tied to an architecture. The loop that runs a leg is job.py's TrainingJob; this module
+stays free of torch so declaring an artifact never imports it.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Literal
+from typing import ClassVar, Literal
 
 from artifacts.core.artifact import Artifact
-from artifacts.core.locate import locate
+from artifacts.core.sweep import Record
+
+
+@dataclass(frozen=True)
+class Model(Record):
+    """The base of every architecture under models/: a subclass's fields are
+    what a leg declares, and `build` makes the network they describe.
+
+    A field annotated `Model` holds any subclass, and its manifest names that
+    subclass under "class" (`polymorphic`).
+    """
+
+    polymorphic: ClassVar[bool] = True
+
+    device: str = field(default="cuda", kw_only=True)
+
+    def build(self):
+        """Returns a freshly initialized torch module on this model's device."""
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
 class OptimizerParameters:
     lr: float  # fallback: what the optimizer runs with when no lr_schedule overrides it
-    betas: tuple[float]
+    betas: tuple[float, ...]
     weight_decay: float
     eps: float
 
@@ -51,16 +69,18 @@ class TrainingParameters:
 
     total_steps: int
     batch_size: int
-    max_norm: int
+    max_norm: float
     lr_schedule: LRSchedule
     optimizer: str  # a torch.optim.Optimizer subclass
     optimizer_parameters: OptimizerParameters
-    lr_schedule_fn: str = "artifacts.core.SGD.lr_schedule.lr_cosine_schedule"
+    lr_schedule_fn: str = (
+        "artifacts.core.SGD.lr_schedule.lr_cosine_schedule"
+    )
     seed: int = 0
 
 
 @dataclass(frozen=True)
-class LoopConfig:
+class LoopConfig(Record):
     """Operational settings for validation, failsafe checkpoints, and health checks.
 
     Every ``checkpoint_every`` steps, the training job writes a failsafe model
@@ -76,10 +96,6 @@ class LoopConfig:
     def __post_init__(self) -> None:
         if self.checkpoint_every <= 0:
             raise ValueError("checkpoint_every must be positive")
-        if self.optimizer_checkpoint_policy not in ("all", "latest"):
-            raise ValueError(
-                "optimizer_checkpoint_policy must be 'all' or 'latest'"
-            )
 
 
 # kw_only here and on every subclass, so their fields never have to be
@@ -88,47 +104,34 @@ class LoopConfig:
 class Training(Artifact):
     """One training leg from ``start_step`` to ``end_step``.
 
-    ``model`` is the dotted path of a package under models/ (e.g.
-    ``"models.transformer"``) exporting ``ModelParameters`` and
-    ``build(parameters)``; ``model_parameters`` is that package's
-    ``ModelParameters``. ``training_parameters.total_steps`` is the number of
-    steps this leg runs. A leg with a starting checkpoint begins at that
-    checkpoint's endpoint and inherits its ``model`` and ``model_parameters``;
-    a leg without one has to state them. A subclass declares its ``producer``,
-    what it trains on, and its ``uid`` and ``artifact_path``.
+    ``model`` is the architecture this leg trains, an instance of a ``Model``
+    subclass such as ``models.transformer.Transformer``.
+    ``training_parameters.total_steps`` is the number of steps this leg runs. A
+    leg with a starting checkpoint begins at that checkpoint's endpoint and
+    inherits its ``model``; a leg without one has to state it. A subclass
+    declares its ``producer``, what it trains on, and its ``uid`` and
+    ``artifact_path``.
     """
 
     run_id: str
     training_parameters: TrainingParameters
     loop_config: LoopConfig
-    model: str | None = None
-    model_parameters: Any | None = None
+    model: Model | None = None
     starting_checkpoint: Training | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.training_parameters.total_steps <= 0:
             raise ValueError("training_parameters.total_steps must be positive")
-        # the codec cannot type this field (its type depends on `model`), so a
-        # manifest hands it back as a dict; rebuild the package's dataclass
-        if isinstance(self.model_parameters, dict):
-            object.__setattr__(
-                self,
-                "model_parameters",
-                locate(self.model).ModelParameters(**self.model_parameters),
-            )
         if self.starting_checkpoint is None:
-            if self.model is None or self.model_parameters is None:
-                raise ValueError(
-                    "model and model_parameters are required without a starting_checkpoint"
-                )
+            if self.model is None:
+                raise ValueError("model is required without a starting_checkpoint")
             return
-        for name in ("model", "model_parameters"):
-            inherited = getattr(self.starting_checkpoint, name)
-            if getattr(self, name) is None:
-                object.__setattr__(self, name, inherited)
-            elif getattr(self, name) != inherited:
-                raise ValueError(f"{name} must match starting_checkpoint.{name}")
+        inherited = self.starting_checkpoint.model
+        if self.model is None:
+            object.__setattr__(self, "model", inherited)
+        elif self.model != inherited:
+            raise ValueError("model must match starting_checkpoint.model")
 
     @cached_property
     def start_step(self) -> int:

@@ -1,7 +1,8 @@
 // app.js -- the runtime: app state, fetching, launching, and routing between
 // the artifact table and one artifact's own page. This is the only file that
-// talks to the network or holds mutable state. Rendering is delegated to
-// render.js, artifactview.js and logview.js; DOM building to el.js.
+// talks to the network. Rendering is delegated to
+// render.js, artifactview.js and logview.js, narrowing the table to
+// filter.js; DOM building to el.js.
 //
 // The page mirrors the server and decides nothing. `/state` is the map the
 // leasebook container holds in memory (launcher/leasebook.py's `latest`), which it
@@ -12,6 +13,7 @@
 import { artifactRow, problemRow } from "./render.js";
 import { renderArtifactPending, renderArtifactView } from "./artifactview.js";
 import { logStream, union } from "./logview.js";
+import { filterBar, visible } from "./filter.js";
 
 // --- config -----------------------------------------------------------------
 
@@ -26,6 +28,8 @@ const titleEl = document.getElementById("title");
 const refreshEl = document.getElementById("refresh");
 const metaEl = document.getElementById("meta");
 const dashboardEl = document.getElementById("dashboard");
+const filtersEl = document.getElementById("filters");
+const shownEl = document.getElementById("shown");
 const rowsEl = document.getElementById("rows");
 const emptyEl = document.getElementById("empty");
 const problemsEl = document.getElementById("problems");
@@ -105,31 +109,37 @@ function stamp(states) {
   metaEl.textContent = n + (n === 1 ? " artifact" : " artifacts") + " · fetched " + new Date().toLocaleTimeString();
 }
 
-// Every artifact on the volume, one row each, by path. Full rebuild each
-// time is correct and cheap at this scale; don't add reconciliation until
-// something focusable needs to survive a redraw. A poll that brings back
-// the same map and finds the same pending marks returns without touching
-// the DOM at all.
+// Every artifact on the volume that passes the filter bar, one row each, by
+// path. Full rebuild of the rows each time is correct and cheap at this
+// scale; the bar is the one thing focusable, and filterBar hands back the
+// same node until its fields change, so it is mounted only when it is a new
+// one. A poll that brings back the same map and finds the same pending marks
+// and the same rows passing returns without touching the rows at all.
 function draw(states) {
-  const key = JSON.stringify([states, [...pending]]);
+  const bar = filterBar(states, redraw);
+  if (filtersEl.firstChild !== bar) filtersEl.replaceChildren(bar);
+  const all = Object.keys(states).sort();
+  const paths = visible(states);
+  shownEl.textContent = paths.length < all.length ? `${paths.length} of ${all.length} shown` : "";
+
+  const key = JSON.stringify([paths, states, [...pending]]);
   if (key === drawn) return;
   drawn = key;
-  const paths = Object.keys(states).sort();
   rowsEl.replaceChildren(...paths.map((path) => artifactRow(path, states[path], ctx)));
-  emptyEl.textContent = "nothing declared on the volume yet.";
+  emptyEl.textContent = all.length ? "nothing matches these filters." : "nothing declared on the volume yet.";
   emptyEl.hidden = paths.length > 0;
 
-  // Manifests state() could not read. Only touches #problemRows' children
-  // and the count text -- never recreates <details id="problems"> itself,
-  // so a redraw can't clobber whether the user has it open.
-  const problems = paths.filter((path) => states[path].error);
+  // Manifests state() could not read, whatever the filters say. Only touches
+  // #problemRows' children and the count text -- never recreates <details
+  // id="problems"> itself, so a redraw can't clobber whether the user has it open.
+  const problems = all.filter((path) => states[path].error);
   problemRowsEl.replaceChildren(...problems.map((path) => problemRow(path, states[path])));
   problemCountEl.textContent = problems.length;
   problemsEl.hidden = problems.length === 0;
 }
 
 // Redraw from the last good payload (used after a local state change --
-// a request made or refused; see act()).
+// a request made or refused, see act(); a filter changed, see filter.js).
 function redraw() {
   if (lastPayload) draw(lastPayload);
 }

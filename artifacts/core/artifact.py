@@ -10,8 +10,8 @@ An artifact has three lives, and this class carries all three:
     bound     artifact.bind(root)      the stored declaration, files loaded
 
 `load`, `status` and `bind` take a root, defaulting to STORAGE. That default
-is for the top of a notebook only: anything already holding a root -- a job, a
-`_load` hook -- passes it on, or it silently reads the volume while everything
+is for the top of a notebook only. Anything already holding a root (a job, a
+`_load` hook) passes it on, or it silently reads the volume while everything
 around it reads a test folder.
 """
 
@@ -22,13 +22,15 @@ import json
 import os
 import sys
 from abc import ABC, abstractmethod
+from collections import Counter
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
-from artifacts.core import manifest
+from artifacts.core import manifest, schema
 from artifacts.core.locate import locate
+from artifacts.core.sweep import DeclarationMeta, UnresolvedDeclarationError
 
 if TYPE_CHECKING:
     # Type-only: job.py imports Artifact from here, so a real import would be
@@ -37,7 +39,7 @@ if TYPE_CHECKING:
 
 sys.path.append(
     str(Path(__file__).resolve().parents[2])
-)  # config.py is at the repo root -- artifacts/core/artifact.py is two levels down
+)  # config.py is at the repo root; artifacts/core/artifact.py is two levels down
 from config import LAB_COMMIT_ENV, STORAGE, get_git_commit
 
 MANIFEST = "manifest.json"
@@ -45,18 +47,22 @@ MANIFEST = "manifest.json"
 
 @cache
 def _head() -> str:
-    """The commit every artifact built in this process is stamped with.
+    """Returns the commit stamped on every artifact built in this process.
 
-    Read once, so a session can't stamp two commits onto one tree -- restart
-    the kernel to pick up new work. The lab container has no git binary and no
-    .git; main.py bakes the commit in under LAB_COMMIT_ENV instead.
+    Cached, so one session cannot stamp two commits onto one tree; restart the
+    kernel to pick up new work. The lab container has no git binary and no
+    .git, so there the commit comes from LAB_COMMIT_ENV, which main.py bakes in.
     """
     override = os.environ.get(LAB_COMMIT_ENV)
     return override if override else get_git_commit()
 
 
 def _digest(*parts: object) -> str:
-    """Short stable id for a parameter set.
+    """Returns a 10-character hash of `parts`, which subclasses build their
+    `uid` and `artifact_path` from.
+
+    Hashes key-sorted JSON, so equal parameters give an equal id in every
+    process. Every part must be JSON-serializable.
 
     _digest(("<pad>",), ["a", "b"]) -> "9f2b1c40a7"
     """
@@ -65,12 +71,12 @@ def _digest(*parts: object) -> str:
 
 
 def _root(root: Path | None) -> Path:
-    """The root a call reads, STORAGE when none is given.
+    """Returns `root`, or STORAGE when it is None, checked to be an absolute Path.
 
-    A Path, and absolute. A string is rejected rather than converted, so one
-    type reaches every join, glob and relative_to downstream; a relative root
-    is discarded by `root / artifact_path` rather than failing, so the mistake
-    would surface as a missing file somewhere else entirely.
+    Every public entry point goes through this so a bad root fails at the
+    call. A string is rejected rather than converted, so one type reaches every
+    join, glob and relative_to downstream; a relative root would be discarded
+    by `root / artifact_path` and surface as a missing file somewhere else.
     """
     resolved = root if root is not None else STORAGE
     if not isinstance(resolved, Path):
@@ -109,41 +115,65 @@ class Footprint:
 
     @property
     def complete(self) -> bool:
-        """Whether every file that makes this artifact done is there.
+        """Returns whether every file that makes this artifact done is there.
 
-        Ask this, not `all(outputs.values())`: the two name the same files for
-        everything that owns its bytes, and differ for exactly the artifacts
-        where getting it wrong is silent.
+        Ask this, not `all(outputs.values())`: the two agree for everything
+        that owns its bytes and differ exactly for virtual artifacts, where
+        asking the wrong one is silently wrong.
         """
         return all(self.completion.values())
 
 
 # frozen: identity is its fields, so it must be hashable/immutable
 @dataclass(frozen=True)
-class Artifact(ABC):
+class Artifact(ABC, metaclass=DeclarationMeta):
+    @staticmethod
+    def require_concrete(value: object) -> Artifact:
+        """Returns `value` if it is a constructed Artifact, and raises
+        UnresolvedDeclarationError for anything else, typically an ArtifactSweep.
+
+        Runtime boundaries (resolve, the manifest codec) call this instead of
+        validating fields again: DeclarationMeta checks every field before it
+        builds an Artifact, so the type alone proves the value is concrete.
+        """
+        if not isinstance(value, Artifact):
+            raise UnresolvedDeclarationError(
+                "expected a concrete Artifact; call expand first"
+            )
+        return value
+
     # Neither of these says which artifact this is: compare=False keeps both
     # out of ==/hash, so an artifact rebuilt from an old manifest is still the
-    # same artifact. kw_only, or a defaulted base field would force defaults
-    # on every subclass.
-    commit: str = field(default_factory=_head, compare=False, repr=False, kw_only=True)
+    # same artifact, and sweeping either would not make distinct jobs. kw_only,
+    # or a defaulted base field would force defaults on every subclass.
+    commit: str = field(
+        default_factory=_head, compare=False, repr=False, kw_only=True,
+        metadata={"sweepable": False},
+    )
     allocated_resources: Resources = field(
-        default_factory=Resources, compare=False, repr=False, kw_only=True
+        default_factory=Resources, compare=False, repr=False, kw_only=True,
+        metadata={"sweepable": False},
     )
 
-    # The dotted path of the Job class that produces this artifact --
-    # "artifacts.sources.jobs.SourceURLJob" -- or None for an artifact nothing
+    # The dotted path of the Job class that produces this artifact
+    # ("artifacts.sources.jobs.SourceURLJob"), or None for an artifact nothing
     # produces, whose completion is its dependencies' files.
     #
-    # A string, and never anything more, is the point: an artifact knowing its
-    # producer must not mean an artifact importing it, since a family's jobs.py
-    # pulls in torch or numpy and resolving, inspecting or drawing a graph must
-    # stay free of that. `job()` is the one place the string becomes a class.
+    # A string, never the class: an artifact knowing its producer must not
+    # mean importing it, since a family's jobs.py pulls in torch or numpy and
+    # resolving, inspecting or drawing a graph must stay free of that. `job()`
+    # is the one place the string becomes a class.
     producer: ClassVar[str | None]
 
     def __init_subclass__(cls, **kwargs):
+        """Rejects a subclass that sets `producer` to anything but a string or None.
+
+        Catches a wrong value when the class is defined, not when its job is
+        first located. It cannot catch a missing one: bases like sources.Source
+        leave `producer` for their subclasses to set, so __post_init__ checks
+        presence once a class is actually instantiated.
+        """
         super().__init_subclass__(**kwargs)
-        # a base other classes fill in (sources.Source) sets nothing; a class
-        # that does set it must set a string or None
         producer = cls.__dict__.get("producer")
         if producer is not None and not isinstance(producer, str):
             raise TypeError(
@@ -153,25 +183,24 @@ class Artifact(ABC):
             )
 
     def __post_init__(self) -> None:
-        """Accepts any iterable for a set-valued dependency, and rejects two
-        definitions landing on one path inside one.
+        """Checks the class sets `producer`, and rejects two definitions at one
+        path inside a set-valued dependency.
 
-        A set collapses members that agree, so what survives a collision is
-        members that disagree while sharing a folder. A subclass with its own
-        __post_init__ must call super().
+        Instantiation is the first point where a missing `producer` is an
+        error. A frozenset merges equal members, so two that survive with one
+        artifact_path are conflicting definitions of one folder. A subclass
+        with its own __post_init__ must call super(), or all of this is skipped.
         """
         if not hasattr(type(self), "producer"):
             raise TypeError(
                 f"{type(self).__name__} must set `producer` to the dotted path of "
                 f"the Job class that produces it, or to None if nothing does"
             )
-        for name, container in manifest.dependencies(type(self)).items():
+        for name, container in schema.dependencies(type(self)).items():
             if container is not frozenset:
                 continue
-            members = frozenset(getattr(self, name))
-            object.__setattr__(self, name, members)
-            paths = [item.artifact_path for item in members]
-            repeated = sorted({str(p) for p in paths if paths.count(p) > 1})
+            paths = Counter(item.artifact_path for item in getattr(self, name))
+            repeated = sorted(str(p) for p, n in paths.items() if n > 1)
             if repeated:
                 raise ValueError(
                     f"{type(self).__name__}.{name} holds more than one definition "
@@ -179,37 +208,43 @@ class Artifact(ABC):
                 )
 
     def deps(self) -> list[Artifact]:
-        """The artifacts this one is built from, one level deep, fields by
-        name and sets by artifact path."""
-        found: list[Artifact] = []
-        for name, container in manifest.dependencies(type(self)).items():
-            value = getattr(self, name)
-            if container is None:
-                if value is not None:
-                    found.append(value)
-            elif container is frozenset:
-                found.extend(sorted(value, key=lambda a: a.artifact_path.as_posix()))
-            else:
-                found.extend(value)
-        return found
+        """Returns the artifacts this one is built from, one level deep:
+        dependency fields in name order, set members sorted by artifact path.
+
+        resolve walks this to build the graph, so the order must not depend
+        on set iteration; sorting is what makes it deterministic.
+        """
+        return [
+            dep
+            for name, container in schema.dependencies(type(self)).items()
+            for dep in manifest.members(getattr(self, name), container)
+        ]
 
     def to_manifest(self) -> dict:
-        """This artifact as a dictionary, enough to rebuild it from nothing
-        else -- see artifacts.core.manifest."""
+        """Returns this artifact as a manifest dict: type, commit, resources,
+        own parameters, and a nested manifest per dependency.
+
+        It is what manifest.json at artifact_path holds, and from_manifest
+        rebuilds the artifact from it alone (see artifacts.core.manifest).
+        """
         return manifest.to_manifest(self)
 
     def parameters(self) -> dict:
-        """This artifact's own fields as JSON: the `"parameters"` half of
-        `to_manifest`, without the dependencies' manifests."""
+        """Returns this artifact's own fields as JSON: the `"parameters"` half
+        of `to_manifest`, without the dependencies' manifests.
+
+        For display (launcher/state.py), where every dependency's nested
+        manifest would bury the fields that tell one artifact from another.
+        """
         return manifest.parameters(self)
 
     @staticmethod
     def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifact:
-        """The artifact a manifest describes and the tree under it, unbound.
+        """Returns the artifact a manifest describes and the tree under it, unbound.
 
-        `memo`, one dict across many calls, hands back the same instance for a
-        manifest seen before instead of decoding it again (see
-        artifacts.core.manifest.from_manifest).
+        `memo`, one dict shared across calls, hands back the same instance for
+        a manifest decoded before, so a subtree many artifacts share is decoded
+        once (see artifacts.core.manifest.from_manifest).
         """
         return manifest.from_manifest(data, memo)
 
@@ -217,13 +252,13 @@ class Artifact(ABC):
     def load(
         artifact_path: Path | str, root: Path | None = None, memo: dict[str, Artifact] | None = None
     ) -> Artifact:
-        """The artifact declared at `root / artifact_path`, always unbound --
-        even when every one of its files is there. Bind it to use them.
+        """Returns the artifact declared at `root / artifact_path`, always
+        unbound, even when every one of its files is there; bind it to use them.
 
-        Raises unless the manifest rebuilds an artifact that belongs at the
-        folder it was read from: a path is a pure function of parameters, so a
-        manifest disagreeing with its own folder was copied or renamed, and
-        nothing beside it is about what it claims. `memo` is `from_manifest`'s.
+        Raises unless the manifest rebuilds an artifact whose artifact_path is
+        the folder it was read from. A path is a pure function of parameters,
+        so a disagreeing manifest was copied or renamed, and nothing beside it
+        is what it claims. `memo` is `from_manifest`'s.
         """
         wanted = Path(artifact_path)
         if wanted.is_absolute() or ".." in wanted.parts:
@@ -244,12 +279,12 @@ class Artifact(ABC):
         return artifact
 
     def status(self, root: Path | None = None) -> Footprint:
-        """What `root` holds for this artifact, as files.
+        """Returns a Footprint of what `root` holds for this artifact, as files.
 
         A filesystem observation and nothing else: no manifest parsed, no
-        definition compared, no lease read. What a footprint means -- declared,
-        partial, done, conflicting -- is declaration's to say, against a
-        request this has no notion of.
+        definition compared, no lease read. What a footprint means (declared,
+        partial, done, conflicting) is lab.declare's to say, against a request
+        this method never sees.
         """
         at = _root(root)
         return Footprint(
@@ -259,15 +294,13 @@ class Artifact(ABC):
         )
 
     def bind(self, root: Path | None = None) -> Self:
-        """This artifact with what its files hold loaded onto it, ready to be
-        used rather than just named. The object bind was called on is left
-        untouched, and never becomes usable because something else bound it.
+        """Returns this artifact rebuilt from the manifest stored at `root`,
+        with its files loaded onto it, ready to be used rather than just named.
 
-        What comes back is built from the declaration stored at `root`, so it
-        carries that declaration's commit and resources: the manifest at an
-        artifact's own path is the authority on what lives there, and a
-        definition disagreeing with it raises rather than being handed
-        somebody else's outputs.
+        The stored manifest is the authority on what lives at a path: a
+        definition disagreeing with it raises rather than being handed someone
+        else's outputs, and the result carries the stored commit and resources.
+        The object bind is called on is never modified.
         """
         at = _root(root)
         stored = Artifact.load(self.artifact_path, at)
@@ -284,37 +317,54 @@ class Artifact(ABC):
         return stored
 
     def _load(self, root: Path) -> None:
-        """Subclass hook: populate whatever in-memory state this artifact's own
-        methods need, once bind has confirmed the files are there. Most
-        artifacts have nothing to load."""
+        """Populates the in-memory state this artifact's own methods need from
+        its files; a subclass hook that does nothing by default.
+
+        Only bind calls it, after confirming every completion file is there,
+        so an override may assume its files exist.
+        """
 
     @property
     @abstractmethod
     def uid(self) -> str:
-        """Readable id derived from this artifact's own parameters."""
+        """Returns a readable id derived from this artifact's own parameters,
+        for naming it to people: logs, errors, the dashboard."""
 
     @property
     @abstractmethod
     def artifact_path(self) -> Path:
-        """The folder this artifact owns, relative to root."""
+        """Returns the folder this artifact owns, relative to root.
+
+        Must be a pure function of the identifying fields: equal artifacts
+        share a folder, and load rejects a manifest found at any other path.
+        """
 
     @property
     @abstractmethod
     def files(self) -> dict[str, str]:
-        """Filenames inside artifact_path, keyed by a short description of
-        what each file is (e.g. "weights", "config"). Names, not paths."""
+        """Returns the filenames inside artifact_path, keyed by a short
+        description of each (e.g. "weights", "config").
+
+        Names, not paths, so paths() can join them to any root: the volume or
+        a test folder.
+        """
 
     def paths(self, root: Path) -> dict[str, Path]:
+        """Returns each of `files` as a full path under `root`, keyed the same way.
+
+        These are where this artifact's job may write; completion_paths, not
+        this, says when it is done.
+        """
         return {
             desc: root / self.artifact_path / name for desc, name in self.files.items()
         }
 
     def job(self) -> Job:
-        """The Job that produces this artifact, imported from `producer`.
+        """Returns the Job that produces this artifact, imported from `producer`.
 
-        The one place that dotted path becomes a class, and main.run_job --
-        inside the container about to run it -- is its only caller, so nothing
-        that resolves, inspects or draws imports a family's jobs.py.
+        The one place that dotted path becomes a class. Its only caller is
+        main.run_job, inside the container about to run it, so nothing that
+        resolves, inspects or draws a graph imports a family's jobs.py.
         """
         if self.producer is None:
             raise ValueError(
@@ -324,23 +374,23 @@ class Artifact(ABC):
         return locate(self.producer)(self)
 
     def completion_paths(self, root: Path) -> list[Path]:
-        """The paths whose presence means this artifact is done.
+        """Returns the paths whose presence means this artifact is done.
 
         Its own files, for almost everything. A virtual artifact owning no
-        bytes -- mappeddataset.MappedDataSet -- points at its dependencies'
-        files instead. Separate from `paths()`, which stays the question of
-        where this artifact may write.
+        bytes (mappeddataset.MappedDataSet) overrides this to point at its
+        dependencies' files, which is why it is separate from `paths()`, the
+        question of where this artifact may write.
         """
         return list(self.paths(root).values())
 
     def durable_progress(self, root: Path) -> dict | None:
-        """How far along the volume says this artifact is: how many of the
-        paths that make it done are there. None when there is nothing to count.
+        """Returns how far along the volume says this artifact is, as how many
+        of its completion paths exist, or None when there is nothing to count.
 
-        The dashboard shows this when no call is running and the call's own
+        The dashboard shows this when no call is running, and the call's own
         self-report (system.runtime.Worker.progress) when one is. A subclass
-        whose job writes intermediate state overrides it -- SGD.Training
-        reports its furthest checkpoint, which says more than "0 of 1 files".
+        whose job writes intermediate state overrides it: SGD.Training reports
+        its furthest checkpoint, which says more than "0 of 1 files".
         """
         completion = self.status(root).completion
         if not completion:

@@ -25,14 +25,16 @@ from artifacts.dataset.jobs import DataSetJob
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
 from artifacts.stages.pretraining.jobs import PretrainJob
+from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
-from models.transformer import ModelParameters
+from models.mamba import Mamba
+from models.transformer import Transformer
 from system.lease_protocol import LeaseLost
 from system.runtime import Worker
 
 SOURCE = SourceURL(name="first", url="https://example.org/first.txt")
 TOKENIZER = Tokenizer(vocab_size=64, special_tokens=("<pad>",), sources=(SOURCE,))
-MODEL = ModelParameters(
+MODEL = Transformer(
     vocab_size=64, sequence_length=8, num_layers=1, d_model=16, d_ff=32,
     num_heads=2, rope_theta=10000, device="cpu",
 )
@@ -78,8 +80,8 @@ def build_dataset(root: Path) -> DataSet:
 
 def leg(dataset: DataSet, starting_checkpoint: Pretraining | None = None) -> Pretraining:
     return Pretraining(
-        run_id="r", dataset=dataset, tokenizer=TOKENIZER, training_parameters=TRAINING,
-        loop_config=LOOP, model="models.transformer", model_parameters=MODEL,
+        run_id="r", dataset=dataset, training_parameters=TRAINING,
+        loop_config=LOOP, model=MODEL,
         starting_checkpoint=starting_checkpoint,
     )
 
@@ -307,27 +309,55 @@ class PretrainJobTests(unittest.TestCase):
     def test_a_model_vocab_that_disagrees_with_its_tokenizer_is_refused(self):
         with self.assertRaisesRegex(ValueError, "vocab_size"):
             Pretraining(
-                run_id="r", dataset=self.dataset, tokenizer=TOKENIZER, training_parameters=TRAINING,
-                loop_config=LOOP, model="models.transformer", model_parameters=replace(MODEL, vocab_size=65),
+                run_id="r", dataset=self.dataset, training_parameters=TRAINING,
+                loop_config=LOOP, model=replace(MODEL, vocab_size=65),
             )
 
-    def test_a_manifest_rebuilds_model_parameters_as_the_model_packages_dataclass(self):
+    def test_a_manifest_names_the_model_class_beside_its_fields(self):
         second = leg(self.dataset, starting_checkpoint=self.leg)
+        model = second.to_manifest()["parameters"]["model"]
+        self.assertEqual(model, {"class": "models.transformer.Transformer", **asdict(MODEL)})
         rebuilt = Artifact.from_manifest(second.to_manifest())
         self.assertEqual(rebuilt, second)
-        self.assertEqual(rebuilt.model, "models.transformer")
-        self.assertIsInstance(rebuilt.model_parameters, ModelParameters)
-        self.assertIsInstance(rebuilt.starting_checkpoint.model_parameters, ModelParameters)
+        self.assertIsInstance(rebuilt.model, Transformer)
+        self.assertIsInstance(rebuilt.starting_checkpoint.model, Transformer)
+
+    def test_a_leg_trains_any_model_and_continues_only_its_own(self):
+        inputs = {"run_id": "r", "dataset": self.dataset, "training_parameters": TRAINING, "loop_config": LOOP}
+        mamba = Mamba(vocab_size=MODEL.vocab_size, sequence_length=8, num_layers=1, d_model=16)
+        leg = Pretraining(model=mamba, **inputs)
+        self.assertEqual(leg.to_manifest()["parameters"]["model"]["class"], "models.mamba.Mamba")
+        self.assertEqual(Artifact.from_manifest(leg.to_manifest()).model, mamba)
+        with self.assertRaisesRegex(ValueError, "model must match starting_checkpoint.model"):
+            Pretraining(model=mamba, starting_checkpoint=self.leg, **inputs)
+
+    def test_validation_scores_a_split_shorter_than_one_batch(self):
+        job, model, running = PretrainJob(self.leg), MODEL.build(), worker()
+        sequences = TRAINING.batch_size - 1
+        tokens = np.arange(sequences * MODEL.sequence_length + 1) % MODEL.vocab_size
+        mean, variance = job.validation_loss(model, tokens, running)
+        self.assertTrue(torch.isfinite(mean))
+        self.assertEqual(variance.item(), 0.0)  # one batch: no spread, and never NaN
+        with self.assertRaisesRegex(ValueError, "fewer than one sequence"):
+            job.validation_loss(model, tokens[: MODEL.sequence_length], running)
+        self.assertNotIn("phase", running.progress)
 
     def test_a_leg_keeps_its_starting_checkpoints_tokenizer(self):
         other = Tokenizer(vocab_size=64, special_tokens=("<eos>",), sources=(SOURCE,))
         with self.assertRaisesRegex(ValueError, "starting_checkpoint"):
             Pretraining(
-                run_id="r", dataset=DataSet.from_sources(other, (SOURCE,), (SOURCE,)), tokenizer=other,
+                run_id="r", dataset=DataSet.from_sources(other, (SOURCE,), (SOURCE,)),
                 training_parameters=TRAINING, loop_config=LOOP, starting_checkpoint=self.leg,
             )
-        with self.assertRaisesRegex(ValueError, "not tokenized with"):
-            leg(DataSet.from_sources(other, (SOURCE,), (SOURCE,)))
+
+    def test_a_dataset_speaks_one_tokenizer_and_a_leg_reads_it_there(self):
+        other = Tokenizer(vocab_size=64, special_tokens=("<eos>",), sources=(SOURCE,))
+        with self.assertRaisesRegex(ValueError, "mixes tokenizers"):
+            DataSet(
+                train_set=(TokenizedSource(TOKENIZER, SOURCE),),
+                valid_set=(TokenizedSource(other, SOURCE),),
+            )
+        self.assertEqual(self.leg.tokenizer, TOKENIZER)
 
     def test_a_starting_checkpoint_without_an_optimizer_gets_a_fresh_one(self):
         PretrainJob(self.leg).run(self.root, worker())

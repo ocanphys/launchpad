@@ -262,3 +262,78 @@ rename still lets that rename through, so a cancel can still lose by the width
 of one rename and leave a complete artifact behind. That is accepted. A
 cancellation is recorded as `lease lost`, which is what it is here -- the
 launcher took the artifact away.
+
+## Profiler overhead reuses the operator's correlation id
+
+A `torch.profiler` overhead row -- "Activity Buffer Request" -- carries the
+same correlation id (`FunctionEvent.id`) as the operator it interrupted and
+sits *after* it in `prof.events()`, so a map from correlation id to row built
+without a filter keeps the overhead row, and every kernel that operator
+launched is attributed to profiler overhead instead. Correlation ids also
+come from two counters: an op's from PyTorch's own, a launch call's and a GPU
+activity's from CUPTI, so the same number can name an op and an unrelated
+launch. The device side mixes them too: a `gpu_user_annotation` (the GPU
+span of a `record_function` scope) carries its scope's PyTorch id, and in one
+capture `Optimizer.step`'s was 1912, which was also a launch call's. Every
+`correlation_id` lookup in `benchmarking/profile.ipynb` is therefore
+restricted by `activity_type` (launch calls only, or `kernel`/`gpu_memcpy`/
+`gpu_memset` only, never "any CUDA row"); dropping that filter silently
+reparents kernels.
+
+Found from a stale `benchmarking/events.json`, where kernel 62 named
+`Activity Buffer Request` as its launcher while no kernel named the
+`aten::addmm` one row above it. The ancestry still reached `addmm`,
+because the overhead row's parent *is* the operator -- which is what makes
+this quiet: the tree looks plausible and only the launch edge is wrong.
+
+So: never test graph code against a capture checked in next to it. A
+saved capture freezes whatever processing produced it the day it was written
+and will disagree with the current code without saying so. Regenerate it
+by rerunning the capture in `benchmarking/profile.ipynb` and treat any
+on-disk capture as scratch.
+
+## `prof.events()` deletes ops, and their kernels still name them
+
+`EventList._build_tree` runs `_remove_dup_nodes`, which deletes an op that
+is the only child of an op with the same name and moves its children to
+that parent. Scalar overloads do exactly this: `x * 0.5` records `aten::mul`
+inside `aten::mul`. The kernels launched there keep the deleted op's id in
+`linked_correlation_id`, so looking that id up finds nothing. Found as 33,
+then 36, "unlinked" kernels per step: every norm's `PowBackward0` and
+`MeanBackward1` kernels and three from the embedding backward, about 2% of
+GPU time but always the same modules.
+
+Link a kernel through its launch call instead (same CUPTI correlation id), whose
+`cpu_parent` is the surviving op; `linked_correlation_id` is then a check
+that must match unless the op it names is gone. Never treat a missing
+linked op as "not from PyTorch".
+
+## pydantic is strict only where it is told to be, and silent where it is not
+
+The manifest codec is pydantic, and each of these passed a test until a
+property test or a probe hit it:
+
+- A stdlib dataclass takes no config (`TypeAdapter(Record, config=...)`
+  raises), so `extra="forbid"` and `allow_inf_nan=False` silently do nothing.
+  A model's config does reach every dataclass nested in its fields, so the
+  codec wraps each annotation as the one field of a model (`_field`).
+- A dataclass instance is trusted for its type unless
+  `revalidate_instances="always"`: `Leaf(count=True)` passes as a `Leaf`.
+- A subclass instance validates as its base, dropping the subclass's fields,
+  and the serializer writes it as the base too, with no warning even under
+  `warnings="error"`. Only comparing the result with the input catches it.
+- The serializer writes `True` in an int field as `1`, and `1 == True`, so a
+  JSON round trip plus `==` cannot catch a bool passed as an int. Strict
+  Python-mode validation does.
+- `__get_pydantic_core_schema__` on a generic dataclass is ignored for its
+  parametrized alias: with `lr: float | Sweep[float]`, the JSON
+  `{"values": [1.0]}` decoded into a record holding a `Sweep`. Concrete
+  annotations remove the question.
+- `-0.0 == 0.0`, but they encode differently, so identity hashes differed;
+  the codec parses floats with `float(s) + 0.0`.
+
+So `normalize` is three steps and none is redundant: strict Python-mode
+validation (exact types), a JSON round trip (the value the disk gives back),
+and `restored == value` (nothing silently narrowed). A test that the codec
+round-trips is not enough; test that it refuses, per case
+(test/test_codec.py), and that the properties fail with `normalize` disabled.

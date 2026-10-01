@@ -28,13 +28,13 @@ from system.runtime import initialize_worker
 
 app = modal.App(APP_NAME)
 
-base_image = modal.Image.debian_slim(python_version="3.12").pip_install("regex", "tqdm")
+base_image = modal.Image.debian_slim(python_version="3.12").pip_install("regex", "tqdm", "pydantic>=2.13")
 
 # groups of python packages from this repo - these are added to images which specify
 # the python environments of the containers.
 CALL_SOURCE = ("config", "system", "launcher")
-# models/ rides along wherever manifests are decoded: a leg's model_parameters
-# are rebuilt from the model package it names, torch-free at import
+# models/ rides along wherever manifests are decoded: each architecture's leg
+# class lives in its models/ package, and every models/ package is torch-free at import
 ARTIFACTS_SOURCE = ("artifacts", "models")
 
 
@@ -50,7 +50,7 @@ worker_image = base_image.pip_install(
 ).add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 
 lab_image = (
-    base_image.pip_install("numpy", "torch", "einops", "matplotlib", "jupyterlab")
+    base_image.pip_install("numpy", "pandas", "torch", "einops", "matplotlib", "jupyterlab")
     .env({LAB_COMMIT_ENV: get_git_commit() if modal.is_local() else "unknown"})
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "lab")
 )

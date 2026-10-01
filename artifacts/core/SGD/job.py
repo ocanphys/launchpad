@@ -33,7 +33,7 @@ class TrainingJob(Job):
         self.starting_checkpoint = artifact.starting_checkpoint
         self.training_parameters = artifact.training_parameters
         self.loop_config = artifact.loop_config
-        self.device = torch.device(artifact.model_parameters.device)
+        self.device = torch.device(artifact.model.device)
         # saved as dotted paths in the config - resolved to the python objects
         self.schedule_fn = locate(self.training_parameters.lr_schedule_fn)
         self.schedule_parameters = asdict(self.training_parameters.lr_schedule)
@@ -68,7 +68,7 @@ class TrainingJob(Job):
         # state into them. The optimizer is constructed over the live model's
         # parameters, so the two share tensors; loading state_dicts afterwards
         # keeps that link, which pickled whole objects would not.
-        model = locate(self.artifact.model).build(self.artifact.model_parameters)
+        model = self.artifact.model.build()
         optimizer = locate(self.training_parameters.optimizer)(
             model.parameters(), **asdict(self.training_parameters.optimizer_parameters)
         )

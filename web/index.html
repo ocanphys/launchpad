@@ -137,6 +137,23 @@
 
   .empty { opacity: .55; padding: 1rem 0; }
 
+  /* The filter bar over the table (filter.js): an artifact class, then the
+     levels of its manifest, each indented under the one it opened from. */
+  #filterRow { display: flex; align-items: flex-start; gap: .8rem; margin-bottom: .6rem; font-size: 11px; line-height: 1.45; }
+  #shown { opacity: .55; }
+  .filters select, .filters button, .filter-bound { font: inherit; }
+  .filter-field { display: flex; align-items: baseline; gap: .5rem; margin-bottom: .1rem; }
+  .filter-key { opacity: .55; }
+  .filter-toggle { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; opacity: .8; }
+  .filter-toggle:hover { opacity: 1; }
+  /* How many values a leaf holds: more than one is a parameter that was tuned. */
+  .filter-count { opacity: .45; margin-left: .4rem; }
+  /* One level under another: indented along a guide line, one entry a line. */
+  .filter-children { margin-left: .3rem; padding-left: .7rem; border-left: 1px solid rgba(128,128,128,.25); }
+  .filter-choice { display: block; cursor: pointer; white-space: nowrap; }
+  .filter-choice input { margin: 0 .35rem 0 0; vertical-align: -2px; }
+  .filter-bound { width: 6rem; }
+
   details#problems { margin-top: 1.5rem; }
   details#problems summary {
     cursor: pointer; font-size: 11px; font-weight: 600; color: #cf222e;
@@ -255,6 +272,8 @@
 <div id="meta"></div>
 
 <div id="dashboard">
+<!-- The type picker and its fields (filter.js), and how many rows pass. -->
+<div id="filterRow"><div id="filters"></div><span id="shown"></span></div>
 <div class="dashboard-artifacts">
 <table>
   <!-- Progress is the one column with no width of its own, so it takes

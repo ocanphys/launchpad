@@ -47,6 +47,9 @@ class DataSet(Artifact):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        tokenizers = sorted({source.tokenizer.uid for source in (*self.train_set, *self.valid_set)})
+        if len(tokenizers) > 1:
+            raise ValueError(f"{type(self).__name__} mixes tokenizers {', '.join(tokenizers)}")
         require_separator("train_set", self.train_set)
         require_separator("valid_set", self.valid_set)
 
@@ -61,6 +64,11 @@ class DataSet(Artifact):
             train_set=tuple(TokenizedSource(tokenizer, s) for s in train_sources),
             valid_set=tuple(TokenizedSource(tokenizer, s) for s in valid_sources),
         )
+
+    @property
+    def tokenizer(self) -> Tokenizer:
+        """Returns the one tokenizer every source was tokenized with."""
+        return (*self.train_set, *self.valid_set)[0].tokenizer
 
     @property
     def uid(self) -> str:

@@ -24,7 +24,7 @@ from artifacts.stages.pretraining import Pretraining
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
 from config import STORAGE
-from models.transformer import ModelParameters
+from models.transformer import Transformer
 
 ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
 TOKENIZER = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(ODYSSEY,))
@@ -32,9 +32,8 @@ TOKENS = TokenizedSource(tokenizer=TOKENIZER, source=ODYSSEY)
 PRETRAINING = Pretraining(
     run_id="r",
     dataset=DataSet.from_sources(TOKENIZER, (ODYSSEY,), (ODYSSEY,)),
-    tokenizer=TOKENIZER,
-    model="models.transformer",
-    model_parameters=ModelParameters(
+   
+    model=Transformer(
         vocab_size=1000, sequence_length=8, num_layers=1, d_model=16, d_ff=32,
         num_heads=2, rope_theta=10000, device="cpu",
     ),

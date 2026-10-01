@@ -47,14 +47,15 @@ class DataSetTests(unittest.TestCase):
                 self.assertIn("<|endoftext|>", str(error.exception))
                 self.assertIn("special_tokens", str(error.exception))
 
-    def test_direct_construction_checks_every_tokenizer_in_a_merged_split(self):
-        sources = (TokenizedSource(TOKENIZER, FIRST), TokenizedSource(NO_EOT, SECOND))
-        for train, valid in ((sources, ()), ((), sources)):
+    def test_every_source_shares_one_tokenizer_across_both_splits(self):
+        first, second = TokenizedSource(TOKENIZER, FIRST), TokenizedSource(NO_EOT, SECOND)
+        for train, valid in (((first, second), ()), ((), (first, second)), ((first,), (second,))):
             with (
                 self.subTest(train=train, valid=valid),
-                self.assertRaisesRegex(ValueError, "special_tokens"),
+                self.assertRaisesRegex(ValueError, "mixes tokenizers"),
             ):
                 DataSet(train_set=train, valid_set=valid)
+        self.assertEqual(DataSet.from_sources(TOKENIZER, (FIRST,), (SECOND,)).tokenizer, TOKENIZER)
 
     def test_declared_eot_is_enough_before_tokenizer_is_built(self):
         dataset = DataSet.from_sources(TOKENIZER, (FIRST, SECOND), (THIRD,))

@@ -1,26 +1,28 @@
 # Training legs and checkpoints
 
 A pretraining run is a chain of legs. A leg is one `Pretraining` artifact
-(`__init__.py`), produced by one `PretrainJob` (`jobs.py`), covering steps
+(`__init__.py`), declared through its architecture's subclass, produced by one `PretrainJob` (`jobs.py`), covering steps
 `start_step` to `end_step`. The leg is `artifacts/core/SGD/training.py`'s
 `Training`; the checkpoint mechanics are `TrainingJob` in
 `artifacts/core/SGD/job.py`, which also builds the model and optimizer a leg
-names. `Pretraining` adds the dataset and tokenizer, names its job, and
+names. `Pretraining` adds the dataset (and reads its tokenizer there), names its job, and
 decides its own `uid`, `artifact_path` and `lineage_hash`; `PretrainJob`
 draws the batches and owns the loop. Two kinds of checkpoint exist with
 different meanings.
 
 ## The model
 
-Models are not artifacts. A leg names one by `model`, the dotted path of a
-package under `models/` (`"models.transformer"`), and holds that package's
-`ModelParameters` as `model_parameters`. The package is torch-free at import
-and exports two names: `ModelParameters`, and `build(parameters)`, which
-imports the `nn.Module` and constructs it on `parameters.device`. `resume`
-calls `locate(model).build(model_parameters)`; nothing in `artifacts/` knows
-an architecture. The manifest codec cannot type `model_parameters` (its type
-depends on `model`), so `Training.__post_init__` rebuilds it from the dict a
-manifest hands back, through the same `locate`.
+Models are not artifacts. A leg holds its architecture as `model`: an
+instance of a `Model` subclass from a package under `models/`, such as
+`models.transformer.Transformer`, whose fields are the architecture's
+parameters, each model declaring its own (`vocab_size` and `sequence_length`
+included). `Model` is polymorphic, so a manifest writes the model as one map
+with its class under `"class"` beside its fields, and one `Pretraining` class
+trains every architecture. The package is torch-free at import; `build()`
+imports the `nn.Module` and constructs it on the model's `device`, and
+`resume` calls `model.build()`, so nothing in `artifacts/` knows an
+architecture. A leg continuing another inherits its `model`, and can only
+continue a leg of the same model.
 
 ## Checkpoint files
 
@@ -49,11 +51,12 @@ whole.
 
 A leg continues another by naming it as `starting_checkpoint`. The job loads
 that leg's `model.pt` instead of initializing, and `start_step` is the previous
-leg's `end_step`. `model` and `model_parameters` are inherited from the starting checkpoint
-and must not differ; a leg without one must state them. A model speaks one
-tokenizer for life: `Pretraining` refuses, at declaration, a `tokenizer`
-whose `vocab_size` differs from `model_parameters.vocab_size`, a dataset not
-tokenized with it, or a starting checkpoint trained with another. Optimizer
+leg's `end_step`. `model` is inherited from the starting checkpoint and must
+not differ; a leg without one must state it. A model speaks one
+tokenizer for life: the leg's tokenizer is its dataset's, since a dataset holds
+sources tokenized with exactly one, and `Pretraining` refuses, at declaration,
+one whose `vocab_size` differs from `model.vocab_size` or a starting
+checkpoint trained with another. Optimizer
 hyperparameters are always this leg's own: `load_state_dict` restores the
 saved leg's, so the job overwrites them with
 `training_parameters.optimizer_parameters` after loading. If the starting
@@ -132,7 +135,7 @@ for the dashboard's curves (see docs/LOGGING.md).
 ## TBD
 
 Open recommendations, none applied. The first changes what
-`model_parameters.dtype` means and is in the lineage hash, so decide it before
+`model.dtype` means and is in the lineage hash, so decide it before
 the first real run.
 
 - **Mixed precision.** `dtype` sets the parameter dtype; bf16 gives pure-bf16
@@ -189,7 +192,7 @@ folder name carry a `lineage_hash` alongside the steps:
 
 The hash digests everything that changes the trajectory: the starting
 checkpoint's uid (recursively, the whole chain), dataset and tokenizer uids,
-`model`, `model_parameters`, `training_parameters`. The steps are in the name only for
+`model` (its package and fields), `training_parameters`. The steps are in the name only for
 human readability.
 
 ## Layout
