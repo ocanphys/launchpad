@@ -1,5 +1,8 @@
 # launchpad
 
+New here? Start with the [user guide](docs/guide.md): setup, a first workflow,
+sweeps, and a training example. What follows is the internal map.
+
 Artifacts are folders on a Modal Volume, each owning a `manifest.json` that
 names what it is and what it's built from; state and orchestration are four
 Modal Dicts, one Queue, one web container and one scheduled function. The full model -- what an artifact and a
