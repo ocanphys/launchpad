@@ -19,6 +19,9 @@ from torch.overrides import TorchFunctionMode
 from torch.profiler import record_function
 from torch.utils._pytree import tree_leaves
 
+PHASE_ORDER = {p: i for i, p in enumerate(
+    ["zero_grad", "forward", "loss", "backward", "optimizer_step", "unscoped"])}
+
 
 @contextmanager
 def module_scopes(model, root="model"):
@@ -300,6 +303,28 @@ def link_events(frame):
     return frame.assign(launcher_id=pd.array(list(parents.values()), dtype="Int64"))
 
 
+def events_to_rows(function_events):
+    """Return one linked row per profiler event, indexed by its position in function_events.
+
+    cpu_parent object references become row IDs in launcher_id, then link_events adds the
+    GPU launch links.
+    """
+    import pandas as pd
+    
+    position = {id(event): i for i, event in enumerate(function_events)}
+    raw_rows = (
+        pd.DataFrame([vars(event) for event in function_events])
+        .rename(columns={"id": "correlation_id"})
+        .drop(columns=["cpu_parent", "cpu_children", "kernels"])
+        .assign(launcher_id=pd.array(
+            [position.get(id(event.cpu_parent)) for event in function_events], dtype="Int64"))
+        .rename_axis("index")
+    )
+    rows = link_events(raw_rows)
+    assert rows.index.equals(raw_rows.index)  # every event keeps its row index
+    return rows
+
+
 def _execution_context(event, inherited, root):
     """Return (phase, full owner FQN, owner stage row ID) for one tree node."""
     phase, owner, stage_id = inherited
@@ -357,12 +382,14 @@ def aggregate_kernels(rows, depth=None, *, root="model"):
 
     Returns
     -------
-    groups: DataFrame indexed by (phase, module_fqn), with kernel_ids,
-        owner_stage_ids, kernel_count, estimated_flops, flop_source_ids,
-        gpu_start_us, gpu_end_us, gpu_span_us and gpu_time_us.
-    kernels: Original kernel rows, at their original unique indices, augmented
+    groups: DataFrame indexed by (phase, module_fqn) in phase execution order,
+        with kernel_ids, owner_stage_ids, kernel_count, estimated_flops,
+        flop_source_ids, gpu_start_us, gpu_end_us, gpu_span_us and gpu_time_us.
+    kernels: Original kernel rows, at their original unique indices, sorted by
+        phase execution order, module_fqn and gpu_start_us, augmented
         with phase, module_fqn, owner_fqn, owner_stage_id, gpu_start_us,
         gpu_end_us and duration_us. groups.kernel_ids references this table.
+    unattributed_kernels: The rows of kernels whose module_fqn is <unattributed>.
     flop_sources: Positive reported ATen estimates with descendant kernels,
         indexed by original ATen row ID. status is allocated, suppressed or
         unallocated. suppressed_by identifies the overriding ATen ancestor;
@@ -526,11 +553,17 @@ def aggregate_kernels(rows, depth=None, *, root="model"):
     if len(assigned) != len(kernel_ids) or set(assigned) != set(kernel_ids):
         raise ValueError("Kernel groups must partition all input kernels exactly once")
 
+    # Sort by phase in execution order, then module, then GPU start.
+    phase_rank = lambda level: level.map(PHASE_ORDER) if level.name == "phase" else level
+    groups = groups.sort_index(key=phase_rank)
+    kernels = kernels.sort_values(["phase", "module_fqn", "gpu_start_us"], key=phase_rank)
+    unattributed_kernels = kernels[kernels["module_fqn"].eq("<unattributed>")]
+
     allocated = flop_sources["contribution_flops"].sum()
     unallocated = flop_sources.loc[flop_sources["status"].eq("unallocated"), "reported_flops"].sum()
     if not math.isclose(allocated + unallocated, sum(effective_flops[index] for index in order if parents[index] is None)):
         raise ValueError("FLOP sources must conserve the bottom-up estimate")
-    return groups, kernels, flop_sources
+    return groups, kernels, unattributed_kernels, flop_sources
 
 
 def transformer_matmul_comparison(transformer, tokens, rows):
@@ -560,7 +593,7 @@ def transformer_matmul_comparison(transformer, tokens, rows):
         expected[phase, "model.linear"] = multiplier * 2 * n_tokens * d_model * vocab
 
     # Full module ownership, independent of any plotted depth.
-    groups, _, sources = aggregate_kernels(rows)
+    groups, _, _, sources = aggregate_kernels(rows)
     matmuls = sources.loc[
         sources["status"].eq("allocated") & sources["name"].isin(["aten::mm", "aten::bmm", "aten::addmm"])
     ]
