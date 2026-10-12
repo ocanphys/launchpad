@@ -1,18 +1,6 @@
-import json
-from pathlib import Path
-
 import pandas as pd
 import pytest
-
-notebook = Path(__file__).resolve().parents[1] / "benchmarking" / "profile.ipynb"
-source = next(
-    "".join(cell["source"])
-    for cell in json.loads(notebook.read_text())["cells"]
-    if "def link_events(" in "".join(cell["source"])
-)
-helpers = {}
-exec(compile(source, str(notebook), "exec"), helpers)  # noqa: S102 - local helper definitions only
-link_events = helpers["link_events"]
+from profile_events import link_events
 
 
 def event(index, kind, corr=0, linked=0, parent=None, node=-1):

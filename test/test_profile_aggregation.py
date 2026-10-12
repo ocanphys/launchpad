@@ -1,18 +1,9 @@
 """Partition and FLOP accounting tests for the notebook aggregator."""
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-
-NOTEBOOK = Path(__file__).resolve().parents[1] / "benchmarking/profile.ipynb"
-helpers = {}
-for cell in json.loads(NOTEBOOK.read_text())["cells"]:
-    source = "".join(cell["source"])
-    if any(f"def {name}(" in source for name in ("link_events", "aggregate_kernels", "display_timeline")):
-        exec(compile(source, str(NOTEBOOK), "exec"), helpers)  # noqa: S102
-aggregate_kernels = helpers["aggregate_kernels"]
+from profile_events import aggregate_kernels, display_timeline
 
 
 def event(index, name, parent=None, flops=0, kind="cpu_op"):
@@ -122,7 +113,7 @@ def test_phase_fallbacks_virtual_prefixes_and_unknown_flops():
         event(10, "autograd::engine::evaluate_function: MmBackward0"),
         event(11, "aten::mm", 10, 160), kernel(12, 11),
         stage(20, "Optimizer.step#AdamW.step"), kernel(21, 20),
-        stage(30, "backward::model.layers.3.attn"), event(31, "aten::mm", 30, 160), kernel(32, 31),
+        stage(29, "backward::model"), stage(30, "backward::model.layers.3.attn", 29), event(31, "aten::mm", 30, 160), kernel(32, 31),
     ])
     groups, kernels, sources = aggregate_kernels(rows, 2)
     assert kernels.loc[5, "module_fqn"] == "model.layers"
@@ -132,6 +123,21 @@ def test_phase_fallbacks_virtual_prefixes_and_unknown_flops():
     assert kernels.loc[32, "phase"] == "backward"
     assert groups.estimated_flops.sum() == 400
     assert set(sources.index) == {4, 11, 31}
+
+
+def test_module_owned_kernel_must_reach_the_root_stage():
+    orphan = frame([stage(0, "forward::model.left"), kernel(1, 0)])
+    with pytest.raises(ValueError, match=r"not under the model stage: \[1\]"):
+        aggregate_kernels(orphan)
+    nested = frame([stage(0, "forward::model"), event(1, "aten::mm", 0), stage(2, "forward::model.left", 1),
+                    kernel(3, 2)])
+    assert aggregate_kernels(nested)[1].loc[3, "module_fqn"] == "model.left"
+
+
+def test_mismatched_root_leaves_every_kernel_unattributed():
+    rows = frame([stage(0, "forward::model"), stage(1, "forward::model.left", 0), kernel(2, 1)])
+    _, kernels, _ = aggregate_kernels(rows, root="other")
+    assert kernels["module_fqn"].eq("<unattributed>").all()
 
 
 def test_empty_input_and_invalid_inputs(rows):
@@ -172,7 +178,7 @@ def test_timeline_keeps_every_kernel_interval_and_aligned_flops(rows, monkeypatc
     shown = []
     monkeypatch.setattr(plt, "show", lambda: shown.append(True))
     try:
-        helpers["display_timeline"](groups, kernels)
+        display_timeline(groups, kernels)
         assert shown == [True]
         timeline, flop_ax = plt.gcf().axes
         ordered = groups.sort_values("gpu_start_us", kind="stable")

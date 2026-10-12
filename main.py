@@ -28,7 +28,13 @@ from system.runtime import initialize_worker
 
 app = modal.App(APP_NAME)
 
-base_image = modal.Image.debian_slim(python_version="3.12").pip_install("regex", "tqdm", "pydantic>=2.13")
+
+def locked_image(group: str) -> modal.Image:
+    """Returns an image with the project's dependencies and `group`'s, at their `uv.lock` versions."""
+    return modal.Image.debian_slim(python_version="3.12").uv_sync(
+        str(Path(__file__).parent), groups=[group], extra_options="--no-default-groups"
+    )
+
 
 # groups of python packages from this repo - these are added to images which specify
 # the python environments of the containers.
@@ -40,17 +46,15 @@ ARTIFACTS_SOURCE = ("artifacts", "models")
 
 WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
 web_image = (
-    base_image.pip_install("fastapi[standard]")
+    locked_image("web")
     .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
 
-worker_image = base_image.pip_install(
-    "numpy", "torch", "einops"
-).add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
+worker_image = locked_image("worker").add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 
 lab_image = (
-    base_image.pip_install("numpy", "pandas", "torch", "einops", "matplotlib", "jupyterlab")
+    locked_image("lab")
     .env({LAB_COMMIT_ENV: get_git_commit() if modal.is_local() else "unknown"})
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "lab")
 )

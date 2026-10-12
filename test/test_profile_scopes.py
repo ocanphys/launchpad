@@ -1,21 +1,12 @@
 """Exercise notebook instrumentation locally; never run the Modal capture."""
-import json
 from copy import deepcopy
-from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 import torch
+from profile_events import aggregate_kernels, link_events, module_scopes
 from torch import nn
-
-NOTEBOOK = Path(__file__).resolve().parents[1] / "benchmarking" / "profile.ipynb"
-helpers = {}
-for cell in json.loads(NOTEBOOK.read_text())["cells"]:
-    source = "".join(cell["source"])
-    if "def module_scopes(" in source or "def link_events(" in source:
-        exec(compile(source, str(NOTEBOOK), "exec"), helpers)  # noqa: S102
-module_scopes = helpers["module_scopes"]
-link_events = helpers["link_events"]
 
 
 def scope_path(event):
@@ -124,26 +115,17 @@ def test_forward_backward_paths_shared_aliases_gradients_and_kernel_links():
             phase = labels[0].split("::", 1)[0]
             assert labels[-1] == f"{phase}::model"
 
-    # Execute the notebook's all-kernel check on these recorded CPU paths.
-    check_source = next("".join(cell["source"]) for cell in json.loads(NOTEBOOK.read_text())["cells"]
-                        if "# Check every kernel's path" in "".join(cell["source"]))
-    namespace = {"pd": pd, "rows": rows, "kernel_ids": list(expected_kernel_scopes), "display": lambda value: None}
-    exec(compile(check_source, str(NOTEBOOK), "exec"), namespace)  # noqa: S102
-    paths = namespace["kernel_paths"]
-    assert len(paths) == len(expected_kernel_scopes)
-    assert set(paths["status"]) == {"complete", "unattributed"}
-    assert set(paths.loc[paths["status"].eq("complete"), "highest_stage"]) == {"forward::model", "backward::model"}
-    for kernel_id, record in paths.loc[paths["status"].eq("complete")].iterrows():
-        assert record["branch"][0] == kernel_id
-        assert record["branch"][-1] == record["highest_stage_id"]
-        assert rows.loc[record["highest_stage_id"], "name"] == record["highest_stage"]
+    intervals = [SimpleNamespace(start=float(i), end=i + 1.0) for i in range(len(rows))]
+    groups, kernels, _ = aggregate_kernels(rows.assign(time_range=intervals))
+    assert len(kernels) == len(expected_kernel_scopes)
+    for kernel_id, (_, expected_path) in expected_kernel_scopes.items():
+        assert (kernels.loc[kernel_id, "module_fqn"] == "<unattributed>") == (not expected_path)
 
-    # Missing root labels must be reported, not mistaken for a complete path.
+    # A module-owned kernel whose launcher chain misses the root stage must raise.
     incomplete = rows.copy()
     incomplete.loc[incomplete["name"].eq("backward::model"), "name"] = "unlabelled"
-    namespace["rows"] = incomplete
-    with pytest.raises(AssertionError, match="missing phase::model"):
-        exec(compile(check_source, str(NOTEBOOK), "exec"), namespace)  # noqa: S102
+    with pytest.raises(ValueError, match="not under the model stage"):
+        aggregate_kernels(incomplete.assign(time_range=intervals))
 
 
 def test_external_graph_accumulation_and_optimizer_are_unattributed():
