@@ -32,3 +32,6 @@ py-modules = ["config", "lab", "local", "main"]
 
 [tool.setuptools.packages.find]
 include = ["artifacts*", "launcher*", "models*", "system*"]
+
+[tool.ruff]
+line-length = 110

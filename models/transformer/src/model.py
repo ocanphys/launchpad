@@ -122,29 +122,29 @@ def SPDA(
     K: torch.Tensor,
     V: torch.Tensor,
     mask: torch.Tensor | None = None,
-    return_weights: bool = False,
+    return_scores: bool = False,
 ):
     """
-    Given key (K), query (Q), and value (V) tensors, return
-    the output of your scaled dot product attention implementation.
+    Given key (K), query (Q), and value (V) tensors, returns
+    the scaled dot product attention implementation.
 
     Args:
         Q (Float[Tensor, " ... queries d_k"]): Query tensor
         K (Float[Tensor, " ... keys d_k"]): Key tensor
         V (Float[Tensor, " ... keys d_v"]): Values tensor
         mask (Bool[Tensor, " ... queries keys"] | None): Mask tensor
-        return_weights (bool): if True, also return the pre-softmax attention
+        return_scores (bool): if True, also return the pre-softmax attention
             scores (post-mask); otherwise that element of the pair is None.
     Returns:
         tuple of (Float[Tensor, " ... queries d_v"], Float[Tensor, " ... queries keys"] | None):
-            the SDPA output and the pre-softmax attention weights (or None).
+            the SDPA output and the pre-softmax attention scores (or None).
     """
     d_k = K.shape[-1]
-    attention_weights = einsum(Q, K, "... seq_q d_k, ... seq_k d_k -> ... seq_q seq_k") / (d_k**0.5)
+    attention_scores = einsum(Q, K, "... seq_q d_k, ... seq_k d_k -> ... seq_q seq_k") / (d_k**0.5)
     if mask is not None:
-        attention_weights += torch.where(mask, 0, float("-inf"))
-    softmax = torch.softmax(attention_weights, dim=-1)
-    return softmax @ V, (attention_weights if return_weights else None)
+        attention_scores += torch.where(mask, 0, float("-inf"))
+    softmax = torch.softmax(attention_scores, dim=-1)
+    return softmax @ V, (attention_scores if return_scores else None)
 
 
 class RoPE(nn.Module):
@@ -154,13 +154,17 @@ class RoPE(nn.Module):
         k = torch.arange(1, d_k // 2 + 1, device=device)
         freq = 1 / theta ** ((2.0 * k - 2.0) / d_k)
         theta_ik = i[:, None] * freq[None, :]
-        self.register_buffer("cos", theta_ik.cos(), persistent=False)
+        self.sin: torch.Tensor
+        self.cos: torch.Tensor
+        self.register_buffer(
+            "cos", theta_ik.cos(), persistent=False
+        )  # moves to gpu but not pard of state_dict
         self.register_buffer("sin", theta_ik.sin(), persistent=False)
 
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
-        # here x is the K or Q with dims ... x sequence x d_k (rep'n dim)
+    def forward(self, K: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        # here K is a key or (Q) query tensor with dims ... x sequence x d_k (rep'n dim)
         # separate them in to even and odd indices
-        evens, odds = rearrange(x, "... (blocks pair) -> ... pair blocks", pair=2).unbind(dim=-2)
+        evens, odds = rearrange(K, "... (blocks pair) -> ... pair blocks", pair=2).unbind(dim=-2)
         sin = self.sin[token_positions]
         cos = self.cos[token_positions]
         even_out = cos * evens - sin * odds
@@ -181,20 +185,23 @@ class MultiHeadAttention(nn.Module):
         rope: RoPE | None = None,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-        store_cache: bool = False,
+        capture_internals: bool = False,
     ):
         super().__init__()
         self.rope = rope  # positional embedding submodule
-        # debug toggle: when True, forward() stashes detached intermediates in self._cache
-        self.store_cache = store_cache
-        self._cache: dict[str, torch.Tensor] = {}
+        self.capture_internals = capture_internals  # if true, self.internals will return intermediates
+        self.internals: dict[str, torch.Tensor] = {}
 
-        ## need to pass the diagonal mask to pass the test - create
         diagonal_mask = torch.tril(
             torch.ones((max_seq_len, max_seq_len), device=device, dtype=torch.bool),
             diagonal=0,
         )
+
+        self.mask: torch.Tensor  # will be defined by pytorch in the next line
         self.register_buffer("mask", diagonal_mask, persistent=False)
+        # tensor belongs to the model but not trained. If we don't register it as buffer
+        # the mask won't move to the GPU and we will get a device mismatch during .to(device)
+        # PERSISTENT means it gets saved in the state_dict
 
         assert d_model % num_heads == 0
         mean, std = 0, 0.02  ## why make these choices
@@ -210,14 +217,15 @@ class MultiHeadAttention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        E: torch.Tensor,
         token_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        seq_len = x.shape[-2]
+        seq_len = E.shape[-2]
         mask = self.mask[:seq_len, :seq_len]
-        Q = einsum(x, self.WQ, "batch ... seq d_model, d_qkv d_model -> batch ... seq d_qkv")
-        K = einsum(x, self.WK, "batch ... seq d_model, d_qkv d_model -> batch ... seq d_qkv")
-        V = einsum(x, self.WV, "batch ... seq d_model, d_qkv d_model -> batch ... seq d_qkv")
+
+        Q = einsum(E, self.WQ, "batch ... seq d_model, d_qkv d_model -> batch ... seq d_qkv")
+        K = einsum(E, self.WK, "batch ... seq d_model, d_qkv d_model -> batch ... seq d_qkv")
+        V = einsum(E, self.WV, "batch ... seq d_model, d_qkv d_model -> batch ... seq d_qkv")
         head_rep = lambda M: rearrange(
             M,
             "... seq (n_heads d_head) -> ... n_heads seq d_head",
@@ -232,20 +240,23 @@ class MultiHeadAttention(nn.Module):
             assert token_positions is not None
             hK = self.rope(hK, token_positions)
             hQ = self.rope(hQ, token_positions)
-        attn, attn_weights = SPDA(hQ, hK, hV, mask, return_weights=self.store_cache)
-        mult_head_attention = rearrange(attn, "... n_heads seq d_head -> ... seq (n_heads d_head)")
+        attention_output, attention_scores = SPDA(hQ, hK, hV, mask, return_scores=self.capture_internals)
+        mult_head_attention = rearrange(
+            attention_output, "... n_heads seq d_head -> ... seq (n_heads d_head)"
+        )
         out = einsum(mult_head_attention, self.WO, "... d_v, ... d_model d_v -> ... d_model")
 
-        if self.store_cache:
-            self._cache = {
+        if self.capture_internals:
+            assert attention_scores is not None  # for typechecker
+            self.internals = {
                 "Q": Q.detach(),
                 "K": K.detach(),
                 "V": V.detach(),  # pre-head-split projections
                 "hQ": hQ.detach(),
                 "hK": hK.detach(),
                 "hV": hV.detach(),  # head-split (hQ/hK post-rope if rope is set)
-                "attn_weights": attn_weights.detach(),  # pre-softmax per-head attention scores
-                "attn": attn.detach(),  # per-head attention output
+                "attention_scores": attention_scores.detach(),  # pre-softmax per-head attention scores
+                "attn": attention_output.detach(),  # per-head attention output
                 "out": out.detach(),  # final MHA output
             }
         return out
@@ -304,7 +315,9 @@ class TransformerLM(torch.nn.Module):
         super().__init__()
 
         # torch submodules
-        self.embedding = Embedding(num_embeddings=vocab_size, embedding_dim=d_model, device=device, dtype=dtype)
+        self.embedding = Embedding(
+            num_embeddings=vocab_size, embedding_dim=d_model, device=device, dtype=dtype
+        )
         self.norm = RMSNorm(d_model=d_model, device=device, dtype=dtype)
         self.linear = Linear(in_features=d_model, out_features=vocab_size, device=device, dtype=dtype)
         self.tblocks = torch.nn.ModuleList(
@@ -323,8 +336,8 @@ class TransformerLM(torch.nn.Module):
         )
 
     def forward(self, in_features: torch.Tensor) -> torch.Tensor:
-        x = self.embedding(in_features)
+        E = self.embedding(in_features)
         for block in self.tblocks:
-            x = block(x)
-        z = self.linear(self.norm(x))
+            E = block(E)
+        z = self.linear(self.norm(E))
         return z
