@@ -566,6 +566,86 @@ def aggregate_kernels(rows, depth=None, *, root="model"):
     return groups, kernels, unattributed_kernels, flop_sources
 
 
+def allocations_by_label(memory_snapshot, device=0):
+    """Return one row per allocation in the allocator trace, labelled with its innermost scope.
+
+    Columns are addr, size, start_us, end_us and label. start_us is the alloc entry's time_us and
+    end_us is the time_us of the free_requested entry for the same addr, NaN if the trace never
+    frees it. label is the name of the most recently started record_function annotation still
+    open at start_us, or <none>. Annotations carry no thread, so concurrent scopes on different
+    threads resolve to whichever started last.
+    """
+    import pandas as pd
+
+    annotations = sorted((a for a in memory_snapshot["external_annotations"] if a["device"] == device),
+                         key=lambda a: a["time_us"])
+    open_scopes, allocations, live, i = [], [], {}, 0
+    # The trace is a ring buffer, so sort it by time before replaying the annotations.
+    for entry in sorted(memory_snapshot["device_traces"][device], key=lambda e: e["time_us"]):
+        while i < len(annotations) and annotations[i]["time_us"] <= entry["time_us"]:
+            annotation, i = annotations[i], i + 1
+            if annotation["stage"] == "START":
+                open_scopes.append(annotation["name"])
+            elif annotation["name"] in open_scopes:
+                del open_scopes[len(open_scopes) - 1 - open_scopes[::-1].index(annotation["name"])]
+        if entry["action"] == "alloc":
+            live[entry["addr"]] = {"addr": entry["addr"], "size": entry["size"], "start_us": entry["time_us"],
+                                   "end_us": float("nan"), "label": open_scopes[-1] if open_scopes else "<none>"}
+            allocations.append(live[entry["addr"]])
+        elif entry["action"] == "free_requested" and entry["addr"] in live:
+            live.pop(entry["addr"])["end_us"] = entry["time_us"]
+    return pd.DataFrame(allocations, columns=["addr", "size", "start_us", "end_us", "label"])
+
+
+def memory_over_time(memory_snapshot):
+    """Return {device: DataFrame of allocated and reserved bytes after each allocator trace entry, indexed by time_us}.
+
+    allocated changes on alloc and free_requested entries; reserved changes on segment_alloc and
+    segment_free. The starting values are the device's final totals in the snapshot minus the
+    trace's net change, so they are exact only if the trace ring buffer did not wrap.
+    """
+    import pandas as pd
+
+    deltas = {"alloc": (1, 0), "free_requested": (-1, 0), "segment_alloc": (0, 1), "segment_free": (0, -1)}
+    usage = {}
+    for device, entries in enumerate(memory_snapshot["device_traces"]):
+        trace = sorted((e for e in entries if e["action"] in deltas), key=lambda e: e["time_us"])
+        steps = pd.DataFrame({
+            "time_us": [e["time_us"] for e in trace],
+            "allocated": [deltas[e["action"]][0] * e["size"] for e in trace],
+            "reserved": [deltas[e["action"]][1] * e["size"] for e in trace],
+        }).set_index("time_us")
+        segments = [s for s in memory_snapshot["segments"] if s["device"] == device]
+        final = pd.Series({"allocated": sum(s["allocated_size"] for s in segments),
+                           "reserved": sum(s["total_size"] for s in segments)})
+        usage[device] = steps.cumsum() + (final - steps.sum())
+    return usage
+
+
+def memory_clock_offsets(rows, memory_snapshot, device=0):
+    """Return one row per matched record_function start with its allocator-clock minus profiler-clock offset.
+
+    Columns are name, profiler_start_us, allocator_start_us and offset_us. A user_annotation event
+    in rows is paired, in time order, with the snapshot annotation START of the same name; names
+    whose counts differ between the two are skipped. If both clocks tick alike, offset_us is the
+    same for every row, and subtracting it from allocator time_us puts memory on the rows timeline.
+    """
+    import pandas as pd
+
+    profiler = rows[rows["activity_type"].eq("user_annotation") & rows["device_type"].map(str).eq("DeviceType.CPU")]
+    profiler_starts = profiler.assign(start=profiler["time_range"].map(lambda r: r.start)).groupby("name")["start"]
+    allocator_starts = {}
+    for a in sorted(memory_snapshot["external_annotations"], key=lambda a: a["time_us"]):
+        if a["stage"] == "START" and a["device"] == device:
+            allocator_starts.setdefault(a["name"], []).append(a["time_us"])
+    matched = []
+    for name, starts in profiler_starts:
+        starts = sorted(starts)
+        if len(starts) == len(allocator_starts.get(name, [])):
+            matched += [(name, start, other, other - start) for start, other in zip(starts, allocator_starts[name])]
+    return pd.DataFrame(matched, columns=["name", "profiler_start_us", "allocator_start_us", "offset_us"])
+
+
 def transformer_matmul_comparison(transformer, tokens, rows):
     """Returns (per-phase, per-module) tables of analytical vs profiled matmul FLOPs for a TransformerLM.
 
@@ -622,7 +702,8 @@ def transformer_matmul_comparison(transformer, tokens, rows):
 
 def display_timeline(
     groups, kernels, title="Module scoped execution stages", *,
-    color_seed=0, figsize=None, show_flops=True,
+    color_seed=0, figsize=None, show_flops=True, memory=None, total_memory=None,
+    memory_baseline=None, persistent_memory=None,
 ):
     """Plot group GPU spans with one separate bar per original kernel event.
 
@@ -639,6 +720,13 @@ def display_timeline(
     A zero means no allocated estimate, not necessarily zero computation.
     Stage labels contain only phase and module FQN. Rounded values in the
     right-hand panel are for display; groups.estimated_flops holds exact totals.
+
+    memory adds a top panel with one step line per column (allocated, reserved) in MiB, sharing the
+    time axis. Its index is time in the same clock as kernels.gpu_start_us, in us; use
+    memory_over_time shifted by memory_clock_offsets. total_memory, in bytes, adds a dashed line.
+    memory_baseline maps a memory column to its bytes before the model was built, drawn as a faded line
+    in that column's color. persistent_memory, in bytes, adds a dashed grey line for the memory that stays
+    allocated through the step (weights, gradients and optimizer state).
 
     Details remain in pandas: kernels.loc[groups.loc[key, "kernel_ids"]].
     Filter groups to plot a subset; each selected kernel is drawn at most once.
@@ -675,13 +763,14 @@ def display_timeline(
     # ioff prevents ipympl from displaying once on creation and again on show().
     with plt.ioff():
         height = max(3, 0.3 * len(selected) + 1.2)
+        top = int(memory is not None)
+        fig = plt.figure(figsize=figsize or (12, height + 3 * top))
+        grid = fig.add_gridspec(1 + top, 2 if show_flops else 1,
+                                width_ratios=[4, 1.15] if show_flops else None,
+                                height_ratios=[3, height] if top else None)
+        ax = fig.add_subplot(grid[top, 0])
         if show_flops:
-            fig, (ax, flop_ax) = plt.subplots(
-                1, 2, sharey=True, figsize=figsize or (12, height),
-                gridspec_kw={"width_ratios": [4, 1.15]},
-            )
-        else:
-            fig, ax = plt.subplots(figsize=figsize or (12, height))
+            flop_ax = fig.add_subplot(grid[top, 1], sharey=ax)
         for y, ((phase, module_fqn), group) in enumerate(selected.iterrows()):
             launches = kernels.loc[group["kernel_ids"]]
             labels.append(f"{phase}::{module_fqn}")
@@ -724,5 +813,32 @@ def display_timeline(
         ax.legend(handles=handles, loc="upper right", fontsize=8,
                   borderpad=0.4, labelspacing=0.3, framealpha=0.9)
         ax.margins(x=0.01, y=0.02)
+        if memory is not None:
+            memory_ax = fig.add_subplot(grid[0, 0], sharex=ax)
+            peaks = memory.max().div(2**20)
+            for name in memory:
+                line, = memory_ax.step(memory.index - origin, memory[name] / 2**20, where="post",
+                                       label=f"{name} (peak {peaks[name]:.1f} MiB)")
+                if memory_baseline is not None:
+                    memory_ax.axhline(memory_baseline[name] / 2**20, color=line.get_color(), alpha=0.5,
+                                      label=f"{name} before model ({memory_baseline[name] / 2**20:.1f} MiB)")
+            memory_ax.set_ylim(0, 1.1 * peaks.max())  # a larger total is clipped, not rescaled
+            if total_memory is not None:
+                memory_ax.axhline(total_memory / 2**20, color="k", linestyle="--",
+                                  label=f"total VRAM ({total_memory / 2**30:.1f} GiB)")
+            if persistent_memory is not None:
+                memory_ax.axhline(persistent_memory / 2**20, color="grey", linestyle="--", alpha=0.5,
+                                  label=f"persistent ({persistent_memory / 2**20:.1f} MiB)")
+            memory_ax.set_ylabel("MiB")
+            memory_ax.set_title("GPU memory")
+            # The legend sits to the right of the memory panel, above the FLOPs panel when there is one.
+            if show_flops:
+                legend_ax = fig.add_subplot(grid[0, 1])
+                legend_ax.axis("off")
+                legend_ax.legend(*memory_ax.get_legend_handles_labels(), loc="upper left", borderaxespad=0, fontsize=8)
+            else:
+                memory_ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=8)
+            memory_ax.grid(axis="x", alpha=0.2)
+            memory_ax.tick_params(axis="x", labelbottom=False)
         fig.tight_layout(pad=0.6)
     plt.show()
