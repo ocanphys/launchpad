@@ -2,8 +2,8 @@
 
 A notebook's capture returns `list(prof.events())` unchanged: `FunctionEvent` objects pickle
 with their `cpu_parent` and `cpu_children` references intact, so every step after profiling
-runs locally. The capture container imports this module for `module_scopes`, so its image must
-add this source, and pandas and matplotlib, which the worker image lacks, are imported where
+runs locally. The capture container imports this module for `module_scopes` and the capture context
+managers, so its image must add this source, and pandas and matplotlib, which the worker image lacks, are imported where
 they are used.
 """
 
@@ -14,9 +14,10 @@ import random
 from contextlib import ExitStack, contextmanager
 from threading import local
 
+import numpy as np
 import torch
 from torch.overrides import TorchFunctionMode
-from torch.profiler import record_function
+from torch.profiler import ProfilerActivity, profile, record_function
 from torch.utils._pytree import tree_leaves
 
 PHASE_ORDER = {p: i for i, p in enumerate(
@@ -173,6 +174,48 @@ def module_scopes(model, root="model"):
         for scopes in reversed(list(open_scopes)):
             close_path(scopes)
         owned_nodes.clear()
+
+
+@contextmanager
+def capture_profiler_events(enabled):
+    """Yield a dict whose "events" holds the block's profiler events once it exits; empty when not enabled.
+
+    Event times are us from the trace's start; "trace_start_us" is that start on the unix clock.
+    It synchronizes before the profiler stops, so every kernel launched inside the block is recorded.
+    """
+    profiled = {"events": []}
+    if not enabled:
+        yield profiled
+        return
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_flops=True) as prof:
+        yield profiled
+        torch.cuda.synchronize()
+    profiled["events"].extend(prof.events())
+    profiled["trace_start_us"] = prof.profiler.kineto_results.trace_start_ns() / 1e3
+
+
+@contextmanager
+def capture_memory(peak=False, trace=False, max_entries=100_000):
+    """Yield a dict that holds the block's memory readings once it exits; empty when both are off.
+
+    peak adds peak_allocated and peak_reserved bytes; trace adds the allocator snapshot of just
+    this block under "snapshot".
+    """
+    memory = {}
+    if peak:
+        torch.cuda.reset_peak_memory_stats()
+    if trace:
+        torch.cuda.memory._record_memory_history(max_entries=max_entries, clear_history=True)
+    try:
+        yield memory
+        if trace:
+            memory["snapshot"] = torch.cuda.memory._snapshot()
+    finally:
+        if trace:
+            torch.cuda.memory._record_memory_history(enabled=None)
+    if peak:  # allocator statistics are kept on the CPU, so no synchronize is needed
+        memory["peak_allocated"] = torch.cuda.max_memory_allocated()
+        memory["peak_reserved"] = torch.cuda.max_memory_reserved()
 
 
 def _validate_launchers(parents, cpu_ids):
@@ -706,12 +749,35 @@ def transformer_matmul_comparison(transformer, tokens, rows):
     return phases, stages
 
 
-def display_timeline(
-    groups, kernels, title="Module scoped execution stages", *,
-    color_seed=0, figsize=None, show_flops=True, memory=None, total_memory=None,
-    memory_baseline=None, persistent_memory=None,
+def dots_height(phase_count):
+    """Return the height in inches of the kernel duration dots under the kernel timeline: a lane per phase."""
+    return 0.8 * (0.5 + 0.3 * phase_count)
+
+
+def timeline_height(groups=None, memory=None, phases=None, peaks=None):
+    """Return the height in inches draw_timeline wants for these groups, memory, phases and peaks."""
+    has_kernels = groups is not None and not groups.empty
+    kernels_height = (max(3, 0.3 * len(groups) + 1.2)
+                      + dots_height(groups.index.get_level_values("phase").nunique())) if has_kernels else 0
+    height = kernels_height + 3 * (memory is not None or peaks is not None)
+    return height or 1.5 * (phases is not None)  # phases alone get a strip of their own
+
+
+def draw_timeline(
+    fig, area, groups=None, kernels=None, title="Training step", *,
+    color_seed=0, show_flops=True, memory=None, total_memory=None,
+    memory_baseline=None, persistent_memory=None, phases=None, peaks=None, info=(),
 ):
-    """Plot group GPU spans with one separate bar per original kernel event.
+    """Draw group GPU spans, one bar per original kernel event, and memory above them, into area of fig.
+
+    area is a SubplotSpec of a figure with constrained layout, which spaces the panels and their
+    labels; size it with timeline_height. title goes on the top panel. Every time
+    (kernels' gpu_start_us and gpu_end_us, memory's index, phases) is us from one shared t = 0, so
+    the panels line up; step_timeline puts a captured step's data on one.
+
+    Each panel is drawn only when its data is there: without groups (or with none selected) there
+    is no kernel timeline and no FLOPs panel, and without memory there is no memory panel. With
+    neither, the phases get a strip of their own.
 
     Rows are ordered by earliest GPU start. Gray backgrounds show each group's
     enclosing interval; colored rectangles show exact individual kernel intervals.
@@ -728,52 +794,62 @@ def display_timeline(
     right-hand panel are for display; groups.estimated_flops holds exact totals.
 
     memory adds a top panel with one step line per column (allocated, reserved) in MiB, sharing the
-    time axis. Its index is time in us and its first entry is drawn at t = 0, the same t = 0 as the
-    earliest displayed kernel. total_memory, in bytes, adds a dashed line.
+    time axis. peaks ({"allocated", "reserved"} bytes) draws each as a dotted line in that panel, which
+    then appears even without memory. total_memory, in bytes, adds a dashed line.
     memory_baseline maps a memory column to its bytes before the model was built, drawn as a faded line
     in that column's color. persistent_memory, in bytes, adds a dashed grey line for the memory that stays
     allocated through the step (weights, gradients and optimizer state).
 
+    phases shades each phase of the step (zero_grad, forward, ...) behind every panel, in its phase's
+    color and labelled at the top. It is a DataFrame of name, start_us and end_us.
+
+    With kernels, a thin panel under the kernel timeline has a lane per phase with every kernel's
+    duration as a dot on a log axis, in the phase colors of the kernel legend and a black tick at the
+    lane's median. info is a list of text lines shown just below the legend of the top panel; without
+    a memory panel they join the title.
+
     Details remain in pandas: kernels.loc[groups.loc[key, "kernel_ids"]].
     Filter groups to plot a subset; each selected kernel is drawn at most once.
-    The function displays one figure and returns None to avoid duplicate output.
     """
-    import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
     from matplotlib.ticker import EngFormatter
 
-    if not groups.index.is_unique or not kernels.index.is_unique:
-        raise ValueError("Group and kernel indices must be unique")
-    selected = groups.sort_values("gpu_start_us", kind="stable")
-    kernel_ids = [index for ids in selected["kernel_ids"] for index in ids]
-    if len(kernel_ids) != len(set(kernel_ids)):
-        raise ValueError("A kernel cannot appear in more than one plotted group")
-    if selected.empty:
+    has_kernels = groups is not None and not groups.empty
+    if not has_kernels and memory is None and phases is None and peaks is None:
         return
+    show_flops = show_flops and has_kernels
+    height = 0
+    if has_kernels:
+        if not groups.index.is_unique or not kernels.index.is_unique:
+            raise ValueError("Group and kernel indices must be unique")
+        selected = groups.sort_values("gpu_start_us", kind="stable")
+        kernel_ids = [index for ids in selected["kernel_ids"] for index in ids]
+        if len(kernel_ids) != len(set(kernel_ids)):
+            raise ValueError("A kernel cannot appear in more than one plotted group")
+        height = max(3, 0.3 * len(selected) + 1.2)  # the kernel panel; the dots panel is dots_height
 
     palette = {"green": "#15803d", "orange": "#c75a0a", "blue": "#1d4ed8",
                "purple": "#7c3aed", "teal": "#0f766e", "red": "#b91c1c",
                "pink": "#be185d", "gold": "#a16207"}
-    phases = list(dict.fromkeys(selected.index.get_level_values("phase")))
+    kernel_phases = list(dict.fromkeys(selected.index.get_level_values("phase"))) if has_kernels else []
+    named = dict.fromkeys(kernel_phases + (list(phases["name"]) if phases is not None else []))
     shuffled = list(palette.values())
     random.Random(color_seed).shuffle(shuffled)
     colors = {phase: shuffled[i % len(shuffled)]
-              for i, phase in enumerate(sorted(phase for phase in phases if phase != "unscoped"))}
-    if "unscoped" in phases:
-        colors["unscoped"] = "#6b7280"
-    background = "#d1d5db"
-    origin = selected["gpu_start_us"].min()
-    labels = []
-    formatter = EngFormatter(places=1, sep="")
+              for i, phase in enumerate(sorted(phase for phase in named if phase != "unscoped"))}
+    colors["unscoped"] = "#6b7280"
 
-    # ioff prevents ipympl from displaying once on creation and again on show().
-    with plt.ioff():
-        height = max(3, 0.3 * len(selected) + 1.2)
-        top = int(memory is not None)
-        fig = plt.figure(figsize=figsize or (12, height + 3 * top))
-        grid = fig.add_gridspec(1 + top, 2 if show_flops else 1,
-                                width_ratios=[4, 1.15] if show_flops else None,
-                                height_ratios=[3, height] if top else None)
+    top = int(memory is not None or peaks is not None)  # the memory panel
+    rows = max(top + 2 * has_kernels, 1)  # memory, kernels, kernel duration dots: one grid, so their edges align
+    ratios = [3] * top + [height, dots_height(len(kernel_phases))] * has_kernels
+    grid = area.subgridspec(rows, 2 if show_flops else 1, width_ratios=[4, 1.15] if show_flops else None,
+                            height_ratios=ratios if rows > 1 else None)
+    left, right = math.inf, -math.inf  # the view spans the earliest to the latest time drawn
+    if has_kernels:
+        background = "#d1d5db"
+        labels = []
+        formatter = EngFormatter(places=1, sep="")
+
         ax = fig.add_subplot(grid[top, 0])
         if show_flops:
             flop_ax = fig.add_subplot(grid[top, 1], sharey=ax)
@@ -781,11 +857,11 @@ def display_timeline(
             launches = kernels.loc[group["kernel_ids"]]
             labels.append(f"{phase}::{module_fqn}")
             ax.barh(y, group["gpu_end_us"] - group["gpu_start_us"],
-                    left=group["gpu_start_us"] - origin, height=0.8,
+                    left=group["gpu_start_us"], height=0.8,
                     color=background, linewidth=0, zorder=1)
             # One collection per stage; each kernel still has its own exact
             # rectangle. This avoids hundreds of separate Matplotlib artists.
-            intervals = list(zip(launches["gpu_start_us"] - origin, launches["duration_us"]))
+            intervals = list(zip(launches["gpu_start_us"], launches["duration_us"]))
             bars = ax.broken_barh(intervals, (y - 0.32, 0.64),
                                  facecolors=colors[phase], edgecolors=colors[phase],
                                  linewidth=0.6, zorder=3)
@@ -802,54 +878,186 @@ def display_timeline(
             flop_ax.xaxis.set_major_formatter(EngFormatter(sep=""))
             flop_ax.locator_params(axis="x", nbins=3)
             flop_ax.tick_params(axis="y", left=False, labelleft=False)
-            flop_ax.set_title("Estimated FLOPs per stage", fontsize=10)
-            flop_ax.set_xlabel("0 = no allocated estimate", fontsize=8)
+            flop_ax.set_xlabel("Estimated FLOPs per stage\n0 = no allocated estimate", fontsize=8)  # a title would widen the gap above
             flop_ax.grid(axis="x", alpha=0.2)
             flop_ax.set_axisbelow(True)
 
         ax.set_yticks(range(len(selected)), labels=labels, fontsize=8)
         ax.invert_yaxis()
-        ax.set_xlabel(f"Time since earliest displayed kernel (us); origin = {origin:,.3f} us")
-        ax.set_title(title)
+        ax.set_xlabel("Time (us)")
+        if not top:
+            ax.set_title("\n".join([title, " | ".join(info)] if info else [title]))
         ax.grid(axis="x", alpha=0.2)
         ax.set_axisbelow(True)
         handles = [Patch(color=colors[phase], label=f"{phase.replace('_', ' ').capitalize()} GPU")
-                   for phase in phases]
+                   for phase in kernel_phases]
         handles.append(Patch(color=background, label="Group GPU span"))
         ax.legend(handles=handles, loc="upper right", fontsize=8,
                   borderpad=0.4, labelspacing=0.3, framealpha=0.9)
         ax.margins(y=0.02)
-        right = selected["gpu_end_us"].max() - origin
+        left, right = selected["gpu_start_us"].min(), selected["gpu_end_us"].max()
+
+        plotted = kernels.loc[kernel_ids]
+        dots_ax = fig.add_subplot(grid[top + 1, 0])
+        jitter = np.random.default_rng(0)  # only spreads the dots vertically within a lane
+        for lane, phase in enumerate(kernel_phases):
+            durations = plotted.loc[plotted["phase"] == phase, "duration_us"]
+            dots_ax.scatter(durations, lane + jitter.uniform(-0.3, 0.3, len(durations)), s=8, alpha=0.5,
+                            color=colors[phase], linewidths=0)
+            dots_ax.vlines(durations.median(), lane - 0.4, lane + 0.4, color="k", linewidth=1.5)  # the median
+        dots_ax.set_yticks(range(len(kernel_phases)),
+                           [f"{phase} (n={(plotted['phase'] == phase).sum()})" for phase in kernel_phases], fontsize=7)
+        dots_ax.invert_yaxis()
+        dots_ax.set_xscale("log")
+        dots_ax.set_xlabel("kernel duration (us), black tick = median", fontsize=8)
+        dots_ax.tick_params(axis="x", labelsize=7)
+        dots_ax.grid(axis="x", alpha=0.2)
+    if top:
+        memory_ax = fig.add_subplot(grid[0, 0], sharex=ax if has_kernels else None)
+        highest = []
+        for index, name in enumerate(["allocated", "reserved"]):
+            color = f"C{index}"
+            if memory is not None:
+                memory_ax.step(memory.index, memory[name] / 2**20, where="post", color=color, label=name)
+                highest.append(memory[name].max())
+            if peaks is not None:
+                memory_ax.axhline(peaks[name] / 2**20, color=color, linestyle=":",
+                                  label=f"peak {name} ({peaks[name] / 2**20:.1f} MiB)")
+                highest.append(peaks[name])
+            if memory_baseline is not None:
+                memory_ax.axhline(memory_baseline[name] / 2**20, color=color, alpha=0.5,
+                                  label=f"{name} before model ({memory_baseline[name] / 2**20:.1f} MiB)")
         if memory is not None:
-            memory_ax = fig.add_subplot(grid[0, 0], sharex=ax)
-            elapsed = memory.index - memory.index.min()
-            right = max(right, elapsed.max())
-            peaks = memory.max().div(2**20)
-            for name in memory:
-                line, = memory_ax.step(elapsed, memory[name] / 2**20, where="post",
-                                       label=f"{name} (peak {peaks[name]:.1f} MiB)")
-                if memory_baseline is not None:
-                    memory_ax.axhline(memory_baseline[name] / 2**20, color=line.get_color(), alpha=0.5,
-                                      label=f"{name} before model ({memory_baseline[name] / 2**20:.1f} MiB)")
-            memory_ax.set_ylim(0, 1.1 * peaks.max())  # a larger total is clipped, not rescaled
-            if total_memory is not None:
-                memory_ax.axhline(total_memory / 2**20, color="k", linestyle="--",
-                                  label=f"total VRAM ({total_memory / 2**30:.1f} GiB)")
-            if persistent_memory is not None:
-                memory_ax.axhline(persistent_memory / 2**20, color="grey", linestyle="--", alpha=0.5,
-                                  label=f"persistent ({persistent_memory / 2**20:.1f} MiB)")
-            memory_ax.set_ylabel("MiB")
-            memory_ax.set_title("GPU memory")
-            # The legend sits to the right of the memory panel, above the FLOPs panel when there is one.
-            if show_flops:
-                legend_ax = fig.add_subplot(grid[0, 1])
-                legend_ax.axis("off")
-                legend_ax.legend(*memory_ax.get_legend_handles_labels(), loc="upper left", borderaxespad=0, fontsize=8)
-            else:
-                memory_ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=8)
-            memory_ax.grid(axis="x", alpha=0.2)
+            left, right = min(left, memory.index.min()), max(right, memory.index.max())
+        memory_ax.set_ylim(0, 1.1 * max(highest) / 2**20)  # a larger total is clipped, not rescaled
+        if total_memory is not None:
+            memory_ax.axhline(total_memory / 2**20, color="k", linestyle="--",
+                              label=f"total VRAM ({total_memory / 2**30:.1f} GiB)")
+        if persistent_memory is not None:
+            memory_ax.axhline(persistent_memory / 2**20, color="grey", linestyle="--", alpha=0.5,
+                              label=f"persistent ({persistent_memory / 2**20:.1f} MiB)")
+        memory_ax.set_ylabel("MiB")
+        memory_ax.set_title(title)
+        # The legend sits to the right of the memory panel, above the FLOPs panel when there is one.
+        if show_flops:
+            legend_ax = fig.add_subplot(grid[0, 1])
+            legend_ax.axis("off")
+            legend = legend_ax.legend(*memory_ax.get_legend_handles_labels(), loc="upper left", borderaxespad=0, fontsize=8)
+            note_ax = legend_ax
+        else:
+            legend = memory_ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=8)
+            note_ax = memory_ax
+        if info:  # just below the legend, wherever the layout puts it
+            note_ax.annotate("\n".join(info), xy=(0, 0), xycoords=legend, xytext=(0, -6), textcoords="offset points",
+                             va="top", ha="left", fontsize=8, annotation_clip=False)
+        memory_ax.grid(axis="x", alpha=0.2)
+        if has_kernels:
             memory_ax.tick_params(axis="x", labelbottom=False)
+        else:
+            memory_ax.set_xlabel("Time (us)")
+    panels = ([memory_ax] if top else []) + ([ax] if has_kernels else [])
+    if not panels:  # phases alone: a strip with just their bands
+        strip = fig.add_subplot(grid[0, 0])
+        strip.set_title("\n".join([title, " | ".join(info)] if info else [title]))
+        strip.set_yticks([])
+        strip.set_xlabel("Time (us)")
+        panels = [strip]
+    if phases is not None:
+        for phase in phases.itertuples():
+            left, right = min(left, phase.start_us), max(right, phase.end_us)
+            for panel in panels:
+                panel.axvspan(phase.start_us, phase.end_us, color=colors[phase.name], alpha=0.1, linewidth=0, zorder=0)
+            panels[0].text((phase.start_us + phase.end_us) / 2, 0.98, phase.name, transform=panels[0].get_xaxis_transform(),
+                           ha="center", va="top", fontsize=7, color=colors[phase.name])
+    if math.isfinite(left):  # peaks alone have no times
         # Pad the view by 5% of the plotted time on each side; the data is untouched.
-        ax.set_xlim(-0.05 * right, 1.05 * right)
-        fig.tight_layout(pad=0.6)
+        pad = 0.05 * (right - left)
+        panels[-1].set_xlim(left - pad, right + pad)
+
+
+def step_timeline(readings, depth=3):
+    """Return draw_timeline's data for one captured step, in us from the step's start on the unix clock.
+
+    readings is one step of capture's result; depth is the module depth of the kernel rows. The
+    result has "groups" and "kernels" with kernel_events, "memory" with trace, "peaks" with peak
+    and "phases" with wall_clock. The allocator, the profiler (through its trace start) and the phases all stamp unix
+    time, so they share one clock; the step starts at the earliest time any of them recorded.
+    """
+    import pandas as pd
+
+    timeline, starts = {}, []
+    if readings["events"]:
+        timeline["groups"], timeline["kernels"], _, _ = aggregate_kernels(
+            events_to_rows(readings["events"]), depth=depth)
+        starts.append(timeline["kernels"]["gpu_start_us"].min() + readings["trace_start_us"])
+    if "snapshot" in readings:
+        timeline["memory"] = memory_over_time(readings["snapshot"])[0]
+        starts.append(timeline["memory"].index.min())
+    if "wall_clock_phase_spans" in readings:
+        timeline["phases"] = pd.DataFrame(readings["wall_clock_phase_spans"], index=["start_us", "end_us"]).T.rename_axis("name").reset_index()
+        starts.append(timeline["phases"]["start_us"].min())
+    if "peak_allocated" in readings:
+        timeline["peaks"] = {"allocated": readings["peak_allocated"], "reserved": readings["peak_reserved"]}
+    if not starts:  # nothing with a time, so nothing to move
+        return timeline
+    start = min(starts)
+
+    for key in ("groups", "kernels"):  # profiler times count from its trace start
+        if key in timeline:
+            shift = readings["trace_start_us"] - start
+            timeline[key] = timeline[key].assign(gpu_start_us=timeline[key]["gpu_start_us"] + shift,
+                                                 gpu_end_us=timeline[key]["gpu_end_us"] + shift)
+    if "memory" in timeline:
+        timeline["memory"] = timeline["memory"].set_axis(timeline["memory"].index - start)
+    if "phases" in timeline:
+        timeline["phases"] = timeline["phases"].assign(start_us=timeline["phases"]["start_us"] - start,
+                                                     end_us=timeline["phases"]["end_us"] - start)
+    return timeline
+
+
+def display_steps(captured, steps=None, depth=3):
+    """Display each captured step's timeline, stacked top to bottom in one figure.
+
+    captured is capture's result; steps picks step numbers (all by default) and depth the module
+    depth of the kernel rows. A step's panels appear only if capture recorded their data: kernels
+    with kernel_events, memory with trace, peak lines with peak, the shaded phases with wall_clock.
+    Persistent memory and total VRAM are drawn wherever the memory panel is. All of them are on the
+    unix clock, from the step's earliest recorded time (step_timeline). Allocations are stamped
+    when the CPU issues them and kernels when the GPU runs them, so a kernel can start after the
+    allocation for its output.
+
+    Under each step's legend: the GPU, the step's wall time, the GPU's dense peak TFLOPS for the
+    precision capture ran in (gpus.peaks), the achieved TFLOPS and the MFU. Achieved is capture's
+    step_flops over the step's time, so it counts matmul and attention FLOPs only, and the time
+    includes any instruments that were on.
+    """
+    import matplotlib.pyplot as plt
+    from gpus.peaks import PRECISIONS, peak_tflops, spec_row
+
+    gpu, precision = captured["gpu"], captured["precision"]
+    peak = peak_tflops(gpu, precision)
+    infos = {}
+    for step in steps if steps is not None else captured["steps"]:
+        step_ms = captured["steps"][step]["step_ms"]
+        achieved = captured["step_flops"] / (step_ms / 1e3) / 1e12  # TFLOPS
+        infos[step] = [f"GPU: {gpu} [{spec_row(gpu)}]",
+                       f"step time: {step_ms:.1f} ms",
+                       f"peak: {peak:,.1f} TFLOPS {PRECISIONS[precision]}",
+                       f"achieved: {achieved:,.1f} TFLOPS",
+                       f"MFU: {achieved / peak:.1%}"]
+    timelines = {step: step_timeline(captured["steps"][step], depth)
+                 for step in (steps if steps is not None else captured["steps"])}
+    heights = {step: timeline_height(timeline.get("groups"), timeline.get("memory"), timeline.get("phases"), timeline.get("peaks"))
+               for step, timeline in timelines.items()}
+    timelines = {step: timeline for step, timeline in timelines.items() if heights[step]}  # nothing recorded, no plot
+    if not timelines:
+        return
+    heights = [heights[step] for step in timelines]
+    # ioff prevents ipympl from displaying once on creation and again on show().
+    with plt.ioff():
+        fig = plt.figure(figsize=(12, sum(heights)), layout="constrained")
+        fig.get_layout_engine().set(w_pad=0.03, h_pad=0.03, wspace=0.02, hspace=0.02)  # tight, in inches and fractions
+        for area, (step, timeline) in zip(fig.add_gridspec(len(heights), 1, height_ratios=heights), timelines.items()):
+            draw_timeline(fig, area, title=f"step {step}", total_memory=captured["device_vram"],
+                          persistent_memory=captured["persistent_memory"], info=infos[step], **timeline)
     plt.show()
