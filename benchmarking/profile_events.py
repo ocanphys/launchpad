@@ -325,6 +325,36 @@ def events_to_rows(function_events):
     return rows
 
 
+LAUNCH_CHAIN_COLUMNS = [
+    "name", "activity_type", "device_type",# "device_index",  # what the event is
+    "start_us", "end_us",# "thread",  # timing
+    "launcher_id", "correlation_id", "linked_correlation_id", #"sequence_nr", "fwd_thread", "scope",  # relations
+    "flops",
+    "input_shapes", "input_dtypes",  # shapes
+    #"cpu_memory_usage", "device_memory_usage",  # memory
+]
+
+
+def launch_chain(rows, kernel_id, format=True):
+    """Return the rows on kernel_id's launcher_id path, ordered from the CPU root down to the kernel.
+
+    rows is the table from events_to_rows. A kernel with no launcher returns just its own row.
+    format=True keeps LAUNCH_CHAIN_COLUMNS, with start_us and end_us expanded from time_range;
+    format=False returns the raw rows.
+    """
+    import pandas as pd
+
+    chain, current = [], kernel_id
+    while pd.notna(current):
+        chain.append(current)
+        current = rows.loc[current, "launcher_id"]
+    chain = rows.loc[chain[::-1]]
+    if not format:
+        return chain
+    return chain.assign(start_us=chain["time_range"].map(lambda r: r.start),
+                        end_us=chain["time_range"].map(lambda r: r.end))[LAUNCH_CHAIN_COLUMNS]
+
+
 def _execution_context(event, inherited, root):
     """Return (phase, full owner FQN, owner stage row ID) for one tree node."""
     phase, owner, stage_id = inherited
@@ -622,30 +652,6 @@ def memory_over_time(memory_snapshot):
     return usage
 
 
-def memory_clock_offsets(rows, memory_snapshot, device=0):
-    """Return one row per matched record_function start with its allocator-clock minus profiler-clock offset.
-
-    Columns are name, profiler_start_us, allocator_start_us and offset_us. A user_annotation event
-    in rows is paired, in time order, with the snapshot annotation START of the same name; names
-    whose counts differ between the two are skipped. If both clocks tick alike, offset_us is the
-    same for every row, and subtracting it from allocator time_us puts memory on the rows timeline.
-    """
-    import pandas as pd
-
-    profiler = rows[rows["activity_type"].eq("user_annotation") & rows["device_type"].map(str).eq("DeviceType.CPU")]
-    profiler_starts = profiler.assign(start=profiler["time_range"].map(lambda r: r.start)).groupby("name")["start"]
-    allocator_starts = {}
-    for a in sorted(memory_snapshot["external_annotations"], key=lambda a: a["time_us"]):
-        if a["stage"] == "START" and a["device"] == device:
-            allocator_starts.setdefault(a["name"], []).append(a["time_us"])
-    matched = []
-    for name, starts in profiler_starts:
-        starts = sorted(starts)
-        if len(starts) == len(allocator_starts.get(name, [])):
-            matched += [(name, start, other, other - start) for start, other in zip(starts, allocator_starts[name])]
-    return pd.DataFrame(matched, columns=["name", "profiler_start_us", "allocator_start_us", "offset_us"])
-
-
 def transformer_matmul_comparison(transformer, tokens, rows):
     """Returns (per-phase, per-module) tables of analytical vs profiled matmul FLOPs for a TransformerLM.
 
@@ -722,8 +728,8 @@ def display_timeline(
     right-hand panel are for display; groups.estimated_flops holds exact totals.
 
     memory adds a top panel with one step line per column (allocated, reserved) in MiB, sharing the
-    time axis. Its index is time in the same clock as kernels.gpu_start_us, in us; use
-    memory_over_time shifted by memory_clock_offsets. total_memory, in bytes, adds a dashed line.
+    time axis. Its index is time in us and its first entry is drawn at t = 0, the same t = 0 as the
+    earliest displayed kernel. total_memory, in bytes, adds a dashed line.
     memory_baseline maps a memory column to its bytes before the model was built, drawn as a faded line
     in that column's color. persistent_memory, in bytes, adds a dashed grey line for the memory that stays
     allocated through the step (weights, gradients and optimizer state).
@@ -812,12 +818,15 @@ def display_timeline(
         handles.append(Patch(color=background, label="Group GPU span"))
         ax.legend(handles=handles, loc="upper right", fontsize=8,
                   borderpad=0.4, labelspacing=0.3, framealpha=0.9)
-        ax.margins(x=0.01, y=0.02)
+        ax.margins(y=0.02)
+        right = selected["gpu_end_us"].max() - origin
         if memory is not None:
             memory_ax = fig.add_subplot(grid[0, 0], sharex=ax)
+            elapsed = memory.index - memory.index.min()
+            right = max(right, elapsed.max())
             peaks = memory.max().div(2**20)
             for name in memory:
-                line, = memory_ax.step(memory.index - origin, memory[name] / 2**20, where="post",
+                line, = memory_ax.step(elapsed, memory[name] / 2**20, where="post",
                                        label=f"{name} (peak {peaks[name]:.1f} MiB)")
                 if memory_baseline is not None:
                     memory_ax.axhline(memory_baseline[name] / 2**20, color=line.get_color(), alpha=0.5,
@@ -840,5 +849,7 @@ def display_timeline(
                 memory_ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=8)
             memory_ax.grid(axis="x", alpha=0.2)
             memory_ax.tick_params(axis="x", labelbottom=False)
+        # Pad the view by 5% of the plotted time on each side; the data is untouched.
+        ax.set_xlim(-0.05 * right, 1.05 * right)
         fig.tight_layout(pad=0.6)
     plt.show()
