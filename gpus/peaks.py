@@ -8,7 +8,8 @@ import re
 import pandas as pd
 
 # Peak dense throughput of every GPU Modal offers, per precision, from the vendor datasheets.
-# Rows are the strings capture is called with, gpu="...". TFLOPS; memory bandwidth in GB/s.
+# Rows are the strings capture is called with, gpu="...". Compute is in TFLOPs per second (a rate:
+# trillions of floating-point operations each second); memory bandwidth in GB/s.
 # NaN means the datasheet gives no figure or the GPU has no such unit. Tensor-core rows are dense:
 # datasheets quote the 2:4 structured-sparsity rate, twice as high, so those figures were halved.
 nan = float("nan")
@@ -58,5 +59,5 @@ def spec_row(device_name: str) -> str:
 
 
 def peak_tflops(device_name: str, dtype: str) -> float:
-    """Return the dense peak TFLOPS of the GPU for str(dtype), NaN if the GPU has no unit for it."""
+    """Return the dense peak rate of the GPU for str(dtype) in TFLOPs per second, NaN if it has no unit for it."""
     return gpu_specs.loc[spec_row(device_name), PRECISIONS[dtype]]

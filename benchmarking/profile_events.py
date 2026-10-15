@@ -773,7 +773,7 @@ def draw_timeline(
     area is a SubplotSpec of a figure with constrained layout, which spaces the panels and their
     labels; size it with timeline_height. title goes on the top panel. Every time
     (kernels' gpu_start_us and gpu_end_us, memory's index, phases) is us from one shared t = 0, so
-    the panels line up; step_timeline puts a captured step's data on one.
+    the panels line up; step_report puts a captured step's data on one.
 
     Each panel is drawn only when its data is there: without groups (or with none selected) there
     is no kernel timeline and no FLOPs panel, and without memory there is no memory panel. With
@@ -975,80 +975,62 @@ def draw_timeline(
         panels[-1].set_xlim(left - pad, right + pad)
 
 
-def step_timeline(readings, depth=3):
-    """Return draw_timeline's data for one captured step, in us from the step's start on the unix clock.
-
-    readings is one step of capture's result; depth is the module depth of the kernel rows. The
-    result has "groups" and "kernels" with kernel_events, "memory" with trace, "peaks" with peak
-    and "phases" with wall_clock. The allocator, the profiler (through its trace start) and the phases all stamp unix
-    time, so they share one clock; the step starts at the earliest time any of them recorded.
-    """
+def _timeline_arguments(step):
+    """Return draw_timeline's keyword arguments for one step of a step_report report."""
     import pandas as pd
 
-    timeline, starts = {}, []
-    if readings["events"]:
-        timeline["groups"], timeline["kernels"], _, _ = aggregate_kernels(
-            events_to_rows(readings["events"]), depth=depth)
-        starts.append(timeline["kernels"]["gpu_start_us"].min() + readings["trace_start_us"])
-    if "snapshot" in readings:
-        timeline["memory"] = memory_over_time(readings["snapshot"])[0]
-        starts.append(timeline["memory"].index.min())
-    if "wall_clock_phase_spans" in readings:
-        timeline["phases"] = pd.DataFrame(readings["wall_clock_phase_spans"], index=["start_us", "end_us"]).T.rename_axis("name").reset_index()
-        starts.append(timeline["phases"]["start_us"].min())
-    if "peak_allocated" in readings:
-        timeline["peaks"] = {"allocated": readings["peak_allocated"], "reserved": readings["peak_reserved"]}
-    if not starts:  # nothing with a time, so nothing to move
-        return timeline
-    start = min(starts)
-
-    for key in ("groups", "kernels"):  # profiler times count from its trace start
-        if key in timeline:
-            shift = readings["trace_start_us"] - start
-            timeline[key] = timeline[key].assign(gpu_start_us=timeline[key]["gpu_start_us"] + shift,
-                                                 gpu_end_us=timeline[key]["gpu_end_us"] + shift)
-    if "memory" in timeline:
-        timeline["memory"] = timeline["memory"].set_axis(timeline["memory"].index - start)
-    if "phases" in timeline:
-        timeline["phases"] = timeline["phases"].assign(start_us=timeline["phases"]["start_us"] - start,
-                                                     end_us=timeline["phases"]["end_us"] - start)
-    return timeline
+    arguments = {}
+    if "kernels" in step:
+        clock = {"start_us": "gpu_start_us", "end_us": "gpu_end_us"}
+        arguments["kernels"] = pd.DataFrame(step["kernels"]).set_index("id").rename(columns=clock)
+        arguments["groups"] = pd.DataFrame(step["groups"]).rename(columns=clock).set_index(["phase", "module"])
+    memory = step.get("memory", {})
+    if "series" in memory:
+        arguments["memory"] = pd.DataFrame(memory["series"]).set_index("time_us")
+    if "peak_allocated_bytes" in memory:
+        arguments["peaks"] = {"allocated": memory["peak_allocated_bytes"], "reserved": memory["peak_reserved_bytes"]}
+    if "phases" in step:
+        arguments["phases"] = pd.DataFrame(step["phases"])[["name", "start_us", "end_us"]]
+    return arguments
 
 
-def display_steps(captured, steps=None, depth=3):
-    """Display each captured step's timeline, stacked top to bottom in one figure.
+def _with_prefix(value, unit):
+    """Return value in a unit with an SI prefix that keeps it readable: 228.8 GFLOPs, 7.6 TFLOPs/s."""
+    for exponent, prefix in ((15, "P"), (12, "T"), (9, "G"), (6, "M"), (3, "K")):
+        if abs(value) >= 10**exponent:
+            return f"{value / 10**exponent:,.1f} {prefix}{unit}"
+    return f"{value:,.1f} {unit}"
 
-    captured is capture's result; steps picks step numbers (all by default) and depth the module
-    depth of the kernel rows. A step's panels appear only if capture recorded their data: kernels
-    with kernel_events, memory with trace, peak lines with peak, the shaded phases with wall_clock.
-    Persistent memory and total VRAM are drawn wherever the memory panel is. All of them are on the
-    unix clock, from the step's earliest recorded time (step_timeline). Allocations are stamped
-    when the CPU issues them and kernels when the GPU runs them, so a kernel can start after the
-    allocation for its output.
 
-    Under each step's legend: the GPU, the step's wall time, the GPU's dense peak TFLOPS for the
-    precision capture ran in (gpus.peaks), the achieved TFLOPS and the MFU. Achieved is capture's
-    step_flops over the step's time, so it counts matmul and attention FLOPs only, and the time
-    includes any instruments that were on.
+def display_steps(report, steps=None):
+    """Display each step of a step_report report as a timeline, stacked top to bottom in one figure.
+
+    report is step_report.build_report's result and steps picks step numbers (all by default).
+    A step's panels appear only if its block is in the report: kernels, memory (the curves with a
+    trace, the peak lines with peak) and the shaded phases. Persistent memory and total VRAM are
+    drawn wherever the memory panel is. Under each step's legend: the GPU, the step's wall time, its
+    FLOP count (FLOPs), the achieved rate (FLOPs/s), the GPU's dense peak rate for the precision capture
+    ran in and the MFU. Every FLOP figure is an algorithmic estimate from op shapes, and a footnote
+    says so; report["run"]["sources"] has the details. All times are on the step's own clock, from
+    the earliest time its blocks recorded, in the report.
     """
     import matplotlib.pyplot as plt
-    from gpus.peaks import PRECISIONS, peak_tflops, spec_row
 
-    gpu, precision = captured["gpu"], captured["precision"]
-    peak = peak_tflops(gpu, precision)
-    infos = {}
-    for step in steps if steps is not None else captured["steps"]:
-        step_ms = captured["steps"][step]["step_ms"]
-        achieved = captured["step_flops"] / (step_ms / 1e3) / 1e12  # TFLOPS
-        infos[step] = [f"GPU: {gpu} [{spec_row(gpu)}]",
-                       f"step time: {step_ms:.1f} ms",
-                       f"peak: {peak:,.1f} TFLOPS {PRECISIONS[precision]}",
-                       f"achieved: {achieved:,.1f} TFLOPS",
-                       f"MFU: {achieved / peak:.1%}"]
-    timelines = {step: step_timeline(captured["steps"][step], depth)
-                 for step in (steps if steps is not None else captured["steps"])}
-    heights = {step: timeline_height(timeline.get("groups"), timeline.get("memory"), timeline.get("phases"), timeline.get("peaks"))
-               for step, timeline in timelines.items()}
+    run = report["run"]
+    gpu, peak = run["gpu"], run["peak"]
+    timelines, infos = {}, {}
+    for step in map(str, steps if steps is not None else report["steps"]):
+        readings, mfu = report["steps"][step], report["steps"][step]["mfu"]
+        timelines[step] = _timeline_arguments(readings)
+        infos[step] = [f"GPU: {gpu['name']} [{gpu['spec_row']}]",
+                       f"step time: {mfu['step_ms']:.1f} ms",
+                       f"step: {_with_prefix(mfu['step_flops'], 'FLOPs')} (est.)",
+                       f"achieved: {_with_prefix(mfu['achieved_flops_per_s'], 'FLOPs/s')} (est.)",
+                       "peak: n/a" if peak["flops_per_s"] is None
+                       else f"peak: {_with_prefix(peak['flops_per_s'], 'FLOPs/s')} {peak['dtype']}",
+                       "MFU: n/a" if mfu["mfu"] is None else f"MFU: {mfu['mfu']:.1%} (est.)"]
+    heights = {step: timeline_height(timeline.get("groups"), timeline.get("memory"), timeline.get("phases"),
+                                     timeline.get("peaks")) for step, timeline in timelines.items()}
     timelines = {step: timeline for step, timeline in timelines.items() if heights[step]}  # nothing recorded, no plot
     if not timelines:
         return
@@ -1058,6 +1040,8 @@ def display_steps(captured, steps=None, depth=3):
         fig = plt.figure(figsize=(12, sum(heights)), layout="constrained")
         fig.get_layout_engine().set(w_pad=0.03, h_pad=0.03, wspace=0.02, hspace=0.02)  # tight, in inches and fractions
         for area, (step, timeline) in zip(fig.add_gridspec(len(heights), 1, height_ratios=heights), timelines.items()):
-            draw_timeline(fig, area, title=f"step {step}", total_memory=captured["device_vram"],
-                          persistent_memory=captured["persistent_memory"], info=infos[step], **timeline)
+            draw_timeline(fig, area, title=f"step {step}", total_memory=run["gpu"]["vram_bytes"],
+                          persistent_memory=run["persistent_memory_bytes"], info=infos[step], **timeline)
+        fig.supxlabel("(est.): algorithmic estimates from op shapes (torch FlopCounterMode, the profiler's per-op "
+                      "formulas), not hardware counters. Peak: vendor datasheet, dense.", fontsize=7, color="0.4")
     plt.show()
