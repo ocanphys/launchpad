@@ -116,7 +116,7 @@ def test_forward_backward_paths_shared_aliases_gradients_and_kernel_links():
             assert labels[-1] == f"{phase}::model"
 
     intervals = [SimpleNamespace(start=float(i), end=i + 1.0) for i in range(len(rows))]
-    groups, kernels, _ = aggregate_kernels(rows.assign(time_range=intervals))
+    groups, kernels, _, _ = aggregate_kernels(rows.assign(time_range=intervals))
     assert len(kernels) == len(expected_kernel_scopes)
     for kernel_id, (_, expected_path) in expected_kernel_scopes.items():
         assert (kernels.loc[kernel_id, "module_fqn"] == "<unattributed>") == (not expected_path)
