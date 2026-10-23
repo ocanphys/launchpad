@@ -140,52 +140,29 @@ tokenizer.encode("hello")       # or whatever the type offers
 volume without building anything. `.bind()` additionally requires that it is
 done and loads its files.
 
-## Sweeps: many variants, one line
-
-Wrap alternatives in `Sweep`. Launchpad expands every combination, builds the
-shared parts once, and declares the lot.
-
-```python
-from artifacts.core.sweep import Sweep
-
-tokenizer = Tokenizer(
-    vocab_size=Sweep((1000, 2000)),
-    special_tokens=("<pad>",),
-    sources=(books, code),
-)
-tokens = TokenizedSource(tokenizer=tokenizer, source=Sweep((books, code)))
-# 2 vocab sizes x 2 sources = 4 tokenized sources, 2 tokenizers, 2 sources
-```
-
-Rules of thumb: separate sweeps multiply, alternatives inside one sweep add,
-and a tuple like `(64, 128)` is one value, not two choices. Sweeps work on
-nested parameters and dependencies too. Details: [sweeps.md](sweeps.md).
-
 ## Example: train a model end to end
 
-[tinystories.ipynb](../tinystories.ipynb) declares a full pretraining sweep:
-two text sources, a BPE tokenizer, a dataset, and transformer runs over
-several batch sizes.
+[tinystories.ipynb](../tinystories.ipynb) declares a full pretraining run:
+two text sources, a BPE tokenizer, a dataset, and a transformer.
 
 ```python
 pretraining = Pretraining(
-    run_id="TINYSTORIES_batch_sweep",
+    run_id="TINYSTORIES",
     dataset=dataset,
     model=Transformer(vocab_size=tokenizer.vocab_size, d_model=512, d_ff=1344,
-                      sequence_length=256, num_layers=Sweep((4, 8)), num_heads=16,
+                      sequence_length=256, num_layers=4, num_heads=16,
                       rope_theta=10000, device="cuda"),
     training_parameters=TrainingParameters(
-        total_steps=20000, batch_size=Sweep((32, 64, 128)), ...
+        total_steps=20000, batch_size=64, ...
     ),
     loop_config=LoopConfig(checkpoint_every=5000, val_every=200, ...),
 )
 
-runs = expand(pretraining)          # the 6 concrete runs this stands for
 declare_on_volume(pretraining, commit=True)
 ```
 
-Then launch the sources, tokenizer and dataset, and each run, from the
-dashboard. Watch loss curves and logs on each run's page.
+Then launch the sources, tokenizer and dataset, and the run, from the
+dashboard. Watch loss curves and logs on the run's page.
 
 Things worth knowing about training:
 
@@ -238,7 +215,7 @@ a changed parameter is a new artifact. That is intended: the old one stays.
 for example two sources named `odyssey` with different URLs. Rename one.
 
 **Can I work without Modal?** Declaring and resolving work against any local
-folder: pass `root=` (see [sweep_quickstart.ipynb](../sweep_quickstart.ipynb)).
+folder: pass `root=`.
 Launching and the dashboard need the deployment.
 
 **Run the tests.** `uv run pytest`.
@@ -250,7 +227,6 @@ Launching and the dashboard need the deployment.
 | The model: artifacts, jobs, leases | [artifacts/core/spec.md](../artifacts/core/spec.md) |
 | Where code lives, how traffic flows | [README.md](../README.md) |
 | Every flow as a flowchart | [workflows.md](workflows.md) |
-| Sweeps in depth | [sweeps.md](sweeps.md) |
 | Training and checkpoints | [training.md](../artifacts/stages/pretraining/training.md) |
 | Dashboard internals | [UI.md](UI.md) |
 | Log format | [LOGGING.md](LOGGING.md) |

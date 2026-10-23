@@ -131,9 +131,6 @@ def to_manifest(artifact: Artifact) -> dict:
     dataclass's fields are reordered. A set of artifacts is an array in
     `members` order, since JSON has no set type.
     """
-    from artifacts.core.artifact import Artifact
-
-    Artifact.require_concrete(artifact)
     cls = type(artifact)
     deps = {}
     for name, container in dependencies(cls).items():
@@ -159,28 +156,20 @@ def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifa
     Each node keeps the commit recorded for it, so a subtree produced by
     older code stays visibly older.
 
-    `memo`, one dict across many calls, hands back the same instance for a
-    subtree they share (the dataset under every leg of a run, each leg under
-    the next) instead of decoding it again; the instances are frozen, so
-    sharing them changes nothing but the work.
+    `memo` maps a manifest's JSON to the artifact it decoded to. One dict
+    across many calls hands back the same instance for a subtree they share
+    (the dataset under every leg of a run, each leg under the next) instead
+    of decoding it again; the instances are frozen, so sharing them changes
+    nothing but the work.
     """
+    key = json.dumps(data, sort_keys=True) if memo is not None else None
+    if key is not None and key in memo:
+        return memo[key]
     cls = locate(data["artifact"])
     if not is_artifact(cls):
         raise TypeError(f"manifest target must be an Artifact, got {cls}")
     hints, deps, tagged = annotations(cls), dependencies(cls), polymorphic(cls)
-    held = {
-        name: [from_manifest(item, memo) for item in value] if deps[name]
-        else None if value is None else from_manifest(value, memo)
-        for name, value in data["dependencies"].items()
-    }
     own = {"commit": data["commit"], "allocated_resources": data["allocated_resources"], **data["parameters"]}
-    if memo is not None:
-        # a node's own fields and the instances its dependencies decoded to,
-        # which the memo already keys by their own subtrees
-        ids = {name: list(map(id, v)) if isinstance(v, list) else id(v) for name, v in held.items()}
-        key = json.dumps([data["artifact"], own, ids], sort_keys=True)
-        if key in memo:
-            return memo[key]
     inputs = {}
     for name, value in own.items():
         annotation = hints[name]
@@ -188,10 +177,13 @@ def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifa
             value = dict(value)
             annotation = locate(value.pop("class"))
         inputs[name] = _decode(value, annotation, f"{cls.__qualname__}.{name}")
-    for name, value in held.items():
-        inputs[name] = deps[name](value) if deps[name] else value
+    for name, value in data["dependencies"].items():
+        if deps[name]:
+            inputs[name] = deps[name](from_manifest(item, memo) for item in value)
+        else:
+            inputs[name] = None if value is None else from_manifest(value, memo)
     artifact = cls(**inputs)
-    if memo is not None:
+    if key is not None:
         memo[key] = artifact
     return artifact
 

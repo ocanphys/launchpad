@@ -325,10 +325,6 @@ property test or a probe hit it:
 - The serializer writes `True` in an int field as `1`, and `1 == True`, so a
   JSON round trip plus `==` cannot catch a bool passed as an int. Strict
   Python-mode validation does.
-- `__get_pydantic_core_schema__` on a generic dataclass is ignored for its
-  parametrized alias: with `lr: float | Sweep[float]`, the JSON
-  `{"values": [1.0]}` decoded into a record holding a `Sweep`. Concrete
-  annotations remove the question.
 - `-0.0 == 0.0`, but they encode differently, so identity hashes differed;
   the codec parses floats with `float(s) + 0.0`.
 

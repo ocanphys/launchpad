@@ -24,9 +24,9 @@ def captured_with(steps, **extra):
         "steps": steps, "device_vram": 2**30, "persistent_memory": 4, "step_flops": 1e12,
         "precision": "torch.bfloat16", "gpu": "NVIDIA L4",
         "parameters": {"batch_size": 8, "warmup_steps": 5, "profile_steps": len(steps), "autocast": "torch.bfloat16",
-                       "kernel_events": False, "module_scopes": False, "peak": True, "trace": True, "wall_clock": True},
+                       "kernel_events": False, "module_scopes": False, "peak": True, "trace": True},
         "model_class": "Transformer", "model_parameters": {"vocab_size": 100, "d_model": 16, "dtype": "torch.float32"},
-        "optimizer": "AdamW", "compile": True,
+        "optimizer": "AdamW",
         "size_estimation": {"model": {"parameters": 10, "bytes": 40}, "optimizer": {"parameters": 20, "bytes": 80}},
         **extra,
     }
@@ -53,7 +53,7 @@ def test_report_is_plain_json_and_holds_the_run_and_every_step():
     assert run["model"] == {"class": "Transformer", "parameters": {"vocab_size": 100, "d_model": 16, "dtype": "torch.float32"},
                             "size": {"parameters": 10, "bytes": 40}}
     assert run["optimizer"] == {"class": "AdamW", "state_parameters": 20, "state_bytes": 80}
-    assert run["capture"]["batch_size"] == 8 and run["capture"]["autocast"] == "torch.bfloat16" and run["compile"] is True
+    assert run["capture"]["batch_size"] == 8 and run["capture"]["autocast"] == "torch.bfloat16"
     assert run["precision"] == "torch.bfloat16" and run["peak"] == {"dtype": "bf16", "flops_per_s": 121e12}
     assert run["step_flops"] == 1e12
     # every FLOP number says where it comes from, and none comes from a hardware counter

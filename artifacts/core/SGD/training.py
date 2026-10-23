@@ -14,11 +14,10 @@ from pathlib import Path
 from typing import ClassVar, Literal
 
 from artifacts.core.artifact import Artifact
-from artifacts.core.sweep import Record
 
 
 @dataclass(frozen=True)
-class Model(Record):
+class Model:
     """The base of every architecture under models/: a subclass's fields are
     what a leg declares, and `build` makes the network they describe.
 
@@ -32,6 +31,11 @@ class Model(Record):
 
     def build(self):
         """Returns a freshly initialized torch module on this model's device."""
+        raise NotImplementedError
+
+    def step_flops(self, batch_size: int) -> int:
+        """Returns the FLOPs of one forward and backward pass over batch_size sequences: an analytic
+        estimate from this architecture's shapes, not a measurement."""
         raise NotImplementedError
 
 
@@ -80,7 +84,7 @@ class TrainingParameters:
 
 
 @dataclass(frozen=True)
-class LoopConfig(Record):
+class LoopConfig:
     """Operational settings for validation, failsafe checkpoints, and health checks.
 
     Every ``checkpoint_every`` steps, the training job writes a failsafe model

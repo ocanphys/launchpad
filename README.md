@@ -1,7 +1,7 @@
 # launchpad
 
 New here? Start with the [user guide](docs/guide.md): setup, a first workflow,
-sweeps, and a training example. What follows is the internal map.
+and a training example. What follows is the internal map.
 
 Artifacts are folders on a Modal Volume, each owning a `manifest.json` that
 names what it is and what it's built from; state and orchestration are four
@@ -135,13 +135,6 @@ report = lab.declare(pretraining, commit=True)    # ...and publish missing manif
 Artifact.load("tokenizers/bpe-3.0k-e4649eb4ff")   # what's declared there, unbound
 Tokenizer(vocab_size=3000, ...).bind()            # the built object, ready to use
 ```
-
-Parameters and dependencies can contain `Sweep((choice_a, choice_b))` from
-`artifacts.core.sweep`. Constructors transparently retain unresolved declarations;
-`resolve` and `lab.declare` expand independent choices recursively and deduplicate
-the resulting concrete dependency graph. `resolve` still returns `list[Artifact]`.
-See [Artifact sweeps](docs/sweeps.md) for examples using plain frozen parameter dataclasses with
-fields such as `lr: float`, given `lr=Sweep((1e-3, 1e-4))`.
 
 There is nothing to initialize and no environment detection. The mount
 exists only inside a container, so a laptop works against a folder of its

@@ -26,7 +26,7 @@ import logging
 import os
 import tempfile
 from collections import Counter
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import modal
@@ -35,7 +35,6 @@ from artifacts.core.artifact import MANIFEST, Artifact
 from artifacts.core.manifest import manifest_json
 from artifacts.core.resolve import resolve
 from artifacts.core.SGD.training import Training
-from artifacts.core.sweep import Declaration, Sweep, expand
 from config import STORAGE, VOLUME_NAME
 from system.runtime import Worker
 
@@ -62,11 +61,10 @@ class DeclarationError(ValueError):
 class DeclarationReport:
     """One row per resolved path: path, state, drift, differences, created,
     updated, and the stored and requested commits and resources. Counts and
-    the verdict are derived. root_paths identifies requested outputs."""
+    the verdict are derived."""
 
     rows: list[dict]
     strict_commit: bool = False
-    root_paths: list[str] = field(default_factory=list)
 
     @property
     def blockers(self) -> list[dict]:
@@ -242,7 +240,7 @@ def current_notebook() -> bytes | None:
 
 
 def declare(
-    artifact: Declaration,
+    artifact: Artifact,
     *,
     root: Path = STORAGE,
     commit: bool = False,
@@ -254,11 +252,6 @@ def declare(
     printed and returned; with `commit`, missing manifests are published first
     and existing ones whose resources differ from those requested take the
     requested ones, everything else in them kept.
-
-    `artifact` is any sweep: a concrete artifact is a sweep of one, and a Sweep
-    of artifacts is a group. It is expanded and checked as one combined graph
-    before any writes. Every newly created requested Training root keeps its own
-    notebook copy; dependencies shared by those roots are declared once.
 
     Preview writes nothing and returns blockers as rows. Commit refuses over
     any blocker -- a conflict, an undeclared folder, or drift under
@@ -275,17 +268,14 @@ def declare(
     caller that has them and no kernel (`local.declare_on_volume`).
     """
     on_volume = root == STORAGE and not modal.is_local()
-    roots = list(dict.fromkeys(expand(artifact)))
-    graph = resolve(Sweep(roots))
+    graph = resolve(artifact)
     if commit and notebook is None:
         notebook = current_notebook()
     if on_volume:
         refresh()
     memo: dict[str, Artifact] = {}
     rows = [_inspect(node, root, memo) for node in graph]
-    report = DeclarationReport(
-        rows, strict_commit, root_paths=[node.artifact_path.as_posix() for node in roots]
-    )
+    report = DeclarationReport(rows, strict_commit)
     if commit:
         if report.blockers:
             raise DeclarationError(report, verbose)
@@ -305,13 +295,10 @@ def declare(
                 row.update(_inspect(node, root, memo), created=True)
             else:  # keep the pair, so the report shows what changed to what
                 row.update(_inspect(node, root, memo), updated=True, resources=[stored, requested])
-        if notebook is not None:
-            created = {row["path"] for row in rows if row["created"]}
-            for node in roots:
-                if isinstance(node, Training) and node.artifact_path.as_posix() in created:
-                    copy = root / "runs" / node.run_id / f"declare-{node.uid}.ipynb"
-                    copy.parent.mkdir(parents=True, exist_ok=True)
-                    copy.write_bytes(notebook)
+        if rows[-1]["created"] and notebook is not None and isinstance(artifact, Training):
+            copy = root / "runs" / artifact.run_id / f"declare-{artifact.uid}.ipynb"
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(notebook)
         if on_volume:
             save()
     print(report.render(verbose))

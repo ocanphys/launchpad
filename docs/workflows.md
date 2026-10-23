@@ -69,7 +69,7 @@ step has its own diagram below.
 
 ```mermaid
 flowchart LR
-  C["Construct<br/>Artifact subclass(...), Sweep(...)"] --> X["Expand and resolve<br/>expand(), resolve()"]
+  C["Construct<br/>Artifact subclass(...)"] --> X["Resolve<br/>resolve()"]
   X --> I["Inspect and commit manifests<br/>lab.declare(commit=True)"]
   I --> S["Appear on dashboard<br/>state(), GET /state"]
   S --> L["Launch<br/>attempt_launch()"]
@@ -83,21 +83,18 @@ flowchart LR
 
 ## 3. Constructing an artifact
 
-What happens on `Tokenizer(...)`, `Pretraining(...)` and friends. Every
-artifact class uses `DeclarationMeta` as its metaclass
-(`artifacts/core/sweep.py`, `artifacts/core/schema.py`).
+What happens on `Tokenizer(...)`, `Pretraining(...)` and friends: a frozen
+dataclass whose `Artifact.__post_init__` holds every field to the field schema
+(`artifacts/core/artifact.py`, `artifacts/core/schema.py`).
 
 ```mermaid
 flowchart TD
-  A["Call the constructor<br/>Cls(*args, **kwargs)"] --> B["Bind arguments and fill defaults<br/>DeclarationMeta.__call__(), _signature()"]
-  B --> SET["Turn set-valued dependency inputs into tuples<br/>schema.dependencies()"]
-  SET --> C["Check inputs against the field schema, normalizing each concrete parameter<br/>sweep.check() -> _check()<br/>schema.annotations(), manifest.normalize()"]
-  C --> D{"Any Sweep inside the inputs?<br/>holds_choice(), children()"}
-  D -->|yes| E["Unresolved declaration<br/>ArtifactSweep(cls, inputs)"]
-  D -->|no| F["Build the frozen dataclass<br/>Artifact.__post_init__(): producer set, no duplicate paths in sets<br/>subclass __post_init__(): e.g. DataSet tokenizer checks, Training model inheritance"]
-  F --> G["Verify __post_init__ changed no chosen input<br/>sweep.verify()"]
-  G --> H["Concrete Artifact"]
-  E --> EXP["Later: expand() turns it into concrete artifacts"]
+  A["Call the constructor<br/>Cls(*args, **kwargs)"] --> F["Build the frozen dataclass"]
+  F --> P["Check the class sets producer<br/>Artifact.__post_init__()"]
+  P --> C["Normalize each parameter through the codec<br/>schema.annotations(), schema.polymorphic(), manifest.normalize()"]
+  C --> D["Check each dependency's type, turn a set field into a frozenset, refuse duplicate paths in it<br/>schema.dependencies()"]
+  D --> S["Subclass checks<br/>subclass __post_init__(): e.g. DataSet tokenizer checks, Training model inheritance"]
+  S --> H["Concrete Artifact"]
 ```
 
 ## 4. Declaring
@@ -108,8 +105,7 @@ runs the same function in a container that mounts the volume.
 ```mermaid
 flowchart TD
   LAP["Laptop<br/>local.declare_on_volume()<br/>current_notebook() shipped along"] -->|"_declare.remote() in an ephemeral app"| S
-  S["lab.declare(declaration, commit, strict_commit)"] --> X["Expand every Sweep into concrete roots<br/>sweep.expand(): branch(), open_choices(), build(), inside()"]
-  X --> R["Resolve one combined graph, dependencies first<br/>resolve.resolve(): visit() over Artifact.deps()<br/>one node per artifact_path, raise on conflicting definitions or cycles"]
+  S["lab.declare(artifact, commit, strict_commit)"] --> R["Resolve the graph, dependencies first<br/>resolve.resolve(): visit() over Artifact.deps()<br/>one node per artifact_path, raise on conflicting definitions or cycles"]
   R --> NBK["Read the declaring notebook (commit only)<br/>current_notebook()"]
   NBK --> RF["Reload the mount (inside a container only)<br/>refresh() -> _outside_volume()"]
   RF --> I["Compare each node with what the disk holds<br/>_inspect(): Artifact.status(), Artifact.load(), _leaves()<br/>state: new, undeclared, conflict, declared, partial, done"]
@@ -120,7 +116,7 @@ flowchart TD
   BL -->|yes| ERR["raise DeclarationError(report)"]
   BL -->|no| W["Write missing manifests, update changed resources<br/>to_manifest() -> manifest_json() -> manifest.json<br/>Artifact.load() + replace(allocated_resources)"]
   W --> RI["Re-inspect written rows<br/>_inspect()"]
-  RI --> CP["Copy the notebook beside each new Training root<br/>runs/run_id/declare-uid.ipynb"]
+  RI --> CP["Copy the notebook if it created a Training<br/>runs/run_id/declare-uid.ipynb"]
   CP --> SV["Commit the mount (inside a container only)<br/>save() -> _outside_volume()"]
   SV --> OUT
 ```
@@ -133,7 +129,7 @@ each parameter against its field's annotation; `Artifact` exposes it through
 
 ```mermaid
 flowchart LR
-  A["Concrete Artifact"] -->|"to_manifest(): require_concrete(), parameters(), _encode()"| M["Manifest dict<br/>artifact, commit, allocated_resources, parameters, dependencies"]
+  A["Concrete Artifact"] -->|"to_manifest(): parameters(), _encode()"| M["Manifest dict<br/>artifact, commit, allocated_resources, parameters, dependencies"]
   M -->|"manifest_json()"| F[("root/artifact_path/manifest.json")]
   F -->|"Artifact.load(): parse, path must match folder"| M2["Manifest dict"]
   M2 -->|"from_manifest(): locate(class), annotations(), _decode(), memo"| A2["Unbound Artifact"]

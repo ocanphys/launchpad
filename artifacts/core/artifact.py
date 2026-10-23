@@ -23,14 +23,13 @@ import os
 import sys
 from abc import ABC, abstractmethod
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import TYPE_CHECKING, ClassVar, Self, get_args
 
 from artifacts.core import manifest, schema
 from artifacts.core.locate import locate
-from artifacts.core.sweep import DeclarationMeta, UnresolvedDeclarationError
 
 if TYPE_CHECKING:
     # Type-only: job.py imports Artifact from here, so a real import would be
@@ -126,33 +125,14 @@ class Footprint:
 
 # frozen: identity is its fields, so it must be hashable/immutable
 @dataclass(frozen=True)
-class Artifact(ABC, metaclass=DeclarationMeta):
-    @staticmethod
-    def require_concrete(value: object) -> Artifact:
-        """Returns `value` if it is a constructed Artifact, and raises
-        UnresolvedDeclarationError for anything else, typically an ArtifactSweep.
-
-        Runtime boundaries (resolve, the manifest codec) call this instead of
-        validating fields again: DeclarationMeta checks every field before it
-        builds an Artifact, so the type alone proves the value is concrete.
-        """
-        if not isinstance(value, Artifact):
-            raise UnresolvedDeclarationError(
-                "expected a concrete Artifact; call expand first"
-            )
-        return value
-
+class Artifact(ABC):
     # Neither of these says which artifact this is: compare=False keeps both
     # out of ==/hash, so an artifact rebuilt from an old manifest is still the
-    # same artifact, and sweeping either would not make distinct jobs. kw_only,
-    # or a defaulted base field would force defaults on every subclass.
-    commit: str = field(
-        default_factory=_head, compare=False, repr=False, kw_only=True,
-        metadata={"sweepable": False},
-    )
+    # same artifact. kw_only, or a defaulted base field would force defaults
+    # on every subclass.
+    commit: str = field(default_factory=_head, compare=False, repr=False, kw_only=True)
     allocated_resources: Resources = field(
-        default_factory=Resources, compare=False, repr=False, kw_only=True,
-        metadata={"sweepable": False},
+        default_factory=Resources, compare=False, repr=False, kw_only=True
     )
 
     # The dotted path of the Job class that produces this artifact
@@ -183,29 +163,45 @@ class Artifact(ABC, metaclass=DeclarationMeta):
             )
 
     def __post_init__(self) -> None:
-        """Checks the class sets `producer`, and rejects two definitions at one
-        path inside a set-valued dependency.
+        """Checks the class sets `producer`, holds every field to the field
+        schema, and replaces each parameter with what its manifest decodes to.
 
         Instantiation is the first point where a missing `producer` is an
-        error. A frozenset merges equal members, so two that survive with one
-        artifact_path are conflicting definitions of one folder. A subclass
-        with its own __post_init__ must call super(), or all of this is skipped.
+        error. A set-valued dependency accepts any iterable, and two members
+        surviving it with one artifact_path are conflicting definitions of one
+        folder. A subclass with its own __post_init__ must call super(), or all
+        of this is skipped.
         """
-        if not hasattr(type(self), "producer"):
+        cls = type(self)
+        if not hasattr(cls, "producer"):
             raise TypeError(
-                f"{type(self).__name__} must set `producer` to the dotted path of "
+                f"{cls.__name__} must set `producer` to the dotted path of "
                 f"the Job class that produces it, or to None if nothing does"
             )
-        for name, container in schema.dependencies(type(self)).items():
-            if container is not frozenset:
+        deps, tagged = schema.dependencies(cls), schema.polymorphic(cls)
+        for name, annotation in schema.annotations(cls).items():
+            value, path = getattr(self, name), f"{cls.__qualname__}.{name}"
+            if name not in deps:
+                # a polymorphic field holds any subclass of its record, checked as its own class
+                if name in tagged and isinstance(value, tuple(filter(is_dataclass, schema.arms(annotation)))):
+                    annotation = type(value)
+                object.__setattr__(self, name, manifest.normalize(value, annotation, path))
                 continue
-            paths = Counter(item.artifact_path for item in getattr(self, name))
-            repeated = sorted(str(p) for p, n in paths.items() if n > 1)
-            if repeated:
-                raise ValueError(
-                    f"{type(self).__name__}.{name} holds more than one definition "
-                    f"at {', '.join(repeated)}"
-                )
+            container = deps[name]
+            if container is frozenset:
+                value = frozenset(value)
+                object.__setattr__(self, name, value)
+            elif container is tuple and not isinstance(value, tuple):
+                raise TypeError(f"{path}: expected {annotation}, got {type(value).__name__}")
+            arms = schema.arms(get_args(annotation)[0] if container else annotation)
+            for item in value if container else (value,):
+                if not isinstance(item, arms):
+                    raise TypeError(f"{path}: expected {annotation}, got {type(item).__name__}")
+            if container is frozenset:
+                paths = Counter(item.artifact_path for item in value)
+                repeated = sorted(str(p) for p, n in paths.items() if n > 1)
+                if repeated:
+                    raise ValueError(f"{cls.__name__}.{name} holds more than one definition at {', '.join(repeated)}")
 
     def deps(self) -> list[Artifact]:
         """Returns the artifacts this one is built from, one level deep:

@@ -23,7 +23,6 @@ from artifacts.core.SGD.training import (
     OptimizerParameters,
     TrainingParameters,
 )
-from artifacts.core.sweep import Sweep, expand
 from models.mamba import Mamba
 from models.transformer import Transformer
 
@@ -218,16 +217,6 @@ def test_negative_zero_is_zero(shapes):
     assert math.copysign(1, negative.shapes.leaf.rate) == 1
 
 
-@settings(deadline=None)
-@given(SHAPES, st.lists(FLOATS, min_size=1, max_size=4, unique_by=float))
-def test_a_swept_value_builds_the_artifact_written_directly(shapes, rates):
-    declared = Plain(shapes=replace(shapes, leaf=replace(shapes.leaf, rate=Sweep(rates))), commit="c")
-    direct = [plain(replace(shapes, leaf=replace(shapes.leaf, rate=rate))) for rate in rates]
-    roots = expand(declared)
-    assert roots == direct
-    assert [r.artifact_path for r in roots] == [d.artifact_path for d in direct]
-    assert all(type(r.shapes.leaf.rate) is float for r in roots)
-
 
 def test_resources_round_trip_and_stay_out_of_identity():
     first = Plain(shapes=Shapes(Leaf(False, 0, 0.0, "", "b", 1.5, 3), (), (0, ""), ()), allocated_resources=Resources(cpu=2))
@@ -273,11 +262,12 @@ def test_a_value_that_would_not_come_back_exactly_is_refused(field, value, error
         plain(replace(SHAPE, **{field: value}))
 
 
-def test_a_swept_alternative_is_checked_where_it_is_written():
-    with pytest.raises(TypeError, match=r"Plain\.shapes\.leaf\.rate\.values\[1\]"):
-        Plain(shapes=replace(SHAPE, leaf=replace(LEAF, rate=Sweep((0.1, "x")))))
-    with pytest.raises(TypeError, match=r"Plain\.shapes\.pair\[0\]\.values\[0\]"):
-        Plain(shapes=replace(SHAPE, pair=(Sweep(("x",)), "a")))
+
+def test_a_dependency_of_the_wrong_type_is_refused():
+    with pytest.raises(TypeError, match=r"Plain\.one"):
+        plain(SHAPE, one=Drawing(commit="c"))
+    with pytest.raises(TypeError, match=r"Plain\.sequence"):
+        plain(SHAPE, sequence=[plain(SHAPE)])
 
 
 def test_normalize_is_idempotent_and_exact():
@@ -423,9 +413,3 @@ def test_a_manifest_naming_a_class_outside_the_field_is_refused():
     del manifest["parameters"]["shape"]["class"]
     with pytest.raises(KeyError):
         Artifact.from_manifest(manifest)
-
-
-def test_a_sweep_across_classes_of_a_polymorphic_field():
-    roots = expand(Drawing(shape=Sweep((Square(4, Sweep((1, 2))), Polygon(3, (60.0,)))), commit="c"))
-    assert [type(r.shape).__name__ for r in roots] == ["Square", "Square", "Polygon"]
-    assert all(Artifact.from_manifest(r.to_manifest()) == r for r in roots)

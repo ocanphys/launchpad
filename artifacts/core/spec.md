@@ -1,6 +1,6 @@
 # Artifact Framework Backbone Spec
 
-The contract every artifact, job, and the code that declares, resolves, launches and binds them is written against. [README.md](../../README.md) is the map of where things live; [docs/workflows.md](../../docs/workflows.md) traces each flow function by function. Sweeps extend this contract: see [Artifact sweeps](../../docs/sweeps.md).
+The contract every artifact, job, and the code that declares, resolves, launches and binds them is written against. [README.md](../../README.md) is the map of where things live; [docs/workflows.md](../../docs/workflows.md) traces each flow function by function.
 
 ## 1. Purpose
 
@@ -23,8 +23,6 @@ tokens = TokenizedSource(tokenizer=tokenizer, source=source)
 ```
 
 Each concrete type belongs to a family: a package under `artifacts/` holding the artifact class and, in a sibling `jobs.py`, the job that produces it. Families never import functions or constants from one another; the only thing one family takes from another is an artifact class to name as a dependency type.
-
-Calling an artifact constructor with a `Sweep` or an unresolved dependency returns an internal `ArtifactSweep` instead of an artifact; [sweeps](../../docs/sweeps.md) owns that mechanism. A concrete artifact's parameters and dependencies are fully resolved, which says nothing about whether its files have been built.
 
 A concrete type defines:
 
@@ -56,7 +54,7 @@ A dependency field's declared type says whether its order identifies the artifac
 
 Construction accepts any iterable for a set-valued field and rejects two members that share an artifact path, which is a conflicting definition wherever it appears. Anything rendering a set as a sequence (a digest, a JSON array, a traversal, a job's input stream) picks an order at that point. Those orders are renderings, never comparisons.
 
-Parameters are immutable, including nested configuration. A result-changing setting belongs among the parameters even if it also affects execution; `commit` and `allocated_resources` are not identity, so they cannot be swept, since sweeping them would produce equal artifacts rather than distinct jobs. Resource allocation never silently changes scientific configuration.
+Parameters are immutable, including nested configuration. A result-changing setting belongs among the parameters even if it also affects execution; `commit` and `allocated_resources` are not identity. Resource allocation never silently changes scientific configuration.
 
 ### Location and ownership
 
@@ -194,7 +192,7 @@ Every bind builds fresh runtime state; runtime caches and open handles never ent
 
 ## 5. Pure dependency resolution
 
-`resolve(declaration) -> list[Artifact]` expands its request (see [sweeps](../../docs/sweeps.md); a concrete artifact expands to itself), then traverses the roots' direct dependencies depth-first in `deps()` order. It emits dependencies before dependents and each path once across all roots; for a single concrete request, the requested artifact is last. A root may also be another root's dependency, so roots cannot be read back off the graph; a caller that needs them calls `expand`.
+`resolve(artifact) -> list[Artifact]` traverses the artifact's direct dependencies depth-first in `deps()` order. It emits dependencies before dependents and each path once; the requested artifact is last.
 
 - A path revisited on the active traversal stack is a cycle and raises.
 - A repeated path must have an agreeing definition before it can be deduplicated, so a shared path cannot conceal a conflicting leaf.
@@ -216,7 +214,7 @@ The source occurs once even though both the tokenizer and tokenized source refer
 
 `lab` is the notebook API, imported with `import lab`, and declaration is its one entry point. Construction, loading, and binding stay on the artifact classes and instances (`Tokenizer(...)`, `Artifact.load(path)`, `tokenizer.bind()`). There is nothing to initialize. Beside `declare`, `lab` exports the two volume verbs a notebook in the lab container needs by hand, `refresh` (see files a job wrote elsewhere) and `save` (make a saved notebook outlive the container), and `worker`, a stand-in execution context for running one job from a cell with no lease and console logging. The `lab.py` module docstring owns the details.
 
-A committed declaration snapshots the declaring notebook beside each newly created root that belongs to a run (a `Training`, with a `run_id`), as `runs/<run_id>/declare-<uid>.ipynb`. Preview, a redeclaration, and dependencies not requested as roots write no copy.
+A committed declaration that creates the requested artifact, when it belongs to a run (a `Training`, with a `run_id`), snapshots the declaring notebook as `runs/<run_id>/declare-<uid>.ipynb`. Preview, a redeclaration, and dependencies write no copy.
 
 Declaration establishes the stored plan. The executor runs its jobs separately. Completing a declaration does not produce outputs or bind the supplied instance.
 
@@ -236,12 +234,12 @@ lab.declare(
 
 `verbose` controls only how the result is printed. `root` is for tests and scripts; a notebook gets `STORAGE`. `notebook` is the declaring notebook's bytes, for a caller with no kernel: a laptop declares onto the volume through `local.declare_on_volume`, one explicit remote call that ships them.
 
-1. Expand the request into its concrete roots and resolve that group into one graph.
+1. Resolve the requested artifact into its graph.
 2. Inspect each path once and compare existing manifests using definition agreement.
 3. Record commit drift and resource differences per graph node. Drift blocks only with `strict_commit=True`; resource differences never block.
 4. Collect one row per path with state, drift, and differences. Preview returns these in a report without writes.
 5. With `commit=True`, refuse before writing if any row blocks. Otherwise publish manifests for `new` artifacts in dependency order, and rewrite an existing matching manifest whose resources differ with the requested resources, its definition and commit kept. Against the mounted volume, reload before inspecting and commit after writing; this is the one place declaration touches volume mechanics.
-6. Return a report recording created and updated manifests and the resulting states. Its `root_paths` lists the distinct requested roots in first-requested order; rows describe unique graph paths. Reuse the resolved graph; do not expand or resolve again.
+6. Return a report recording created and updated manifests and the resulting states, one row per graph path. Reuse the resolved graph; do not resolve again.
 
 Example: `sources/odyssey` and `tokenizers/bpe-1000-feeeeefa90` are declared and built (the tokenizer's manifest recorded an older commit than `HEAD`); the `TokenizedSource` built from them is not yet declared.
 

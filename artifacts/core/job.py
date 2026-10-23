@@ -58,7 +58,7 @@ class Job(ABC):
             )
 
     def __init__(self, artifact: Artifact):
-        self.artifact = Artifact.require_concrete(artifact)
+        self.artifact = artifact
 
     @abstractmethod
     def run(self, root: Path, worker: "Worker") -> None:

@@ -13,7 +13,7 @@ same DeclarationError on a refused commit.
 import modal
 
 import main
-from artifacts.core.sweep import Declaration
+from artifacts.core.artifact import Artifact
 from lab import DeclarationReport, current_notebook
 
 app = modal.App("launchpad-declare")
@@ -26,17 +26,14 @@ app = modal.App("launchpad-declare")
     volumes={main.STORAGE: main.volume},
     serialized=True,
 )
-def _declare(
-    artifact: Declaration,
-    **options,
-) -> DeclarationReport:
+def _declare(artifact: Artifact, **options) -> DeclarationReport:
     import lab
 
     return lab.declare(artifact, **options)
 
 
 def declare_on_volume(
-    artifact: Declaration,
+    artifact: Artifact,
     *,
     commit: bool = False,
     strict_commit: bool = False,

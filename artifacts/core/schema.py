@@ -7,7 +7,7 @@ dependency is A, A | B | None, tuple[A, ...] or frozenset[A] of artifacts. A
 field annotated with a record class that declares `polymorphic = True` (such
 as `Model`) may hold any subclass of it, and its manifest carries the
 subclass's dotted path under "class". manifest.py encodes against this schema,
-and sweep.py checks declarations against it.
+and Artifact.__post_init__ checks every field against it.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def _check_parameter(annotation: object, where: str) -> None:
         if sum(map(is_dataclass, args)) > 1:
             raise TypeError(
                 f"{where}: a union holds at most one record type; a manifest "
-                f"stores a record's fields, never its class"
+                f"stores a union's record as its fields alone"
             )
         for arm in args:
             _check_parameter(arm, where)
