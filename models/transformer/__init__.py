@@ -47,3 +47,15 @@ class Transformer(training.Model):
             device=torch.device(self.device),
             dtype=locate(self.dtype),
         )
+
+    def step_flops(self, batch_size: int) -> int:
+        """Returns the matmul FLOPs of one forward and backward pass over batch_size sequences of sequence_length.
+
+        Backward is twice forward. Attention counts the full sequence x sequence scores the causal mask
+        then discards; normalization, activations, the loss and the optimizer are not counted.
+        """
+        tokens = batch_size * self.sequence_length
+        attention = 8 * tokens * self.d_model**2 + 4 * tokens * self.sequence_length * self.d_model  # projections, QK^T and AV
+        ffn = 6 * tokens * self.d_model * self.d_ff  # three SwiGLU projections
+        head = 2 * tokens * self.d_model * self.vocab_size
+        return 3 * (self.num_layers * (attention + ffn) + head)
