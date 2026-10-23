@@ -21,7 +21,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 from torch.utils._pytree import tree_leaves
 
 PHASE_ORDER = {p: i for i, p in enumerate(
-    ["zero_grad", "forward", "loss", "backward", "optimizer_step", "unscoped"])}
+    ["zero_grad", "forward", "loss", "backward", "clip_grad", "optimizer_step", "unscoped"])}
 
 
 @contextmanager
@@ -695,60 +695,6 @@ def memory_over_time(memory_snapshot):
     return usage
 
 
-def transformer_matmul_comparison(transformer, tokens, rows):
-    """Returns (per-phase, per-module) tables of analytical vs profiled matmul FLOPs for a TransformerLM.
-
-    `rows` must be a capture of `transformer` run on `tokens` under `module_scopes(model)` with
-    the default root, since the analytical rows are keyed by `model.tblocks.<i>.attention` and
-    friends. Matmul estimates exclude normalization, activations, loss and optimizer work.
-    """
-    import pandas as pd
-
-    # Multiply + add = 2 FLOPs. All B*S tokens count: logits are computed for every position
-    # before the loss slices off the last. Attention forms full S x S matrices, then masks them.
-    batch, sequence = tokens.shape
-    n_tokens = batch * sequence
-    d_model, d_ff, vocab = transformer.d_model, transformer.d_ff, transformer.vocab_size
-    expected = {}
-    # Backward takes gradients for both inputs of every matmul: twice the forward work.
-    for phase, multiplier in [("forward", 1), ("backward", 2)]:
-        for layer in range(transformer.num_layers):
-            # Four projections, then QK^T and AV.
-            expected[phase, f"model.tblocks.{layer}.attention"] = multiplier * (
-                8 * n_tokens * d_model**2 + 4 * batch * sequence**2 * d_model
-            )
-            # Three SwiGLU projections.
-            expected[phase, f"model.tblocks.{layer}.ffn"] = multiplier * 6 * n_tokens * d_model * d_ff
-        expected[phase, "model.linear"] = multiplier * 2 * n_tokens * d_model * vocab
-
-    # Full module ownership, independent of any plotted depth.
-    groups, _, _, sources = aggregate_kernels(rows)
-    matmuls = sources.loc[
-        sources["status"].eq("allocated") & sources["name"].isin(["aten::mm", "aten::bmm", "aten::addmm"])
-    ]
-    # Outer join keeps unexpected profiled matmul work instead of hiding it.
-    stages = (
-        pd.Series(expected, name="analytical_matmul_flops")
-        .rename_axis(["phase", "module_fqn"])
-        .to_frame()
-        .join(matmuls.groupby(["phase", "module_fqn"])["contribution_flops"].sum()
-              .rename("profiler_matmul_flops"), how="outer")
-        .fillna(0)
-    )
-    stages["difference"] = stages["profiler_matmul_flops"] - stages["analytical_matmul_flops"]
-
-    by_phase = stages.groupby(level="phase").sum()
-    phases = pd.DataFrame({
-        "analytical_matmul_flops": by_phase["analytical_matmul_flops"],
-        "profiler_matmul_flops": by_phase["profiler_matmul_flops"],
-        "profiler_total_flops": groups.groupby(level="phase")["estimated_flops"].sum(),
-    }).reindex(pd.Index(["forward", "backward"], name="phase"), fill_value=0)
-    phases["profiler_other_flops"] = phases["profiler_total_flops"] - phases["profiler_matmul_flops"]
-    phases["matmul_difference"] = phases["profiler_matmul_flops"] - phases["analytical_matmul_flops"]
-    phases.loc["forward + backward"] = phases.sum()
-    return phases, stages
-
-
 def dots_height(phase_count):
     """Return the height in inches of the kernel duration dots under the kernel timeline: a lane per phase."""
     return 0.8 * (0.5 + 0.3 * phase_count)
@@ -1042,6 +988,6 @@ def display_steps(report, steps=None):
         for area, (step, timeline) in zip(fig.add_gridspec(len(heights), 1, height_ratios=heights), timelines.items()):
             draw_timeline(fig, area, title=f"step {step}", total_memory=run["gpu"]["vram_bytes"],
                           persistent_memory=run["persistent_memory_bytes"], info=infos[step], **timeline)
-        fig.supxlabel("(est.): algorithmic estimates from op shapes (torch FlopCounterMode, the profiler's per-op "
+        fig.supxlabel("(est.): algorithmic estimates from shapes (the model's step_flops, the profiler's per-op "
                       "formulas), not hardware counters. Peak: vendor datasheet, dense.", fontsize=7, color="0.4")
     plt.show()

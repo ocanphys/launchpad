@@ -8,7 +8,7 @@ imports it.
 Layout (steps are keyed by step number as a string, times are us from the step's start):
 
     {"schema_version": 1,
-     "run":   {"gpu", "model", "optimizer", "capture", "compile", "precision", "peak",
+     "run":   {"gpu", "model", "optimizer", "capture", "precision", "peak",
                "step_flops", "sources", "persistent_memory_bytes"},
      "steps": {"0": {"start_unix_us", "step_ms", "mfu", "phases", "memory", "kernels", "groups"}}}
 
@@ -23,7 +23,7 @@ d_model, ...) and the weights' count and bytes.
 `phases` and `groups` are lists of records. `kernels` and `memory["series"]` are columnar: one list
 per field, so `pd.DataFrame(table)` gives the table back. A block is present only when capture
 recorded it: kernels and groups with kernel_events, memory["series"] with trace, the memory peaks
-with peak, phases with wall_clock.
+with peak, phases with wall_clock_phase_spans.
 
 Kernel ids are the row ids `events_to_rows` gives the step's events, so they index the same rows the
 appendix's `launch_chain(rows, kernel_id)` follows.
@@ -38,9 +38,8 @@ SCHEMA_VERSION = 1
 
 # Where each FLOP number comes from. None of them is read from a hardware counter.
 SOURCES = {
-    "step_flops": ("algorithmic estimate: torch's FlopCounterMode counts the matmuls and attention of one "
-                   "forward and backward pass from the op shapes; the loss, normalization, activations and "
-                   "the optimizer are not counted"),
+    "step_flops": ("algorithmic estimate: the model declaration's step_flops, an analytic count of one forward "
+                   "and backward pass from the architecture's shapes"),
     "kernel_flops": "algorithmic estimate: the torch profiler's per-op formulas from tensor shapes, rolled up per group",
     "peak_flops_per_s": "vendor datasheet, dense tensor-core rate (gpus/peaks.py)",
     "achieved_flops_per_s": "step_flops divided by the step's measured wall time",
@@ -63,7 +62,6 @@ def build_report(captured, depth=3):
             "optimizer": {"class": captured["optimizer"], "state_parameters": sizes["optimizer"]["parameters"],
                           "state_bytes": sizes["optimizer"]["bytes"]},
             "capture": captured["parameters"],
-            "compile": captured["compile"],
             "precision": precision,
             "peak": {"dtype": PRECISIONS[precision], "flops_per_s": peak},
             "step_flops": captured["step_flops"],
