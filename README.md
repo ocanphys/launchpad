@@ -71,8 +71,8 @@ where things live and how traffic flows between them.
   `leasebook` the only reader. Nothing is computed *from* a message: it says
   only that the volume and the Dicts are worth looking at again.
 - **[main.py](main.py)**: the deployment and nothing else -- the app, the
-  volume, the three images, and the four containers (`leasebook`,
-  `persist_logs`, `run_job`, `jupyter`) with the resources each one gets.
+  volume, the three images, and the five containers (`leasebook`,
+  `persist_logs`, `run_job`, `jupyter`, `profile`) with the resources each one gets.
   What those containers run is `launcher/`, one module per job:
   - [launcher/state.py](launcher/state.py) reads the volume and the Dicts
     into the `state` map, and owns `volume`, `mount_lock` and `resolved`.

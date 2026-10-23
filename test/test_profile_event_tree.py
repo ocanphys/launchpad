@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
-from profile_events import link_events
+
+from profiling.profile_events import events_to_rows, link_events
 
 
 def event(index, kind, corr=0, linked=0, parent=None, node=-1):
@@ -111,3 +112,8 @@ def test_launch_namespace_nodes_ambiguity_and_device_work():
     ]))
     assert rows.loc[[3, 4, 5, 6, 9], "launcher_id"].tolist() == [1, 1, 1, 2, 0]
     assert rows.loc[[10, 11], "launcher_id"].isna().all()
+
+
+def test_no_events_says_kernel_events_was_off():
+    with pytest.raises(ValueError, match="kernel_events=True"):
+        events_to_rows([])

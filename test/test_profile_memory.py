@@ -1,5 +1,5 @@
 """Tests for grouping allocator trace entries by record_function labels."""
-from profile_events import allocations_by_label, memory_over_time
+from profiling.profile_events import allocations_by_label, memory_over_time
 
 
 def test_allocations_take_the_innermost_open_label():

@@ -1,10 +1,9 @@
 """Module scopes for a profiled training step, and the tables built from its events.
 
-A notebook's capture returns `list(prof.events())` unchanged: `FunctionEvent` objects pickle
+`profiling.util.profile` returns `prof.events()` unchanged: `FunctionEvent` objects pickle
 with their `cpu_parent` and `cpu_children` references intact, so every step after profiling
-runs locally. The capture container imports this module for `module_scopes` and the capture context
-managers, so its image must add this source, and pandas and matplotlib, which the worker image lacks, are imported where
-they are used.
+runs locally. The profile container imports this module for `module_scopes` and the capture context
+managers, so pandas and matplotlib, which the worker image lacks, are imported where they are used.
 """
 
 from __future__ import annotations
@@ -353,7 +352,9 @@ def events_to_rows(function_events):
     GPU launch links.
     """
     import pandas as pd
-    
+
+    if not function_events:
+        raise ValueError("no events captured: call run_profile with kernel_events=True")
     position = {id(event): i for i, event in enumerate(function_events)}
     raw_rows = (
         pd.DataFrame([vars(event) for event in function_events])
@@ -955,7 +956,7 @@ def display_steps(report, steps=None):
     A step's panels appear only if its block is in the report: kernels, memory (the curves with a
     trace, the peak lines with peak) and the shaded phases. Persistent memory and total VRAM are
     drawn wherever the memory panel is. Under each step's legend: the GPU, the step's wall time, its
-    FLOP count (FLOPs), the achieved rate (FLOPs/s), the GPU's dense peak rate for the precision capture
+    FLOP count (FLOPs), the achieved rate (FLOPs/s), the GPU's dense peak rate for the precision profile
     ran in and the MFU. Every FLOP figure is an algorithmic estimate from op shapes, and a footnote
     says so; report["run"]["sources"] has the details. All times are on the step's own clock, from
     the earliest time its blocks recorded, in the report.

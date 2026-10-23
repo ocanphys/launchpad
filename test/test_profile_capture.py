@@ -1,8 +1,9 @@
 """Tests for capture's context managers, with the CUDA calls faked so they run without a GPU."""
 import pytest
 import torch
-from profile_events import capture_memory, capture_profiler_events
 from torch.profiler import record_function
+
+from profiling.profile_events import capture_memory, capture_profiler_events
 
 
 @pytest.fixture

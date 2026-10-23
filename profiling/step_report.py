@@ -1,6 +1,6 @@
-"""The report of a capture: `build_report` turns capture's result into one JSON-serializable dict.
+"""The report of a profile: `build_report` turns profile's result into one JSON-serializable dict.
 
-The report holds everything `display_steps` shows and what the capture ran with, and nothing else:
+The report holds everything `display_steps` shows and what the profile ran with, and nothing else:
 no events, no colors, no kernel names. It is the one place the analysis lives, so plotting only
 reads it. This module is local-only (it needs pandas and gpus.peaks); the Modal worker never
 imports it.
@@ -21,7 +21,7 @@ step's FLOP count, its wall time, the achieved and peak rates and their ratio.
 d_model, ...) and the weights' count and bytes.
 
 `phases` and `groups` are lists of records. `kernels` and `memory["series"]` are columnar: one list
-per field, so `pd.DataFrame(table)` gives the table back. A block is present only when capture
+per field, so `pd.DataFrame(table)` gives the table back. A block is present only when profile
 recorded it: kernels and groups with kernel_events, memory["series"] with trace, the memory peaks
 with peak, phases with wall_clock_phase_spans.
 
@@ -32,7 +32,7 @@ appendix's `launch_chain(rows, kernel_id)` follows.
 import math
 
 from gpus.peaks import PRECISIONS, peak_tflops, spec_row
-from profile_events import aggregate_kernels, events_to_rows, memory_over_time
+from profiling.profile_events import aggregate_kernels, events_to_rows, memory_over_time
 
 SCHEMA_VERSION = 1
 
@@ -48,7 +48,7 @@ SOURCES = {
 
 
 def build_report(captured, depth=3):
-    """Return the JSON-serializable report of capture's result; depth is the module depth of the kernel rows."""
+    """Return the JSON-serializable report of profile's result; depth is the module depth of the kernel rows."""
     gpu, precision = captured["gpu"], captured["precision"]
     peak = peak_tflops(gpu, precision) * 1e12
     peak = None if math.isnan(peak) else float(peak)  # NaN: the GPU has no unit for this precision

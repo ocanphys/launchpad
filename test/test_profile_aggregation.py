@@ -3,7 +3,14 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from profile_events import PHASE_ORDER, aggregate_kernels, draw_timeline, launch_chain, LAUNCH_CHAIN_COLUMNS
+
+from profiling.profile_events import (
+    LAUNCH_CHAIN_COLUMNS,
+    PHASE_ORDER,
+    aggregate_kernels,
+    draw_timeline,
+    launch_chain,
+)
 
 
 def event(index, name, parent=None, flops=0, kind="cpu_op"):

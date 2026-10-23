@@ -1,12 +1,13 @@
-"""Exercise notebook instrumentation locally; never run the Modal capture."""
+"""Exercise notebook instrumentation locally; never run the Modal profile."""
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 import torch
-from profile_events import aggregate_kernels, link_events, module_scopes
 from torch import nn
+
+from profiling.profile_events import aggregate_kernels, link_events, module_scopes
 
 
 def scope_path(event):

@@ -2,10 +2,11 @@
 import json
 
 import pytest
-import step_report
-from profile_events import display_steps
-from step_report import build_report
 from test_profile_aggregation import rows  # noqa: F401  the shared event table fixture
+
+from profiling import step_report
+from profiling.profile_events import display_steps
+from profiling.step_report import build_report
 
 
 @pytest.fixture
@@ -19,7 +20,7 @@ def plotting():
 
 
 def captured_with(steps, **extra):
-    """Return a capture result around steps, with every one-off field build_report reads."""
+    """Return a profile result around steps, with every one-off field build_report reads."""
     return {
         "steps": steps, "device_vram": 2**30, "persistent_memory": 4, "step_flops": 1e12,
         "precision": "torch.bfloat16", "gpu": "NVIDIA L4",
@@ -151,7 +152,7 @@ def test_display_steps_shows_the_mfu_block_under_the_legend(plotting, monkeypatc
 
 
 def test_report_kernel_ids_are_the_event_rows_the_launch_chain_follows(rows, monkeypatch):
-    from profile_events import aggregate_kernels, launch_chain
+    from profiling.profile_events import aggregate_kernels, launch_chain
 
     monkeypatch.setattr(step_report, "events_to_rows", lambda events: rows)
     step = build_report(captured_with({0: step_readings(events=[object()], trace_start_us=1.7e15)}))["steps"]["0"]

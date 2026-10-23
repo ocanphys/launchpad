@@ -1,4 +1,4 @@
-"""The deployment: one app, three images, four containers.
+"""The deployment: one app, three images, five containers.
 
 What each container runs is `launcher/`; nothing here but the resources they
 get and the Modal names they answer to.
@@ -23,7 +23,7 @@ from config import (
 )
 from launcher.lab_server import start_jupyterlab
 from launcher.state import volume
-from system.logs import persist_snapshot
+from system.logs import current_call_id, persist_snapshot, start_logging
 from system.runtime import initialize_worker
 
 app = modal.App(APP_NAME)
@@ -51,12 +51,12 @@ web_image = (
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
 
-worker_image = locked_image("worker").add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
+worker_image = locked_image("worker").add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "profiling")
 
 lab_image = (
     locked_image("lab")
     .env({LAB_COMMIT_ENV: get_git_commit() if modal.is_local() else "unknown"})
-    .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "lab")
+    .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "lab", "profiling", "gpus")
 )
 
 
@@ -113,6 +113,26 @@ def run_job(artifact_path: str) -> None:
         job = artifact.job()
         job.run(STORAGE, worker)
         worker.confirm_lease("pre vol commit")
+
+
+# No gpu here: the caller requests it with
+# `.with_options(**resource_options(allocated_resources))`, as a production run is started.
+@app.function(image=worker_image, timeout=600)
+def profile(**parameters) -> dict:
+    """Returns the measurements of a few profiled training steps of a model, run on a GPU:
+    `profiling.util.profile(**parameters)`, whose docstring says what goes in and comes out.
+
+    Call it through `profiling.util.run_profile(resources, ...)`, which requests the GPU from
+    `resources` and prints this call's log rows as they are published. It is not a launched job:
+    no artifact, no lease, nothing written to the volume, so the launcher never sees it.
+    """
+    from profiling import util
+
+    stop_logging = start_logging(current_call_id())
+    try:
+        return util.profile(**parameters)
+    finally:
+        stop_logging()
 
 
 @app.function(

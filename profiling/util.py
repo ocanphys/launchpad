@@ -1,22 +1,44 @@
-"""The profiling capture: `capture` trains a model under the profiler on a Modal GPU, and `phase` is
-what the step it is passed is built from."""
+"""The profiling run: `profile` trains a model under the profiler, and `phase` is what the step
+it is passed is built from. `run_profile` runs `profile` on a Modal GPU through main.profile."""
 
 import dataclasses
 import time
 from contextlib import contextmanager, nullcontext
 
 import modal
-import profile_events
 import torch
 from torch.profiler import record_function
 
-import main
 from artifacts.core.locate import locate
+from config import APP_NAME, HEARTBEAT_SECONDS
+from launcher.resources import resource_options
+from profiling import profile_events
+from system.lease_protocol import call_logs
+from system.logs import AMBIENT, LIVE, PROFILER, call_logger, channel, current_call_id
 
-app = modal.App("profile-events")
-# The worker image, so its torch is the uv.lock version that unpickles the events locally. Modal adds
-# this module itself; the container also imports main, for this image, and profile_events.
-image = main.worker_image.add_local_python_source("main", "profile_events")
+
+def run_profile(resources, **parameters) -> dict:
+    """Returns main.profile's result on the GPU `resources` requests, printing its log rows as the call
+    publishes them to the launcher's live channels."""
+    call = modal.Function.from_name(APP_NAME, "profile").with_options(**resource_options(resources)).spawn(**parameters)
+    print(f"profile call {call.object_id}")
+    shown = dict.fromkeys((PROFILER, AMBIENT), 0)  # the only sources a profile call writes
+
+    def show():
+        for source in shown:
+            rows = call_logs.get(channel(call.object_id, LIVE, source)) or []
+            for row in rows[shown[source]:]:
+                print(f"{row['level']} {row['logger']}: {row['msg']}")
+            shown[source] = len(rows)
+
+    while True:
+        try:
+            result = call.get(timeout=HEARTBEAT_SECONDS)
+        except TimeoutError:
+            show()
+            continue
+        show()  # main.profile's stop_logging publishes the last rows before it returns
+        return result
 
 
 @contextmanager
@@ -30,17 +52,15 @@ def phase(name, spans):
         spans[name] = start, time.time_ns() / 1e3
 
 
-# No gpu here: the caller requests it with Resources, as a production run does.
-@app.function(image=image, timeout=600)
-def capture(
+def profile(
     model_declaration, training_parameters, profiling_step_loop, batch_size, warmup_steps, profile_steps, autocast,
     kernel_events, module_scopes, peak_memory, trace_memory,
 ) -> dict:
     """Return the measured loop's results after a plain warmup loop over the same model and optimizer.
 
-    It needs a GPU, so call it as capture.with_options(**resource_options(Resources(gpu_type="L4"))).remote(...).
+    It needs a GPU: notebooks call it through run_profile.
     model_declaration is the Model to build; it decides whether the model is compiled. Of
-    training_parameters, the optimizer, optimizer_parameters and seed are what capture trains with;
+    training_parameters, the optimizer, optimizer_parameters and seed are what profile trains with;
     the rest are not used. Each step calls profiling_step_loop(model, optimizer, tokens, autocast=...,
     spans=...) on the same batch_size random sequences of the model's sequence_length, and it wraps each
     phase in phase(name, spans). autocast is the dtype forward and loss run in, or None; warmup and the
@@ -60,6 +80,8 @@ def capture(
     arguments), "model_class" and "model_parameters" (the declaration's class name and fields)
     and "optimizer" (its class name).
     """
+    log = call_logger("profile", PROFILER, current_call_id())
+    log.info(f"{type(model_declaration).__name__} on {torch.cuda.get_device_name()}, batch_size {batch_size}")
     model = model_declaration.build()
     tokens = torch.randint(
         0, model_declaration.vocab_size, (batch_size, model_declaration.sequence_length),
@@ -82,6 +104,7 @@ def capture(
         run_step()
     # Finish warmup first, so none of its queued kernels land in the measured loop.
     torch.cuda.synchronize()
+    log.info(f"warmup: {warmup_steps} steps")
 
     # Optimizer state exists only after the first step, which warmup took.
     size_estimation = {
@@ -101,12 +124,14 @@ def capture(
             run_step()
             torch.cuda.synchronize()
             step_ms = (time.perf_counter() - begin) * 1e3
+        log.info(f"step {step}: {step_ms:.1f} ms")
         steps[step] = {
             **profiled, **readings, "step_ms": step_ms,
             "wall_clock_phase_times": {name: (end - start) / 1e3 for name, (start, end) in spans.items()},
             "wall_clock_phase_spans": dict(spans),
         }
 
+    log.info("done")
     return {
         "steps": steps,
         "size_estimation": size_estimation,

@@ -8,7 +8,7 @@ import re
 import pandas as pd
 
 # Peak dense throughput of every GPU Modal offers, per precision, from the vendor datasheets.
-# Rows are the strings capture is called with, gpu="...". Compute is in TFLOPs per second (a rate:
+# Rows are the strings a GPU is requested with, gpu_type="...". Compute is in TFLOPs per second (a rate:
 # trillions of floating-point operations each second); memory bandwidth in GB/s.
 # NaN means the datasheet gives no figure or the GPU has no such unit. Tensor-core rows are dense:
 # datasheets quote the 2:4 structured-sparsity rate, twice as high, so those figures were halved.

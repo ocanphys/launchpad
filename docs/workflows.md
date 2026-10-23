@@ -424,7 +424,7 @@ flowchart TD
     M3 --> M4["Write if --write<br/>manifest_json(), volume.commit()"]
   end
 
-  subgraph profile ["benchmarking/profile_events.py"]
-    P0["Modal app and pinned torch image<br/>for torch.profiler captures returned as prof.events()"]
+  subgraph profile ["profiling/"]
+    P0["main.profile on worker_image runs util.profile<br/>torch.profiler captures returned as prof.events()"]
   end
 ```

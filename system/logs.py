@@ -4,7 +4,8 @@ A row is `{"ts", "call_id", "source", "level", "logger", "msg"}`, a traceback
 folded into `msg`, and the `call_logs` key it lives under is
 `{call_id}:{storage}:{source}` -- `storage` is `livedict` for what a container
 has published or `volume` for what its file holds, and `source` is who wrote
-it: `worker`, `launcher`, or `ambient` for a record none of our loggers
+it: `worker`, `launcher`, `profiler` (a profiling run, which holds no
+lease), or `ambient` for a record none of our loggers
 stamped (a library's warning is the container's own noise, not the call's
 account of itself).
 
@@ -41,7 +42,7 @@ from system.lease_protocol import call_history, call_logs
 LIVE, VOLUME = "livedict", "volume"  # the Dict a container publishes to, and the file
 # Who wrote a row. LAUNCHER is also a call id: the one the leasebook container
 # files its own rows under, so its log is a call's log in every other way.
-WORKER, LAUNCHER, AMBIENT = "worker", "launcher", "ambient"
+WORKER, LAUNCHER, PROFILER, AMBIENT = "worker", "launcher", "profiler", "ambient"
 SOURCES = (WORKER, LAUNCHER, AMBIENT)
 
 _log = logging.getLogger(__name__)  # the publisher's own, ambient wherever it runs
