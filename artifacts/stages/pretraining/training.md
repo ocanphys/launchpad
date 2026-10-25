@@ -161,8 +161,6 @@ the first real run.
 - **Host-to-device copies.** `torch.from_numpy(...).to(device)` blocks.
   `.pin_memory().to(device, non_blocking=True)` overlaps with the previous
   step's backward.
-- **`gpu_check_every`** is declared in `LoopConfig` and unused. Log
-  `torch.cuda` memory stats on that cadence or delete it.
 - **`torch.compile(model)`** is usually a free 1.3 to 2x on this shape on CUDA.
 - **Optimizer flags outside `OptimizerParameters`** (`amsgrad`, `fused`,
   `foreach`, `capturable`) come from the saved leg, since the re-apply covers

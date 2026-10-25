@@ -7,6 +7,7 @@ import torch
 from artifacts.core.SGD.job import TrainingJob
 from artifacts.core.SGD.steplog import StepLog
 from artifacts.stages.pretraining import Pretraining
+from gpus.monitor import GpuMonitor
 
 if TYPE_CHECKING:
     from system.runtime import Worker
@@ -125,6 +126,9 @@ class PretrainJob(TrainingJob):
         # optimizer.step() the model is the result of `step`, which is what
         # the failsafe records, with the rate it was taken at
         model.train()
+        gpu_monitor = GpuMonitor(
+            self.artifact.model, self.training_parameters.batch_size, self.loop_config.gpu_check_every, step, worker
+        )
         while step < end_step:
             step += 1
             learning_rate = self.set_learning_rate(optimizer, step)
@@ -133,6 +137,7 @@ class PretrainJob(TrainingJob):
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             optimizer.step()
             optimizer.zero_grad()
+            
             val_loss = (
                 self.evaluate(model, dataset, step, loss, learning_rate, grad_norm, worker)
                 if step % self.loop_config.val_every == 0
@@ -142,6 +147,7 @@ class PretrainJob(TrainingJob):
             worker.progress["step"] = step
             if val_loss is not None:
                 steplog.flush()
+            gpu_monitor.record(step)
 
             if step % self.loop_config.checkpoint_every == 0:
                 self.failsafe(folder / "checkpoints", model, optimizer, step, worker)
