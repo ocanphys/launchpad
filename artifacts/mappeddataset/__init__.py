@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
@@ -10,6 +11,8 @@ from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers import Tokenizer
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from artifacts.mappeddataset.tokenstream import TokenStream
 
 END_OF_TEXT = "<|endoftext|>"
@@ -149,3 +152,52 @@ class MappedDataSet(Artifact):
     def valid_tokens(self) -> TokenStream:
         self._require("reading valid_tokens")
         return self._valid_tokens
+
+    def train_batches(self, batch_size: int, sequence_length: int, seed: int) -> Callable[[int], tuple[np.ndarray, np.ndarray]]:
+        """Returns the function from a step number to that step's (inputs,
+        targets), int64 arrays of shape (batch_size, sequence_length) drawn at
+        random positions of train_tokens.
+
+        The batch is a function of (seed, step) alone, so a resumed run draws
+        exactly the batches the interrupted one would have."""
+        import numpy as np
+
+        tokens = self.train_tokens
+
+        def get_train_batch(step: int) -> tuple[np.ndarray, np.ndarray]:
+            rng = np.random.default_rng((seed, step))
+            starts = rng.integers(0, len(tokens) - sequence_length, size=batch_size)
+            # int64 because Embedding needs long
+            inputs = np.stack([tokens[i : i + sequence_length] for i in starts]).astype(np.int64)
+            targets = np.stack([tokens[i + 1 : i + sequence_length + 1] for i in starts]).astype(np.int64)
+            return inputs, targets
+
+        return get_train_batch
+
+    def valid_batches(
+        self, batch_size: int, sequence_length: int
+    ) -> tuple[int, Callable[[int], tuple[np.ndarray, np.ndarray]]]:
+        """Returns how many batches cover valid_tokens and the function from a
+        batch id below that count to its (inputs, targets), int64 arrays of
+        consecutive, non-overlapping sequences of sequence_length.
+
+        A split shorter than one batch is one batch of the sequences it holds,
+        so fewer than batch_size rows; the tail too short to fill a batch is in
+        no batch."""
+        import numpy as np
+
+        tokens = self.valid_tokens
+        sequences = (len(tokens) - 1) // sequence_length
+        if sequences < 1:
+            raise ValueError(
+                f"the validation split holds {len(tokens)} tokens, fewer than one "
+                f"sequence of {sequence_length} and its next token"
+            )
+        size = min(batch_size, sequences) * sequence_length
+
+        def get_valid_batch(batch_id: int) -> tuple[np.ndarray, np.ndarray]:
+            # one contiguous slice: TokenStream serves nothing else
+            window = tokens[batch_id * size : (batch_id + 1) * size + 1].astype(np.int64)
+            return window[:-1].reshape(-1, sequence_length), window[1:].reshape(-1, sequence_length)
+
+        return (len(tokens) - 1) // size, get_valid_batch

@@ -51,7 +51,7 @@ web_image = (
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
 
-worker_image = locked_image("worker").add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "profiling")
+worker_image = locked_image("worker").add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "profiling", "gpus")
 
 lab_image = (
     locked_image("lab")

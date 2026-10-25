@@ -113,24 +113,38 @@ interrupted attempt landed on `end_step`). Once `model.pt` exists, `run`
 returns without touching anything: later legs may have trained from it, and
 on CUDA a retrain would not reproduce it bit for bit.
 
-`get_batch` draws the batch for a step from `default_rng((seed, step))`, so
-batches are a function of the seed alone and a resumed attempt sees exactly
-the batches the interrupted one would have. No RNG state is checkpointed: the
-model has no dropout, and batch selection is the only randomness after
-initialization.
+The dataset decides how batches are drawn. `run` asks it once for
+`dataset.train_batches(batch_size, sequence_length, seed)`, a function from step
+number to that step's (inputs, targets), and the loop only passes it the step.
+Batch size, sequence length and seed are fixed for the whole leg, so the
+recipe can be settled before the first step. Since the recipe is the
+dataset's, a different one (a curriculum, labeled batches) is a different
+dataset artifact, even when it reads the same token files. Validation reads
+the same way through `dataset.valid_batches(batch_size, sequence_length)`,
+which returns the batch count and a function from batch id to batch, covering
+the validation split in order, so the job only loops over the ids.
 
-Every step's loss, gradient norm and learning rate go to `train.jsonl` in the
-leg's folder through `StepLog` (`artifacts/core/SGD/steplog.py`), one JSON
-row per step tagged with the attempt that took it, and the validation loss
-on the rows `evaluate` ran on, null on the rest. Rows are kept as device
-tensors and read back in one batch when the loop flushes, after each
-`evaluate` and once after the loop, so the only CPU/GPU sync points are those
-flushes and `evaluate`'s `.item()` calls. Every
-attempt appends: after a crash, the steps redone from the last failsafe
-appear twice, under different attempts, which is what lets the file be split
-back into continuous executions.
-Each flush also publishes this attempt's rows so far to the `train` Dict,
-for the dashboard's curves (see docs/LOGGING.md).
+`DataSet` and `MappedDataSet` both draw random windows from
+`default_rng((seed, step))`, so batches are a function of the seed alone and
+a resumed attempt sees exactly the batches the interrupted one would have. No
+RNG state is checkpointed: the model has no dropout, and batch selection is
+the only randomness after initialization.
+
+Each step's metrics go to `train.jsonl` in the leg's folder through `StepLog`
+(`artifacts/core/SGD/steplog.py`), one JSON row per step tagged with the
+attempt that took it, holding whatever that step recorded: loss, gradient
+norm and learning rate on every step, `evaluate`'s val_loss and val_loss_var
+on validation steps (every `val_every` steps and the last), and
+`GpuMonitor`'s peaks and mfu on the steps they are known. A metric a step did
+not record is absent from its row, and one that diverged to NaN or infinity
+is null, since JSON has neither. Tensor metrics stay on device until the
+loop flushes, after each `evaluate`, before each failsafe and once after the
+loop; the validation and failsafe steps are the loop's only CPU/GPU sync
+points. Flushing at each failsafe means every step up to the newest failsafe
+is on file before a crash can land past it, so the attempt that resumes
+there leaves no gap. Every attempt appends: after a crash, the steps redone
+from the last failsafe can appear twice, under different attempts, which is
+what lets the file be split back into continuous executions.
 
 ## TBD
 
@@ -147,9 +161,6 @@ the first real run.
   biases are decayed. Usual recipe: decay for `p.ndim >= 2`, none otherwise.
   `resume` re-applies `optimizer_parameters` to every group; with two groups
   it must leave the no-decay group's `weight_decay` at 0.
-- **Validation set.** One random batch per `val_every`, so the curve is noisy.
-  A fixed set of K batches from `default_rng(seed)` averaged under
-  `torch.inference_mode()` gives a readable curve.
 - **`mmap=True` on the volume mount.** Stripping optimizers maps each earlier
   failsafe and renames over it. Whether Modal's FUSE mount supports the map
   and the rename under it needs a check on the real mount. Fallback: plain

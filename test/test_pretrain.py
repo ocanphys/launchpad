@@ -14,6 +14,7 @@ import torch
 
 from artifacts.core.artifact import MANIFEST, Artifact
 from artifacts.core.SGD.lr_schedule import lr_cosine_schedule
+from artifacts.core.SGD.steplog import StepLog
 from artifacts.core.SGD.training import (
     LoopConfig,
     LRSchedule,
@@ -44,7 +45,7 @@ TRAINING = TrainingParameters(
     optimizer="torch.optim.AdamW",
     optimizer_parameters=OptimizerParameters(lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
 )
-LOOP = LoopConfig(val_every=2, gpu_check_every=0, checkpoint_every=2)
+LOOP = LoopConfig(val_every=2, gpu_check_every=2, checkpoint_every=2)
 
 
 def worker() -> Worker:
@@ -298,13 +299,32 @@ class PretrainJobTests(unittest.TestCase):
         PretrainJob(self.leg).run(self.root, worker())
         rows = [json.loads(line) for line in (self.folder / "train.jsonl").read_text().splitlines()]
         self.assertEqual([(r["attempt"], r["step"]) for r in rows], [(1, 1), (1, 2), (2, 3), (2, 4)])
-        self.assertEqual(set(rows[0]), {"step", "attempt", "loss", "val_loss", "grad_norm", "learning_rate"})
         self.assertTrue(all(isinstance(r["loss"], float) for r in rows))
         # validation runs every val_every steps; the rows in between carry no val_loss
-        self.assertEqual(
-            [r["val_loss"] is None for r in rows],
-            [(r["step"] % LOOP.val_every) != 0 for r in rows],
-        )
+        for r in rows:
+            validated = {"val_loss", "val_loss_var"} if r["step"] % LOOP.val_every == 0 else set()
+            self.assertEqual(set(r), {"step", "attempt", "loss", "grad_norm", "learning_rate"} | validated)
+
+    def test_a_crash_between_validations_leaves_no_gap_and_the_last_step_validates(self):
+        sparse = replace(self.leg, loop_config=replace(LOOP, val_every=3, checkpoint_every=2))
+        folder = self.root / sparse.artifact_path
+        with crash_after_first_failsafe(), self.assertRaisesRegex(RuntimeError, "died"):
+            PretrainJob(sparse).run(self.root, worker())
+        PretrainJob(sparse).run(self.root, worker())
+        rows = [json.loads(line) for line in (folder / "train.jsonl").read_text().splitlines()]
+        # the failsafe at step 2 flushed steps 1-2 before the crash
+        self.assertEqual([(r["attempt"], r["step"]) for r in rows], [(1, 1), (1, 2), (2, 3), (2, 4)])
+        # step 4 is not a multiple of val_every, but it is end_step
+        self.assertEqual([r["step"] for r in rows if "val_loss" in r], [3, 4])
+
+    def test_the_step_log_writes_a_diverged_value_as_null(self):
+        steplog = StepLog(self.root, self.leg.artifact_path.as_posix())
+        self.folder.mkdir(parents=True, exist_ok=True)
+        steplog.record(1, {"loss": torch.tensor(float("nan")), "grad_norm": torch.tensor(float("inf")), "learning_rate": 0.5})
+        steplog.flush()
+        # strict JSON, which is what the dashboard's response has to be
+        row = json.loads((self.folder / "train.jsonl").read_text(), parse_constant=lambda name: self.fail(name))
+        self.assertEqual(row, {"step": 1, "attempt": 1, "loss": None, "grad_norm": None, "learning_rate": 0.5})
 
     def test_a_model_vocab_that_disagrees_with_its_tokenizer_is_refused(self):
         with self.assertRaisesRegex(ValueError, "vocab_size"):
@@ -332,15 +352,16 @@ class PretrainJobTests(unittest.TestCase):
             Pretraining(model=mamba, starting_checkpoint=self.leg, **inputs)
 
     def test_validation_scores_a_split_shorter_than_one_batch(self):
-        job, model, running = PretrainJob(self.leg), MODEL.build(), worker()
-        sequences = TRAINING.batch_size - 1
-        tokens = np.arange(sequences * MODEL.sequence_length + 1) % MODEL.vocab_size
-        mean, variance = job.validation_loss(model, tokens, running)
-        self.assertTrue(torch.isfinite(mean))
-        self.assertEqual(variance.item(), 0.0)  # one batch: no spread, and never NaN
-        with self.assertRaisesRegex(ValueError, "fewer than one sequence"):
-            job.validation_loss(model, tokens[: MODEL.sequence_length], running)
-        self.assertNotIn("phase", running.progress)
+        # 2000 tokens hold 249 sequences of 8, all in one batch of up to 300
+        wide = replace(self.leg, training_parameters=replace(TRAINING, batch_size=300))
+        metrics = PretrainJob(wide).evaluate(MODEL.build(), self.dataset.bind(self.root), worker())
+        self.assertTrue(torch.isfinite(metrics["val_loss"]))
+        self.assertEqual(metrics["val_loss_var"].item(), 0.0)  # one batch: no spread, and never NaN
+
+    def test_live_progress_is_the_step_alone_off_cuda(self):
+        running = worker()
+        PretrainJob(self.leg).run(self.root, running)
+        self.assertEqual(set(running.progress), {"step"})
 
     def test_a_leg_keeps_its_starting_checkpoints_tokenizer(self):
         other = Tokenizer(vocab_size=64, special_tokens=("<eos>",), sources=(SOURCE,))

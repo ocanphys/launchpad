@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 
 from artifacts.core.SGD.job import TrainingJob
@@ -10,23 +9,9 @@ from artifacts.stages.pretraining import Pretraining
 from gpus.monitor import GpuMonitor
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from system.runtime import Worker
-
-
-def get_batch(data, batch_size: int, sequence_length: int, seed: int, step: int, device):
-    """(inputs, targets) for one step, as int64 tensors of shape
-    (batch_size, sequence_length) on device.
-
-    The batch is a function of (seed, step) alone, so a resumed run draws
-    exactly the batches the interrupted one would have; no RNG state needs
-    checkpointing for this.
-    """
-    rng = np.random.default_rng((seed, step))
-    starts = rng.integers(0, len(data) - sequence_length, size=batch_size)
-    # cast on the numpy side - Embedding needs long
-    inputs = np.stack([data[i : i + sequence_length] for i in starts]).astype(np.int64)
-    targets = np.stack([data[i + 1 : i + sequence_length + 1] for i in starts]).astype(np.int64)
-    return torch.from_numpy(inputs).to(device), torch.from_numpy(targets).to(device)
 
 
 class PretrainJob(TrainingJob):
@@ -38,118 +23,88 @@ class PretrainJob(TrainingJob):
         self.sequence_length = artifact.model.sequence_length
         self.loss_function = torch.nn.CrossEntropyLoss()
 
-    def batch_loss(self, model: torch.nn.Module, data, step: int) -> torch.Tensor:
-        inputs, targets = get_batch(
-            data,
-            self.training_parameters.batch_size,
-            self.sequence_length,
-            self.training_parameters.seed,
-            step,
-            self.device,
+    def to_device(self, batch: tuple["np.ndarray", ...]) -> tuple[torch.Tensor, ...]:
+        """Returns batch's arrays as tensors on device, copied without waiting for the GPU.
+
+        A copy from pageable memory waits for the GPU to drain; from pinned memory
+        it queues behind the work already sent. Pinning needs CUDA, so on any other
+        device the arrays are copied as they are."""
+        pin = self.device.type == "cuda"
+        return tuple(
+            (torch.from_numpy(array).pin_memory() if pin else torch.from_numpy(array)).to(self.device, non_blocking=True)
+            for array in batch
         )
+
+    def batch_loss(self, model: torch.nn.Module, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         return self.loss_function(model(inputs).transpose(1, 2), targets)
 
-    def validation_loss(self, model: torch.nn.Module, data, worker: "Worker") -> tuple[torch.Tensor, torch.Tensor]:
-        """(mean, variance) of the losses of data's consecutive, non-overlapping
-        batches of batch_size sequences, as scalar tensors on device.
+    def evaluate(self, model: torch.nn.Module, dataset, worker: "Worker") -> dict[str, torch.Tensor]:
+        """Returns val_loss and val_loss_var, the mean and variance of the losses of
+        every batch of the bound dataset's valid_batches, as scalar tensors on device.
 
-        A split shorter than one batch is scored as one batch of the sequences
-        it holds, and the tail too short to fill a batch is not scored. The
-        variance is across the batches scored, so 0 for a single batch. While
-        it runs, worker.progress carries phase/done/total, which the UI shows
-        ahead of step."""
-        sequences = (len(data) - 1) // self.sequence_length
-        if sequences == 0:
-            raise ValueError(
-                f"the validation split holds {len(data)} tokens, fewer than one "
-                f"sequence of {self.sequence_length} and its next token"
-            )
-        size = min(self.training_parameters.batch_size, sequences) * self.sequence_length
-        total = (len(data) - 1) // size
-        worker.progress.update({"phase": "validation loss", "done": 0, "total": total})
+        The variance is across batches, so 0 for a single batch. While it runs,
+        worker.progress["val_batch"] reads "done/total" for the batches queued."""
+        total, get_valid_batch = dataset.valid_batches(self.training_parameters.batch_size, self.sequence_length)
         losses = []
-        try:
-            for batch in range(total):
-                # one contiguous slice: TokenStream serves nothing else
-                tokens = torch.from_numpy(data[batch * size : (batch + 1) * size + 1].astype(np.int64)).to(self.device)
-                inputs = tokens[:-1].reshape(-1, self.sequence_length)
-                targets = tokens[1:].reshape(-1, self.sequence_length)
-                losses.append(self.loss_function(model(inputs).transpose(1, 2), targets))
-                worker.progress["done"] = batch + 1
-        finally:
-            for key in ("phase", "done", "total"):
-                del worker.progress[key]
-        losses = torch.stack(losses)
-        return losses.mean(), losses.var(correction=0)
-
-    def evaluate(self, model, dataset, step, loss, learning_rate, grad_norm, worker: "Worker") -> float:
-        """Returns the validation loss after `step` completed steps, having reported it
-        and its variance across batches to worker.progress and the log along with the
-        last training step's loss, learning rate and gradient norm."""
         model.eval()
         with torch.no_grad():
-            val_loss, val_loss_var = self.validation_loss(model, dataset.valid_tokens, worker)
+            for batch_id in range(total):
+                worker.progress["val_batch"] = f"{batch_id + 1}/{total}"
+                inputs, targets = self.to_device(get_valid_batch(batch_id))
+                losses.append(self.batch_loss(model, inputs, targets))
         model.train()
-        # the only .item() calls in the loop: each one waits for the GPU
-        metrics = {
-            "loss": loss.item(),
-            "val_loss": val_loss.item(),
-            "val_loss_var": val_loss_var.item(),
-            "learning_rate": learning_rate,
-            "grad_norm": grad_norm.item(),
-        }
-        end_step = self.artifact.end_step
-        worker.progress.update({"end_step": end_step, **metrics})
-        worker.log.info(
-            f"step {step}/{end_step} "
-            + " ".join(f"{name}={value:.4g}" for name, value in metrics.items())
-        )
-        return metrics["val_loss"]
+        del worker.progress["val_batch"]
+        losses = torch.stack(losses)
+        return {"val_loss": losses.mean(), "val_loss_var": losses.var(correction=0)}
 
     def run(self, root: Path, worker: "Worker") -> None:
-        end_step = self.artifact.end_step
         if self.artifact.status(root).complete:  # a finished leg is never rerun (LESSONS.md)
-            worker.log.info(f"model.pt exists, leg already complete at step {end_step}")
+            worker.log.info(f"model.pt exists, leg already complete at step {self.artifact.end_step}")
             return
+        end_step = self.artifact.end_step
+        batch_size = self.training_parameters.batch_size
+        sequence_length = self.sequence_length
+        seed = self.training_parameters.seed
+        max_norm = self.training_parameters.max_norm
+        val_every = self.loop_config.val_every
+        checkpoint_every = self.loop_config.checkpoint_every
+        gpu_check_every = self.loop_config.gpu_check_every
         folder = root / self.artifact.artifact_path
         (folder / "checkpoints").mkdir(parents=True, exist_ok=True)
         # resume from initial model or most recent failsafe checkpoint.
         model, optimizer, step = self.resume(root, worker)
         steplog = StepLog(root, self.artifact.artifact_path.as_posix())
-        # the artifact run_job hands a job is the declaration only; bind maps
-        # the train/valid token files its own job wrote onto it
+        gpu_monitor = GpuMonitor(self.artifact.model, batch_size, gpu_check_every, step, worker)
         dataset = self.dataset.bind(root)
-        max_norm = self.training_parameters.max_norm
-
-        # `step` counts completed steps; the increment makes it the number of
-        # the step being taken, whose batch and rate are drawn from it. After
-        # optimizer.step() the model is the result of `step`, which is what
-        # the failsafe records, with the rate it was taken at
+        get_train_batch = dataset.train_batches(batch_size, sequence_length, seed)
+        # optimization notes for data pipeline: drawing step + 1's batch
+        # before this step's forward would hide the draw too, and sending the
+        # uint16 tokens and casting to int64 on device would cut the bytes
+        # copied by 4x
         model.train()
-        gpu_monitor = GpuMonitor(
-            self.artifact.model, self.training_parameters.batch_size, self.loop_config.gpu_check_every, step, worker
-        )
         while step < end_step:
+            worker.progress["step"] = step
             step += 1
             learning_rate = self.set_learning_rate(optimizer, step)
-            loss = self.batch_loss(model, dataset.train_tokens, step)
+            inputs, targets = self.to_device(get_train_batch(step))
+            loss = self.batch_loss(model, inputs, targets)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             optimizer.step()
             optimizer.zero_grad()
-            
-            val_loss = (
-                self.evaluate(model, dataset, step, loss, learning_rate, grad_norm, worker)
-                if step % self.loop_config.val_every == 0
-                else None
-            )
-            steplog.record(step, loss, grad_norm, learning_rate, val_loss)
-            worker.progress["step"] = step
-            if val_loss is not None:
-                steplog.flush()
-            gpu_monitor.record(step)
 
-            if step % self.loop_config.checkpoint_every == 0:
+            metrics = {"loss": loss, "grad_norm": grad_norm, "learning_rate": learning_rate} | gpu_monitor.record(step)
+            if step % val_every == 0 or step == end_step:
+                metrics |= self.evaluate(model, dataset, worker)
+                steplog.record(step, metrics)
+                # one GPU sync: every recorded tensor read back at once
+                steplog.flush()
+            else:
+                steplog.record(step, metrics)
+
+            if step % checkpoint_every == 0:
+                # rows first: a crash between the two then repeats steps rather than losing them
+                steplog.flush()
                 self.failsafe(folder / "checkpoints", model, optimizer, step, worker)
                 worker.log.info(f"checkpoint saved at step {step}/{end_step}")
 

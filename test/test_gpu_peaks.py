@@ -2,27 +2,34 @@
 import math
 
 import pytest
-from gpus.peaks import gpu_specs, peak_tflops, spec_row
+
+from gpus.peaks import COLUMNS, gpu_specs, peak_tflops, spec_row
 
 
-def test_rows_are_unique_and_each_precision_is_positive_or_missing():
-    assert gpu_specs.index.is_unique
-    assert gpu_specs.columns.tolist() == ["fp64", "fp32", "tf32", "bf16", "fp16", "fp8", "mem_bw"]
-    assert ((gpu_specs > 0) | gpu_specs.isna()).all().all()
+def test_every_row_has_each_column_positive_or_missing():
+    for row in gpu_specs.values():
+        assert tuple(row) == COLUMNS
+        assert all(value > 0 or math.isnan(value) for value in row.values())
 
 
 def test_bf16_equals_fp16_wherever_both_exist_and_fp8_doubles_them():
-    both = gpu_specs.dropna(subset=["bf16", "fp16"])
-    assert (both["bf16"] == both["fp16"]).all()
-    fp8 = gpu_specs.dropna(subset=["fp8", "bf16"])
-    assert all(math.isclose(row.fp8, 2 * row.bf16, rel_tol=0.02) for row in fp8.itertuples())
+    for row in gpu_specs.values():
+        if not math.isnan(row["bf16"]) and not math.isnan(row["fp16"]):
+            assert row["bf16"] == row["fp16"]
+        if not math.isnan(row["fp8"]) and not math.isnan(row["bf16"]):
+            assert math.isclose(row["fp8"], 2 * row["bf16"], rel_tol=0.02)
 
 
 def test_aliases_share_their_compute():
-    compute = ["fp64", "fp32", "tf32", "bf16", "fp16", "fp8"]
-    assert gpu_specs.loc["A100", compute].equals(gpu_specs.loc["A100-40GB", compute])
-    assert gpu_specs.loc["H100!", compute].equals(gpu_specs.loc["H100", compute])
-    assert gpu_specs.loc["H200", compute].equals(gpu_specs.loc["H100", compute])
+    compute = [column for column in COLUMNS if column != "mem_bw"]
+
+    def same(a, b):
+        return all(gpu_specs[a][c] == gpu_specs[b][c] or math.isnan(gpu_specs[a][c]) and math.isnan(gpu_specs[b][c])
+                   for c in compute)
+
+    assert same("A100", "A100-40GB")
+    assert same("H100!", "H100")
+    assert same("H200", "H100")
 
 
 def test_device_names_map_to_the_row_of_the_gpu_modal_gave():
@@ -33,7 +40,7 @@ def test_device_names_map_to_the_row_of_the_gpu_modal_gave():
         "NVIDIA RTX PRO 6000 Blackwell Server Edition": "RTX-PRO-6000",
     }
     assert {name: spec_row(name) for name in rows} == rows
-    assert set(rows.values()) <= set(gpu_specs.index)
+    assert set(rows.values()) <= set(gpu_specs)
     with pytest.raises(KeyError, match="not in gpus/peaks.py"):
         spec_row("NVIDIA A10G")  # a different GPU from the A10: not guessed
 

@@ -90,6 +90,9 @@ class LoopConfig:
     Every ``checkpoint_every`` steps, the training job writes a failsafe model
     state. ``optimizer_checkpoint_policy="all"`` writes the matching optimizer
     state at every failsafe; ``"latest"`` retains it only for the newest one.
+    On CUDA, it reports the MFU and the peak allocated and reserved memory
+    over each window of ``gpu_check_every`` steps, validation and checkpoints
+    included, a few steps after the window closes.
     """
 
     val_every: int
@@ -100,6 +103,8 @@ class LoopConfig:
     def __post_init__(self) -> None:
         if self.checkpoint_every <= 0:
             raise ValueError("checkpoint_every must be positive")
+        if self.gpu_check_every <= 0:
+            raise ValueError("gpu_check_every must be positive")
 
 
 # kw_only here and on every subclass, so their fields never have to be
