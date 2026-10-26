@@ -45,8 +45,12 @@ ARTIFACTS_SOURCE = ("artifacts", "models")
 
 
 WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
+GUIDE_DIR = Path("/guide")  # where web_image builds the docs site from docs/ and mkdocs.yml
 web_image = (
     locked_image("web")
+    .add_local_file("mkdocs.yml", "/docs-src/mkdocs.yml", copy=True)
+    .add_local_dir("docs", "/docs-src/docs", copy=True)
+    .run_commands(f"mkdocs build -f /docs-src/mkdocs.yml -d {GUIDE_DIR}")
     .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
@@ -73,7 +77,8 @@ lab_image = (
 def leasebook():
     """The dashboard and the API it serves, in one container.
 
-    Every route but `/login` is behind DASHBOARD_PASSWORD, out of LAB_SECRET.
+    Every route but `/login` and the docs at `/guide/` is behind
+    DASHBOARD_PASSWORD, out of LAB_SECRET.
     A missing key is a container that refuses to start rather than one serving
     in the open. What it serves is `launcher.leasebook`.
     """
@@ -82,7 +87,7 @@ def leasebook():
     # to reach its own function.
     from launcher.leasebook import build_api
 
-    return build_api(run_job, jupyter, WEB_DIR)
+    return build_api(run_job, jupyter, WEB_DIR, GUIDE_DIR)
 
 
 @app.function(image=web_image, volumes={STORAGE: volume}, region=REGION, schedule=modal.Period(seconds=PERSIST_LOGS_EVERY))

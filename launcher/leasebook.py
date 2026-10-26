@@ -58,6 +58,7 @@ from system.logs import (
 )
 
 log_launcher = launcher_logger()  # this container's doings
+GUIDE = "/guide"  # where the docs site is served, outside the password
 log_call = launcher_logger  # a call this container manages
 
 
@@ -190,12 +191,14 @@ def cancel_call(artifact_path: str) -> tuple[bool, str]:
     return True, message
 
 
-def build_api(run_job, jupyter, web_dir: Path) -> FastAPI:
+def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path) -> FastAPI:
     """The whole web app: every route, and the listener thread behind them.
 
     `run_job` is the Modal function `/launch` spawns and `jupyter` the one
     `/lab` redirects to, both handed in because their decorators are in
-    main.py. `web_dir` is where that image mounted the `web/` folder.
+    main.py. `web_dir` is where that image mounted the `web/` folder, and
+    `guide_dir` where it built the docs site, served at GUIDE without the
+    password.
     """
     # Everything below is this container's whole setup and its whole life --
     # the log is publishing before anything touches the volume, and one try
@@ -231,7 +234,7 @@ def build_api(run_job, jupyter, web_dir: Path) -> FastAPI:
         # the sense that it is the way past it. Registered after the error
         # logger, which puts the gate outside it: Starlette wraps in reverse
         # registration order.
-        gate(api, web_dir / "login.html")
+        gate(api, web_dir / "login.html", public=GUIDE)
 
         # The token `/lab` carries, read once. Not the dashboard's password:
         # it travels in a URL (see launcher/gate.py).
@@ -400,6 +403,14 @@ def build_api(run_job, jupyter, web_dir: Path) -> FastAPI:
             if name not in dicts:
                 return {"error": f"no Dict {name!r}; one of {sorted(dicts)}"}
             return dict(dicts[name].items())
+
+        # A mount answers only beneath its path, so the bare /guide would fall
+        # through to the catch-all below and 404.
+        @api.get(GUIDE)
+        def guide_redirect() -> RedirectResponse:
+            return RedirectResponse(GUIDE + "/")
+
+        api.mount(GUIDE, StaticFiles(directory=guide_dir, html=True), name="guide")
 
         # Everything else -- index.html at "/" and its same-origin JS modules
         # (app.js, el.js, render.js) -- is a static file under web_dir. Mounted

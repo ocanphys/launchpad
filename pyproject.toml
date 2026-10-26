@@ -12,7 +12,8 @@ dependencies = [
 
 # One group per Modal image (main.py); local installs every group.
 [dependency-groups]
-web = ["fastapi[standard]"]
+web = [{ include-group = "docs" }, "fastapi[standard]"]
+docs = ["mkdocs>=1.6.1", "mkdocs-material", "mkdocstrings[python]"]
 worker = [
     "einops>=0.8.2",
     "numpy>=2.4.0",

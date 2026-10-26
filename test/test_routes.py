@@ -219,6 +219,9 @@ def client(**overrides):
     # In the container `web/` is mounted at /web; locally it's the repo's own
     # copy, which is the same files and lets the static mount succeed.
     main.WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+    # The image builds the docs site at GUIDE_DIR; here a one-page stand-in.
+    main.GUIDE_DIR = Path(mkdtemp())
+    (main.GUIDE_DIR / "index.html").write_text("<h1>guide</h1>")
     # What LAB_SECRET puts in the container's environment. Every client below
     # arrives logged in, so the tests exercise the routes rather than the
     # middleware in front of them.
@@ -510,6 +513,19 @@ def test_every_route_is_behind_the_password():
     assert calls["launched"] == [], "a logged-out POST reached the launcher"
     stale = {"Cookie": "launchpad=" + hashlib.sha256(b"wrong").hexdigest()}
     assert TestClient(api.app, headers=stale, follow_redirects=False).get("/state").status_code == 303
+    # Only exactly /guide and what is under it are public, not every path that starts with it.
+    assert anonymous.get("/guidebook").status_code == 303
+
+
+def test_the_guide_is_served_without_the_password():
+    from fastapi.testclient import TestClient
+
+    api, _ = client()
+    anonymous = TestClient(api.app, follow_redirects=False)
+    bare = anonymous.get("/guide")
+    assert bare.status_code == 307 and bare.headers["location"] == "/guide/"
+    page = anonymous.get("/guide/")
+    assert page.status_code == 200 and "<h1>guide</h1>" in page.text
 
 
 def test_the_login_form_takes_the_password_and_nothing_else():

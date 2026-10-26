@@ -2,7 +2,8 @@
 
 One password over the whole app: it launches and cancels jobs, and its `/lab`
 route redirects with the lab's token attached, so an open URL there is an open
-shell on the volume. DASHBOARD_PASSWORD is the one a person types and picks;
+shell on the volume. The one exception is the docs site, which is public.
+DASHBOARD_PASSWORD is the one a person types and picks;
 JUPYTER_TOKEN stays whatever random string the secret was made with, because
 it travels in a URL.
 
@@ -23,8 +24,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 COOKIE = "launchpad"
 
 
-def gate(api: FastAPI, login_html: Path) -> None:
-    """Puts every route on `api` but `/login` behind DASHBOARD_PASSWORD.
+def gate(api: FastAPI, login_html: Path, public: str) -> None:
+    """Puts every route on `api` behind DASHBOARD_PASSWORD but `/login`, and
+    `public` and everything under it.
 
     Call it after any middleware that should stay outside the password (an
     error logger), since Starlette wraps in reverse registration order, and
@@ -38,7 +40,9 @@ def gate(api: FastAPI, login_html: Path) -> None:
         # Bytes, not str: a cookie is whatever was sent, and `compare_digest`
         # refuses a str that isn't ASCII rather than saying no to it.
         cookie = request.cookies.get(COOKIE, "").encode("utf-8", "replace")
-        if request.url.path == "/login" or hmac.compare_digest(cookie, session.encode()):
+        path = request.url.path
+        open_path = path in ("/login", public) or path.startswith(public + "/")
+        if open_path or hmac.compare_digest(cookie, session.encode()):
             return await call_next(request)
         # A browser navigating gets the form; a fetch from the page gets a
         # status it can report, not a login page parsed as JSON.

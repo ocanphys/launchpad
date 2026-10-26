@@ -1,0 +1,35 @@
+site_name: launchpad
+docs_dir: docs
+theme:
+  name: readthedocs
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            filters: ["!^_"]
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js
+markdown_extensions:
+  - tables
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_div_format
+nav:
+  - Overview: index.md
+  - Framework: framework.md
+  - Training a Model: training.md
+  - Experiments: experiments.md
+  - Lab: lab.md
+  - Artifacts: artifacts.md
+  - Manifests: manifests.md
+  - Jobs: jobs.md
+  - Launcher: launcher.md
+  - Workers: workers.md
+  - Models: models.md
+  - Artifact Repository: repository.md
+  - Profiling: profiling.md
+  - Spec: spec.md

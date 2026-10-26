@@ -95,13 +95,17 @@ artifact on the volume, a live launcher-log side panel, and a drill-down page pe
 no framework. Full writeup: [docs/UI.md](docs/UI.md).
 
 Both URLs are public, so both are behind the secret below. Every dashboard
-route but `/login` wants a cookie; without one a navigation lands on a login
+route but `/login` and `/guide/` wants a cookie; without one a navigation lands on a login
 page (one field, [web/login.html](web/login.html)) that takes
 `DASHBOARD_PASSWORD` -- yours to pick, since it is the one a person types --
 and leaves a cookie holding its digest, so neither the password nor a session
 list is stored anywhere. JupyterLab takes `JUPYTER_TOKEN` instead, which
 nobody types: the header's `/lab` link carries it, and it travels in a URL, so
 it stays a random string.
+
+Besides the login form, the one route outside the password is `/guide/`: the docs site, built by
+MkDocs from `docs/` and `mkdocs.yml` into `web_image` on every deploy, and
+linked from the header. `mkdocs serve` previews it locally.
 
 ## The lab
 
