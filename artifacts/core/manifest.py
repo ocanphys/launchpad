@@ -1,7 +1,8 @@
 """Artifact <-> manifest dict <-> bytes on disk.
 
 A parameter is encoded and decoded by pydantic against its field's annotation
-(artifacts.core.schema), so its annotation alone says how to rebuild it; a
+(artifacts.core.schema), so its annotation alone says how to rebuild it, except
+in a polymorphic field, whose record names its own class under "class"; a
 dependency is a nested manifest naming its own class. `normalize` is the round
 trip every constructor runs, so a concrete artifact already equals what its
 manifest decodes to. Nothing here touches storage.
@@ -53,7 +54,7 @@ def _named(path: str):
         raise kind(f"{path}{inside}: {first['msg']}") from error
 
 
-def _encode(value: object, annotation: object) -> object:
+def _dump(value: object, annotation: object) -> object:
     """Returns `value`, annotated `annotation`, as JSON data with keys sorted.
 
     Adding 0.0 turns -0.0 into 0.0: the two compare equal, so they must encode
@@ -67,11 +68,33 @@ def _encode(value: object, annotation: object) -> object:
     )["value"]
 
 
-def _decode(data: object, annotation: object, path: str) -> object:
+def _load(data: object, annotation: object, path: str) -> object:
     """Returns the value JSON `data` encodes as `annotation`, validated
     strictly; `path` names it in an error."""
     with _named(path):
         return _field(annotation).model_validate_json(json.dumps({"value": data})).value
+
+
+def _encode(value: object, annotation: object) -> object:
+    """Returns a field's `value` as JSON data; a record in a polymorphic field
+    is dumped as its own class, which it names under "class"."""
+    if isinstance(value, polymorphic(annotation)):
+        # "class" is a Python keyword, so no field can be named it
+        return dict(sorted({"class": dotted(type(value)), **_dump(value, type(value))}.items()))
+    return _dump(value, annotation)
+
+
+def _decode(data: object, annotation: object, path: str) -> object:
+    """Returns the field value JSON `data` encodes; a polymorphic field's record
+    is loaded as the class it names, which must subclass the field's."""
+    bases = polymorphic(annotation)
+    if not bases or data is None:
+        return _load(data, annotation, path)
+    data = dict(data)
+    cls = locate(data.pop("class"))
+    if not issubclass(cls, bases):
+        raise TypeError(f"{path}: {dotted(cls)} is not a {bases[0].__qualname__}")
+    return _load(data, cls, path)
 
 
 def normalize(value: object, annotation: object, path: str) -> object:
@@ -79,10 +102,12 @@ def normalize(value: object, annotation: object, path: str) -> object:
     floats, -0.0 as 0.0, records rebuilt through their constructors.
 
     Raises unless `value` is exactly an `annotation`: a bool is not an int, a
-    list is not a tuple, and a subclass is not the record its field names.
+    list is not a tuple, and a subclass is not the record its field names
+    unless that record is polymorphic.
     """
+    record = type(value) if isinstance(value, polymorphic(annotation)) else annotation
     with _named(path):
-        validated = _field(annotation).model_validate({"value": value}).value
+        validated = _field(record).model_validate({"value": value}).value
     restored = _decode(_encode(validated, annotation), annotation, path)
     if restored != value:
         expected = getattr(annotation, "__qualname__", annotation)
@@ -107,18 +132,12 @@ def parameters(artifact: Artifact) -> dict:
     `allocated_resources` are neither, being about running and not state.
     """
     cls = type(artifact)
-    deps, tagged = dependencies(cls), polymorphic(cls)
-    encoded = {}
-    for name, annotation in sorted(annotations(cls).items()):
-        if name in deps or name in ("commit", "allocated_resources"):
-            continue
-        value = getattr(artifact, name)
-        if name in tagged and value is not None:
-            # "class" is a Python keyword, so no field can be named it
-            encoded[name] = dict(sorted({"class": dotted(type(value)), **_encode(value, type(value))}.items()))
-        else:
-            encoded[name] = _encode(value, annotation)
-    return encoded
+    deps = dependencies(cls)
+    return {
+        name: _encode(getattr(artifact, name), annotation)
+        for name, annotation in sorted(annotations(cls).items())
+        if name not in deps and name not in ("commit", "allocated_resources")
+    }
 
 
 def to_manifest(artifact: Artifact) -> dict:
@@ -168,15 +187,9 @@ def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifa
     cls = locate(data["artifact"])
     if not is_artifact(cls):
         raise TypeError(f"manifest target must be an Artifact, got {cls}")
-    hints, deps, tagged = annotations(cls), dependencies(cls), polymorphic(cls)
+    hints, deps = annotations(cls), dependencies(cls)
     own = {"commit": data["commit"], "allocated_resources": data["allocated_resources"], **data["parameters"]}
-    inputs = {}
-    for name, value in own.items():
-        annotation = hints[name]
-        if name in tagged and value is not None:
-            value = dict(value)
-            annotation = locate(value.pop("class"))
-        inputs[name] = _decode(value, annotation, f"{cls.__qualname__}.{name}")
+    inputs = {name: _decode(value, hints[name], f"{cls.__qualname__}.{name}") for name, value in own.items()}
     for name, value in data["dependencies"].items():
         if deps[name]:
             inputs[name] = deps[name](from_manifest(item, memo) for item in value)

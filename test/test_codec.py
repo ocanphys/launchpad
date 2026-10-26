@@ -125,7 +125,7 @@ REALS = st.builds(
             eps=FLOATS,
         ),
     ),
-    loop=st.builds(LoopConfig, checkpoint_every=POSITIVE),
+    loop=st.builds(LoopConfig, checkpoint_every=POSITIVE, gpu_check_every=POSITIVE),
     transformer=st.tuples(POSITIVE, st.integers(1, 64)).flatmap(
         lambda kh: st.builds(Transformer, d_model=st.just(kh[0] * kh[1]), num_heads=st.just(kh[1]))
     ),

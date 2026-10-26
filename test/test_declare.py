@@ -43,7 +43,7 @@ PRETRAINING = Pretraining(
         optimizer="torch.optim.AdamW",
         optimizer_parameters=OptimizerParameters(lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
     ),
-    loop_config=LoopConfig(val_every=2, gpu_check_every=0, checkpoint_every=2),
+    loop_config=LoopConfig(val_every=2, gpu_check_every=2, checkpoint_every=2),
 )
 NOTEBOOK = b'{"cells": []}'
 

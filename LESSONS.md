@@ -131,7 +131,8 @@ library is captured, check the whole family, not the top name:
 ## A traceback keeps the volume's files mapped after the call
 
 A memmap over a tokens.bin is a local in `PretrainJob.run` and in every
-frame under it (`batch_loss`, `get_batch`). When one of those raises, the
+frame under it (`evaluate`, `get_train_batch`, `get_valid_batch`), and the
+two batch functions also hold it in their closures. When one of those raises, the
 exception's `__traceback__` holds those frames and their locals, so the
 mapping stays open for as long as anything holds the exception, and Modal's
 runtime holds it past the call. The container is reused, the next call's

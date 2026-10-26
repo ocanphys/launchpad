@@ -73,15 +73,11 @@ def annotations(cls: type) -> dict[str, object]:
     return {f.name: hints[f.name] for f in fields(cls)}
 
 
-@cache
-def polymorphic(cls: type) -> frozenset[str]:
-    """Returns `cls`'s fields annotated with a record class that declares
-    `polymorphic = True`: those may hold any subclass of it."""
-    return frozenset(
-        name
-        for name, hint in annotations(cls).items()
-        if any(is_dataclass(arm) and getattr(arm, "polymorphic", False) for arm in arms(hint))
-    )
+def polymorphic(annotation: object) -> tuple[type, ...]:
+    """Returns the record class in `annotation` that declares `polymorphic = True`,
+    as a one-tuple, or () if it names none: a field so annotated may hold any
+    subclass of it."""
+    return tuple(arm for arm in arms(annotation) if is_dataclass(arm) and getattr(arm, "polymorphic", False))
 
 
 def _check_parameter(annotation: object, where: str) -> None:

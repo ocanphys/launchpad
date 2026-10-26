@@ -354,11 +354,11 @@ flowchart TD
   LR0["Sync the rate to the step<br/>set_learning_rate() -> lr_cosine_schedule()"] --> SLG["Open the step log<br/>StepLog(): next attempt number from train.jsonl"]
   SLG --> BD["Map the data<br/>dataset.bind(root): train_tokens, valid_tokens"]
   BD --> LOOP{"step below end_step?"}
-  LOOP -->|yes| STEP["One step<br/>set_learning_rate(), batch_loss() -> get_batch(seed, step)<br/>backward(), clip_grad_norm_(), optimizer.step()"]
-  STEP --> VAL{"Validation step?<br/>every val_every"}
-  VAL -->|yes| EV["evaluate() -> validation_loss()<br/>worker.progress, worker.log"]
+  LOOP -->|yes| STEP["One step<br/>set_learning_rate(), get_train_batch(step) -> batch_loss()<br/>backward(), clip_grad_norm_(), optimizer.step()"]
+  STEP --> VAL{"Validation step?<br/>every val_every, and end_step"}
+  VAL -->|yes| EV["evaluate() -> valid_batches()<br/>worker.progress val_batch"]
   VAL -->|no| REC
-  EV --> REC["Record the step<br/>StepLog.record(), worker.progress step<br/>StepLog.flush() after validation"]
+  EV --> REC["Record the step<br/>StepLog.record(), worker.progress step<br/>StepLog.flush() after validation and before failsafes"]
   REC --> CK{"Checkpoint step?<br/>every checkpoint_every"}
   CK -->|yes| FSV["Write a failsafe<br/>failsafe(): worker.publishing(checkpoints/step.pt)<br/>latest policy: strip optimizer from older ones"]
   CK -->|no| LOOP

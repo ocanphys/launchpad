@@ -23,7 +23,7 @@ import os
 import sys
 from abc import ABC, abstractmethod
 from collections import Counter
-from dataclasses import dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self, get_args
@@ -178,13 +178,10 @@ class Artifact(ABC):
                 f"{cls.__name__} must set `producer` to the dotted path of "
                 f"the Job class that produces it, or to None if nothing does"
             )
-        deps, tagged = schema.dependencies(cls), schema.polymorphic(cls)
+        deps = schema.dependencies(cls)
         for name, annotation in schema.annotations(cls).items():
             value, path = getattr(self, name), f"{cls.__qualname__}.{name}"
             if name not in deps:
-                # a polymorphic field holds any subclass of its record, checked as its own class
-                if name in tagged and isinstance(value, tuple(filter(is_dataclass, schema.arms(annotation)))):
-                    annotation = type(value)
                 object.__setattr__(self, name, manifest.normalize(value, annotation, path))
                 continue
             container = deps[name]

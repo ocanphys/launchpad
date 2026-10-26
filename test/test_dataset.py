@@ -35,6 +35,20 @@ def worker() -> Worker:
     return Worker(artifact_path="", call_id="local", log=Mock(), confirm_lease=Mock(), progress={})
 
 
+def built(root: Path, train: range, valid: range) -> DataSet:
+    """A built, bound DataSet whose training split is FIRST holding `train`
+    and whose validation split is SECOND holding `valid`."""
+    dataset = DataSet.from_sources(NO_EOT, (FIRST,), (SECOND,))
+    (root / dataset.artifact_path).mkdir(parents=True)
+    (root / dataset.artifact_path / MANIFEST).write_text(json.dumps(dataset.to_manifest()))
+    for source, tokens in ((dataset.train_set[0], train), (dataset.valid_set[0], valid)):
+        path = source.paths(root)["tokens"]
+        path.parent.mkdir(parents=True)
+        path.write_bytes(array("H", tokens).tobytes())
+    DataSetJob(dataset).run(root, worker())
+    return dataset.bind(root)
+
+
 class DataSetTests(unittest.TestCase):
     def test_multiple_sources_require_eot_at_construction_in_either_split(self):
         for train, valid, split in (
@@ -163,6 +177,33 @@ class DataSetTests(unittest.TestCase):
             self.assertIsInstance(bound.train_tokens, np.memmap)
             self.assertEqual(bound.train_tokens[1:].tolist(), [300, 65535])
             self.assertEqual(len(bound.valid_tokens), 0)
+
+    def test_train_batches_draw_windows_of_train_tokens_by_seed_and_step(self):
+        with self.assertRaisesRegex(RuntimeError, "bind"):
+            DataSet.from_sources(NO_EOT, (FIRST,), ()).train_batches(4, 8, seed=0)
+        with TemporaryDirectory() as directory:
+            get_train_batch = built(Path(directory), range(100), range(100)).train_batches(4, 8, seed=0)
+            inputs, targets = get_train_batch(3)
+            self.assertEqual((inputs.shape, inputs.dtype), ((4, 8), np.int64))
+            # tokens are their own positions, so every window counts up by one
+            np.testing.assert_array_equal(inputs, inputs[:, :1] + np.arange(8))
+            np.testing.assert_array_equal(targets, inputs + 1)
+            np.testing.assert_array_equal(get_train_batch(3)[0], inputs)
+
+    def test_valid_batches_cover_valid_tokens_in_order(self):
+        # 66 tokens: 8 sequences of 8 in 2 full batches; 25: 3 sequences, one short batch
+        for tokens, total, shape in ((66, 2, (4, 8)), (25, 1, (3, 8))):
+            with self.subTest(tokens=tokens), TemporaryDirectory() as directory:
+                count, get_valid_batch = built(Path(directory), range(100), range(tokens)).valid_batches(4, 8)
+                inputs, targets = get_valid_batch(count - 1)
+                self.assertEqual((count, inputs.shape, inputs.dtype), (total, shape, np.int64))
+                np.testing.assert_array_equal(inputs.ravel(), np.arange((count - 1) * inputs.size, count * inputs.size))
+                np.testing.assert_array_equal(targets, inputs + 1)
+        for tokens in (8, 0):
+            with self.subTest(tokens=tokens), TemporaryDirectory() as directory:
+                dataset = built(Path(directory), range(100), range(tokens))
+                with self.assertRaisesRegex(ValueError, "fewer than one sequence"):
+                    dataset.valid_batches(4, 8)
 
 
 if __name__ == "__main__":

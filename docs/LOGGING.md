@@ -109,8 +109,8 @@ and nothing else: it reaches the volume when the worker commits under its
 lease, and `/artifact/<path>` reads it off leasebook's mount as the last
 reload left it. No attempt's rows are streamed before that commit. The page
 draws every row, one uPlot line per metric per attempt, with the validation
-loss -- null on the steps no validation ran on -- over the training loss on
-one chart.
+loss -- absent from the steps no validation ran on -- over the training loss
+on one chart.
 
 ## Levels
 
