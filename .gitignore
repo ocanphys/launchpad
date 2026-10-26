@@ -1,16 +1,29 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
+*.egg-info
 build/
 dist/
 wheels/
-*.egg-info
+.venv
+
+# OS
+.DS_Store
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.ipynb_checkpoints/
+
+# Local scratch and outputs
 scratch/
 .scratch/
 storage/
-data_demo/
-.claude/
-CLAUDE.md
-LESSONS.md
-# Virtual environments
-.venv
+*.pickle
+
+# Claude Code, machine-local only
+.claude/settings.local.json
+.claude/worktrees/
+.claude/.cc-writes/
