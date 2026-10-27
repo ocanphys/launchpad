@@ -103,7 +103,7 @@ class DeclareTests(unittest.TestCase):
 
         with declaring_at("new"):
             report = declare(ODYSSEY, self.root, commit=True)
-            self.assertEqual(states(report), {"sources/odyssey": "declared"})
+            self.assertEqual(states(report), {"sources/odyssey": "already declared"})
             self.assertTrue(report.rows[0]["drift"])
             self.assertEqual(report.rows[0]["declaring_commit"], ["old", "new"])
             self.assertFalse(report.rows[0]["created"])

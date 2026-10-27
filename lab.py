@@ -91,6 +91,7 @@ class DeclarationReport:
     def render(self, verbose: bool = False) -> str:
         """The report as printed; `verbose` adds each blocker's differences."""
         width = max(len(row["path"]) for row in self.rows) + 2
+        state_width = max(len(row["state"]) for row in self.rows) + 2
         blocked = {row["path"] for row in self.blockers}
         lines = []
         for row in self.rows:
@@ -102,9 +103,7 @@ class DeclarationReport:
             if stored is not None and stored != requested:
                 verb = "updated" if row["updated"] else "differ, requested apply on commit"
                 notes.append(f"resources {verb}: {_set(stored)} -> {_set(requested)}")
-            if row["created"]:
-                notes.append("created")
-            line = f"{row['path']:<{width}}{row['state']:<10}"
+            line = f"{row['path']:<{width}}{row['state']:<{state_width}}"
             lines.append(line.rstrip() + (f"  ({'; '.join(notes)})" if notes else ""))
             if verbose and row["path"] in blocked:
                 for key, (on_disk, requested) in sorted(row["differences"].items()):
@@ -122,8 +121,10 @@ class DeclarationReport:
         elif written:
             plural = "s" if len(written) != 1 else ""
             verdict = f"{len(written)} manifest{plural} written: {', '.join(written)}"
-        else:
+        elif counts["new"]:
             verdict = f"ok -- {counts['new']} to declare"
+        else:
+            verdict = "ok -- everything already declared"
         return "\n".join([*lines, "", summary, verdict])
 
     __str__ = render
@@ -201,7 +202,7 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
         }
         return row
     present = list(footprint.completion.values())
-    row["state"] = "done" if all(present) else "partial" if any(present) else "declared"
+    row["state"] = "done" if all(present) else "partial" if any(present) else "already declared"
     return row
 
 
@@ -316,6 +317,7 @@ def declare(
             write_manifest(root, node.artifact_path, manifest)
             if row["state"] == "new":
                 row.update(_inspect(node, root, memo), created=True)
+                row["state"] = row["state"].removeprefix("already ")  # this commit declared it
             else:  # keep the pair, so the report shows what changed to what
                 row.update(_inspect(node, root, memo), updated=True, resources=[stored, requested])
         if rows[-1]["created"] and notebook is not None and isinstance(artifact, Training):

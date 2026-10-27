@@ -46,9 +46,9 @@ The codec writes that key for any param config held in a field annotated with
 one of its base classes, at any depth, and reads it back; `Model` declares
 nothing for it. The import path is part of the stored format: moving or
 renaming an architecture class leaves every manifest that names it unreadable
-until a migration rewrites it. It is also part of a leg's identity, since
+until they are rewritten. It is also part of a leg's identity, since
 `lineage_hash` digests the model as encoded ([Training](training.md#identity)),
-so that migration moves the legs as well.
+so the rewrite moves the legs as well.
 
 ## Adding an architecture
 

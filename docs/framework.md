@@ -252,8 +252,8 @@ Not built, each needing its own design when a pipeline needs it: automatic
 scheduling, retry policies, content verification, automatic invalidation,
 executing historical code, graph-wide transactions, mutable annotations,
 garbage collection, and cleanup of the temporary files a hard-killed execution
-leaves behind. Changes to what is stored are migrated explicitly, one script per
-change ([Artifact Repository](repository.md#migrations)).
+leaves behind. A change to what is stored is applied to the whole volume at
+once, by hand.
 
 ## Where to go next
 

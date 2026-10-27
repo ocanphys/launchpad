@@ -29,8 +29,8 @@ flowchart TD
 
 - **`profiling/util.py`**: `run_profile` requests the GPU and prints the call's
   log rows as they are published; `profile` runs a plain warmup loop and then
-  the measured steps over the same model and optimizer, each step's phases
-  timed between synchronizes (`phase`).
+  the measured steps over the same model and optimizer, each a
+  `training_step` whose phases are timed between synchronizes (`phase`).
 - **`profiling/profile_events.py`**: module scopes for a profiled step, the
   capture context managers, and the tables built from the events: each kernel
   linked to the CPU op that launched it, kernels aggregated by phase and module

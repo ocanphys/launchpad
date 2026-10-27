@@ -99,11 +99,13 @@ Each row's state:
 | No manifest and no owned outputs | `new` | No |
 | No manifest and at least one owned output | `undeclared` | Yes |
 | Manifest cannot be decoded, or its definition disagrees | `conflict` | Yes |
-| Matching manifest; required files absent | `declared` | No |
+| Matching manifest; required files absent | `already declared` | No |
 | Matching manifest; some required files present | `partial` | No |
 | Matching manifest; all required files present | `done` | No |
 
-For zero required files, a matching manifest means `done`. A virtual artifact
+A manifest this commit wrote reads `declared` rather than `already declared`:
+the state says what the volume holds, and `already` says it held it before
+this call. For zero required files, a matching manifest means `done`. A virtual artifact
 can be `new` even when all its dependency files exist: undeclared-output
 detection checks owned outputs, not borrowed completion files. Commit drift is
 an additional observation, not a state.
@@ -140,12 +142,12 @@ tokenized/bpe-1000-feeeeefa90/odyssey          new
 2 done, 1 new
 ok -- 1 to declare
 
->>> lab.declare(tokens, commit=True)   # same rows; the new one gets written at e4f5a6b
-sources/odyssey                                done   (drift: a1b2c3d -> e4f5a6b)
-tokenizers/bpe-1000-feeeeefa90                 done   (drift: a1b2c3d -> e4f5a6b)
-tokenized/bpe-1000-feeeeefa90/odyssey          done   (created)
+>>> lab.declare(tokens, commit=True)   # the new one gets written at e4f5a6b
+sources/odyssey                                done      (drift: a1b2c3d -> e4f5a6b)
+tokenizers/bpe-1000-feeeeefa90                 done      (drift: a1b2c3d -> e4f5a6b)
+tokenized/bpe-1000-feeeeefa90/odyssey          declared
 
-3 done
+1 declared, 2 done
 1 manifest written: tokenized/bpe-1000-feeeeefa90/odyssey
 ```
 

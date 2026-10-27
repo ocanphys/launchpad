@@ -96,9 +96,8 @@ Two invariants follow, and only these two:
   bytes in any parent. Nothing compares manifest text to decide whether two
   definitions agree.
 
-There is no format version: one program reads and writes manifests, and a
-format change is migrated explicitly, every manifest in one pass, one script
-per change (`migrations/`).
+There is no format version: one program reads and writes manifests, so a
+format change rewrites every manifest on the volume in one pass.
 
 ## Which class a param config is
 
@@ -121,8 +120,8 @@ no single class is meant. Decoding reads it back, builds that class, and lets
 pydantic check the instance fits its field, which refuses a class that is not
 the annotated one or a subclass of it. `class` is a Python keyword, so no field
 collides with the key. The path is part of the stored format: moving or
-renaming a class that a manifest names leaves it unreadable until a migration
-rewrites it.
+renaming a class that a manifest names leaves it unreadable until every
+manifest naming it is rewritten.
 
 ## Encoding and decoding
 
@@ -194,10 +193,10 @@ node from its path, the launcher and `run_job` load the artifact they run, and
 the notebook holds; a fresh object has `None`, since a request has no
 declaring commit until it is declared. The commit is the HEAD hash, with
 `-dirty` when the working tree has uncommitted changes, since what ships is
-what is on disk, read once per process. The lab container has no git, so it
-reads the revision baked into its image; declaring from a laptop runs
-`lab.declare` in such a container, built from the laptop's checkout, so the
-stamp is the laptop's commit. A graph's artifacts may be declared at different
+what is on disk, read once per process. A container has no git: the lab
+container reads the revision baked into its image, and
+`local.declare_on_volume` hands the container it declares in the laptop's
+commit, so the stamp is the laptop's. A graph's artifacts may be declared at different
 commits; [Lab](lab.md#declaration) reports that as drift.
 
 `declaring_commit` describes the declaration. It neither selects execution

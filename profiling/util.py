@@ -1,5 +1,5 @@
-"""The profiling run: `profile` trains a model under the profiler, and `phase` is what the step
-it is passed is built from. `run_profile` runs `profile` on a Modal GPU through main.profile."""
+"""The profiling run: `profile` trains a model under the profiler one `training_step` at a time,
+each phase timed by `phase`. `run_profile` runs `profile` on a Modal GPU through main.profile."""
 
 import time
 from contextlib import contextmanager, nullcontext
@@ -51,8 +51,29 @@ def phase(name, spans):
         spans[name] = start, time.time_ns() / 1e3
 
 
+def training_step(model, optimizer, tokens, *, autocast, spans) -> None:
+    """Runs one next-token training step on tokens, each phase inside phase(name, spans); autocast
+    covers forward and loss only, as a leg would run them.
+
+        training_step(model, optimizer, tokens, autocast=None, spans=spans)
+        sorted(spans) -> ["backward", "forward", "loss", "optimizer_step", "zero_grad"]
+    """
+    with phase("zero_grad", spans):
+        optimizer.zero_grad(set_to_none=True)
+    with torch.autocast("cuda", dtype=autocast) if autocast else nullcontext():
+        with phase("forward", spans):
+            logits = model(tokens)
+        with phase("loss", spans):
+            # each position predicts the following input token
+            loss = torch.nn.functional.cross_entropy(logits[:, :-1].reshape(-1, logits.shape[-1]), tokens[:, 1:].reshape(-1))
+    with phase("backward", spans):
+        loss.backward()
+    with phase("optimizer_step", spans):
+        optimizer.step()
+
+
 def profile(
-    model_declaration, training_parameters, profiling_step_loop, batch_size, warmup_steps, profile_steps, autocast,
+    model_declaration, training_parameters, batch_size, warmup_steps, profile_steps, autocast,
     kernel_events, module_scopes, peak_memory, trace_memory,
 ) -> dict:
     """Return the measured loop's results after a plain warmup loop over the same model and optimizer.
@@ -60,9 +81,8 @@ def profile(
     It needs a GPU: notebooks call it through run_profile.
     model_declaration is the Model to build; it decides whether the model is compiled. Of
     training_parameters, the optimizer, optimizer_parameters and seed are what profile trains with;
-    the rest are not used. Each step calls profiling_step_loop(model, optimizer, tokens, autocast=...,
-    spans=...) on the same batch_size random sequences of the model's sequence_length, and it wraps each
-    phase in phase(name, spans). autocast is the dtype forward and loss run in, or None; warmup and the
+    the rest are not used. Each step is training_step on the same batch_size random sequences of the
+    model's sequence_length. autocast is the dtype forward and loss run in, or None; warmup and the
     measured loop share it, so warmup prepares the same kernels. The switches pick the instruments
     around every measured step: kernel_events (torch profiler), module_scopes (forward::/backward::
     annotations), peak_memory (peak allocated and reserved bytes) and trace_memory (the allocator trace).
@@ -97,7 +117,7 @@ def profile(
                 "bytes": sum(t.numel() * t.element_size() for t in tensors)}
 
     def run_step():
-        profiling_step_loop(model, optimizer, tokens, autocast=autocast, spans=spans)
+        training_step(model, optimizer, tokens, autocast=autocast, spans=spans)
 
     for _ in range(warmup_steps):
         run_step()

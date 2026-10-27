@@ -11,7 +11,7 @@ volume, grants leases, spawns workers, and answers the page.
 flowchart LR
   subgraph clients ["Clients"]
     NB["Notebook in JupyterLab<br/>lab.declare(), lab.refresh(), lab.save()"]
-    LP["Laptop<br/>local.declare_on_volume(), modal run local.py::..."]
+    LP["Laptop<br/>local.declare_on_volume()"]
     BR["Browser<br/>web/app.js"]
   end
 

@@ -58,18 +58,6 @@ class Resources(ParamConfig):
     """
 ```
 
-A command run from a shell shows the command after `$` and what it prints:
-
-```python
-def scan_volume() -> None:
-    """Prints every manifest on the volume that this checkout cannot load or
-    would rewrite differently, and exits with status 1 if there is any.
-
-        $ modal run local.py::scan_volume
-        42 manifests scanned, 0 problems
-    """
-```
-
 The example must be true: run it, and copy the value it returns.
 
 **Never describe what the code used to be.** No "used to," "no longer," "instead of the old."
