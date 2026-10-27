@@ -25,7 +25,7 @@ RECORDED = ("commit", "allocated_resources")
 def arms(annotation: object) -> tuple:
     """Returns the arms of a union annotation, None included, or the annotation alone.
 
-    arms(Model | None) -> (Model, NoneType)
+        arms(Model | None) -> (Model, NoneType)
     """
     return get_args(annotation) if get_origin(annotation) in (UnionType, Union) else (annotation,)
 
@@ -34,7 +34,7 @@ def canonical(value: object) -> object:
     """Returns `value` as JSON data with keys sorted and -0.0 written as 0.0,
     so equal values give equal JSON.
 
-    canonical({"b": -0.0, "a": (1, 2)}) -> {"a": [1, 2], "b": 0.0}
+        canonical({"b": -0.0, "a": (1, 2)}) -> {"a": [1, 2], "b": 0.0}
     """
     return json.loads(
         json.dumps(value),
@@ -47,7 +47,7 @@ def members(value: object, container: type | None) -> list[Artifact]:
     """Returns a dependency field's artifacts in manifest order: a set's
     sorted by artifact path, never by set iteration.
 
-    members(frozenset({iliad, odyssey}), frozenset) -> [iliad, odyssey]
+        members(frozenset({iliad, odyssey}), frozenset) -> [iliad, odyssey]
     """
     if container is None:
         return [] if value is None else [value]
@@ -81,8 +81,8 @@ def parameters(artifact: Artifact) -> dict:
     A param config holding a subclass of its annotated class, at any depth,
     carries that subclass's dotted path under "class".
 
-    parameters(SourceURL(name="odyssey", url="https://example.org/odyssey.txt"))
-      -> {"name": "odyssey", "url": "https://example.org/odyssey.txt"}
+        parameters(SourceURL(name="odyssey", url="https://example.org/odyssey.txt"))
+          -> {"name": "odyssey", "url": "https://example.org/odyssey.txt"}
     """
     cls = type(artifact)
     names = [n for n in cls.model_fields if n not in cls.dependencies() and n not in RECORDED]
@@ -98,8 +98,8 @@ def to_manifest(artifact: Artifact) -> dict:
     The five keys keep this order and everything below them is sorted, so the
     text is a pure function of the artifact.
 
-    to_manifest(odyssey) -> {"artifact": "artifacts.sources.SourceURL", "commit": "abc1234",
-                             "allocated_resources": {...}, "parameters": {...}, "dependencies": {}}
+        to_manifest(odyssey) -> {"artifact": "artifacts.sources.SourceURL", "commit": "abc1234",
+                                 "allocated_resources": {...}, "parameters": {...}, "dependencies": {}}
     """
     deps = {}
     for name, container in type(artifact).dependencies().items():
@@ -140,7 +140,7 @@ def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifa
     dict shared across calls, hands back the same instance for a subtree
     decoded before (the dataset under every leg of a run).
 
-    from_manifest(odyssey.to_manifest()) == odyssey -> True
+        from_manifest(odyssey.to_manifest()) == odyssey -> True
     """
     key = json.dumps(data, sort_keys=True) if memo is not None else None
     if key is not None and key in memo:
@@ -170,6 +170,6 @@ def manifest_json(manifest: dict) -> str:
     allow_nan=False because Python writes NaN and Infinity as bare words and
     reads them back, while no other JSON reader accepts either.
 
-    manifest_json({"artifact": "artifacts.sources.SourceURL", ...}) -> '{\\n  "artifact": ...}\\n'
+        manifest_json({"artifact": "artifacts.sources.SourceURL", ...}) -> '{\\n  "artifact": ...}\\n'
     """
     return json.dumps(manifest, indent=2, ensure_ascii=False, allow_nan=False) + "\n"

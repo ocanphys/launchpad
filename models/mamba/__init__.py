@@ -15,8 +15,8 @@ class Mamba(training.Model):
     `sequence_length` is the batch shape only, since the recurrence has no
     context limit.
 
-    Mamba(vocab_size=1000, sequence_length=32, num_layers=2, d_model=64)
-      -> Mamba(vocab_size=1000, sequence_length=32, ..., d_state=16, d_conv=4, expand=2)
+        Mamba(vocab_size=1000, sequence_length=32, num_layers=2, d_model=64)
+          -> Mamba(vocab_size=1000, sequence_length=32, ..., d_state=16, d_conv=4, expand=2)
     """
 
     num_layers: int = Field(gt=0)

@@ -20,8 +20,8 @@ def root_of(root: Path | None) -> Path:
     glob and relative_to downstream; a relative root would be discarded by
     `root / artifact_path` and surface as a missing file somewhere else.
 
-    root_of(None) -> Path("/storage")
-    root_of(Path("tmp")) -> ValueError (root must be an absolute path)
+        root_of(None) -> Path("/storage")
+        root_of(Path("tmp")) -> ValueError (root must be an absolute path)
     """
     resolved = root if root is not None else STORAGE
     if not isinstance(resolved, Path):
@@ -45,8 +45,8 @@ def read_manifest(root: Path | None, artifact_path: Path | str) -> dict:
     Raises FileNotFoundError when nothing is declared there, and ValueError for
     a path that leaves root or a file that is not JSON, naming the file.
 
-    read_manifest(Path("/storage"), "sources/odyssey")
-      -> {"artifact": "artifacts.sources.SourceURL", "commit": "abc1234", ...}
+        read_manifest(Path("/storage"), "sources/odyssey")
+          -> {"artifact": "artifacts.sources.SourceURL", "commit": "abc1234", ...}
     """
     path = _manifest_path(root, artifact_path)
     try:
@@ -64,7 +64,7 @@ def write_manifest(root: Path | None, artifact_path: Path | str, manifest: dict)
     Overwrites whatever is there: whether a write is allowed is lab.declare's
     decision, made before it calls this.
 
-    write_manifest(Path("/tmp/root"), "sources/odyssey", odyssey.to_manifest())  -> None
+        write_manifest(Path("/tmp/root"), "sources/odyssey", odyssey.to_manifest())  -> None
     """
     path = _manifest_path(root, artifact_path)
     path.parent.mkdir(parents=True, exist_ok=True)

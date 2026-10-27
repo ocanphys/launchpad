@@ -15,9 +15,9 @@ from artifacts.core.SGD import training
 class Transformer(training.Model):
     """A decoder-only transformer LM: the fields are its shapes, and `build` makes it.
 
-    Transformer(vocab_size=1000, sequence_length=32, num_layers=4, d_model=128, d_ff=256, num_heads=16,
-                rope_theta=10000)
-    Transformer(..., d_model=100, num_heads=16) -> ValidationError (d_model must be divisible by num_heads)
+        Transformer(vocab_size=1000, sequence_length=32, num_layers=4, d_model=128, d_ff=256, num_heads=16,
+                    rope_theta=10000)
+        Transformer(..., d_model=100, num_heads=16) -> ValidationError (d_model must be divisible by num_heads)
     """
 
     num_layers: int = Field(gt=0)

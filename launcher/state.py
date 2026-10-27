@@ -48,8 +48,8 @@ def safe_relpath(path: str) -> bool:
     takes a path from the URL (an artifact_path or a run_id) checks this
     before it ever reaches `STORAGE / path`.
 
-    safe_relpath("runs/toy/pretraining") -> True
-    safe_relpath("../../etc/passwd") -> False
+        safe_relpath("runs/toy/pretraining") -> True
+        safe_relpath("../../etc/passwd") -> False
     """
     return bool(path) and not Path(path).is_absolute() and ".." not in Path(path).parts
 

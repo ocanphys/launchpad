@@ -58,7 +58,7 @@ def _digest(*parts: object) -> str:
     Hashes canonical JSON, so equal parameters give an equal id in every
     process, -0.0 and 0.0 included. Every part must be JSON-serializable.
 
-    _digest(("<pad>",), ["a", "b"]) -> "54cacb94a0"
+        _digest(("<pad>",), ["a", "b"]) -> "54cacb94a0"
     """
     blob = json.dumps(manifest.canonical(parts), separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()[:10]
@@ -75,7 +75,7 @@ class ParamConfig(BaseModel):
     never a folder or manifest of its own. Subclasses declare their fields and
     the constraints on them; construction refuses a value that breaks one.
 
-    LoopConfig(val_every=0, gpu_check_every=200) -> ValidationError (val_every: greater than 0)
+        LoopConfig(val_every=0, gpu_check_every=200) -> ValidationError (val_every: greater than 0)
     """
 
     model_config = STRICT
@@ -85,8 +85,8 @@ class Resources(ParamConfig):
     """What a job should be given to run this artifact; None means Modal's
     platform default for that dimension. Never identity.
 
-    Resources(gpu_type="A100", gpu_count=2, cpu=4)
-      -> Resources(cpu=4.0, gpu_type='A100', gpu_count=2)
+        Resources(gpu_type="A100", gpu_count=2, cpu=4)
+        -> Resources(cpu=4.0, gpu_type='A100', gpu_count=2)
     """
 
     cpu: float | None = None
@@ -147,7 +147,7 @@ class Artifact(BaseModel):
     dependencies, recursively, never `commit` or `allocated_resources`, so an
     artifact rebuilt from an older manifest is still the same artifact.
 
-    SourceURL(name="odyssey", url="https://example.org/odyssey.txt").artifact_path -> Path("sources/odyssey")
+        SourceURL(name="odyssey", url="https://example.org/odyssey.txt").artifact_path -> Path("sources/odyssey")
     """
 
     model_config = STRICT
@@ -194,7 +194,7 @@ class Artifact(BaseModel):
         a parameter the codec can rebuild, and raises TypeError naming one
         that is not; it runs at first use, once forward references resolve.
 
-        Tokenizer.dependencies() -> {"sources": frozenset}
+            Tokenizer.dependencies() -> {"sources": frozenset}
         """
         found = {}
         for name in sorted(cls.model_fields):
@@ -245,7 +245,7 @@ class Artifact(BaseModel):
     def __eq__(self, other: object) -> bool:
         """Returns whether `other` is the same definition: class, parameters and dependencies.
 
-        SourceURL(name="a", url=u, commit="x") == SourceURL(name="a", url=u, commit="y") -> True
+            SourceURL(name="a", url=u, commit="x") == SourceURL(name="a", url=u, commit="y") -> True
         """
         return isinstance(other, Artifact) and self._definition() == other._definition()
 
@@ -260,7 +260,7 @@ class Artifact(BaseModel):
         resolve walks this to build the graph, so the order must not depend
         on set iteration; sorting is what makes it deterministic.
 
-        TokenizedSource(tokenizer=bpe, source=odyssey).deps() -> [odyssey, bpe]
+            TokenizedSource(tokenizer=bpe, source=odyssey).deps() -> [odyssey, bpe]
         """
         return [
             dep
@@ -275,7 +275,7 @@ class Artifact(BaseModel):
         It is what manifest.json at artifact_path holds, and from_manifest
         rebuilds the artifact from it alone (see artifacts.core.manifest).
 
-        odyssey.to_manifest()["parameters"] -> {"name": "odyssey", "url": "https://example.org/odyssey.txt"}
+            odyssey.to_manifest()["parameters"] -> {"name": "odyssey", "url": "https://example.org/odyssey.txt"}
         """
         return manifest.to_manifest(self)
 
@@ -286,7 +286,7 @@ class Artifact(BaseModel):
         For display (launcher/state.py), where every dependency's nested
         manifest would bury the fields that tell one artifact from another.
 
-        bpe.parameters() -> {"special_tokens": ["<pad>"], "vocab_size": 1000}
+            bpe.parameters() -> {"special_tokens": ["<pad>"], "vocab_size": 1000}
         """
         return manifest.parameters(self)
 
@@ -298,7 +298,7 @@ class Artifact(BaseModel):
         a manifest decoded before, so a subtree many artifacts share is decoded
         once (see artifacts.core.manifest.from_manifest).
 
-        Artifact.from_manifest(odyssey.to_manifest()) == odyssey -> True
+            Artifact.from_manifest(odyssey.to_manifest()) == odyssey -> True
         """
         return manifest.from_manifest(data, memo)
 
@@ -314,7 +314,7 @@ class Artifact(BaseModel):
         so a disagreeing manifest was copied or renamed, and nothing beside it
         is what it claims. `memo` is `from_manifest`'s.
 
-        Artifact.load("sources/odyssey") -> SourceURL(name='odyssey', url='https://example.org/odyssey.txt')
+            Artifact.load("sources/odyssey") -> SourceURL(name='odyssey', url='https://example.org/odyssey.txt')
         """
         wanted = Path(artifact_path)
         data = storage.read_manifest(root, wanted)
@@ -335,7 +335,7 @@ class Artifact(BaseModel):
         partial, done, conflicting) is lab.declare's to say, against a request
         this method never sees.
 
-        odyssey.status(root) -> Footprint(manifest=True, outputs={"raw text": True}, completion={...: True})
+            odyssey.status(root) -> Footprint(manifest=True, outputs={"raw text": True}, completion={...: True})
         """
         at = storage.root_of(root)
         return Footprint(
@@ -353,7 +353,7 @@ class Artifact(BaseModel):
         else's outputs, and the result carries the stored commit and resources.
         The object bind is called on is never modified.
 
-        bound = bpe.bind(root); bound.decode(bound.encode("hello")) -> "hello"
+            bound = bpe.bind(root); bound.decode(bound.encode("hello")) -> "hello"
         """
         at = storage.root_of(root)
         stored = Artifact.load(self.artifact_path, at)
@@ -408,7 +408,7 @@ class Artifact(BaseModel):
         These are where this artifact's job may write; completion_paths, not
         this, says when it is done.
 
-        odyssey.paths(Path("/storage")) -> {"raw text": Path("/storage/sources/odyssey/body.txt")}
+            odyssey.paths(Path("/storage")) -> {"raw text": Path("/storage/sources/odyssey/body.txt")}
         """
         return {
             desc: root / self.artifact_path / name for desc, name in self.files.items()
@@ -421,7 +421,7 @@ class Artifact(BaseModel):
         main.run_job, inside the container about to run it, so nothing that
         resolves, inspects or draws a graph imports a family's jobs.py.
 
-        odyssey.job() -> SourceURLJob(odyssey)
+            odyssey.job() -> SourceURLJob(odyssey)
         """
         if self.producer is None:
             raise ValueError(
@@ -438,7 +438,7 @@ class Artifact(BaseModel):
         dependencies' files, which is why it is separate from `paths()`, the
         question of where this artifact may write.
 
-        odyssey.completion_paths(Path("/storage")) -> [Path("/storage/sources/odyssey/body.txt")]
+            odyssey.completion_paths(Path("/storage")) -> [Path("/storage/sources/odyssey/body.txt")]
         """
         return list(self.paths(root).values())
 
@@ -451,7 +451,7 @@ class Artifact(BaseModel):
         whose job writes intermediate state overrides it: SGD.Training reports
         its furthest checkpoint, which says more than "0 of 1 files".
 
-        odyssey.durable_progress(root) -> {"phase": "files", "done": 1, "total": 1}
+            odyssey.durable_progress(root) -> {"phase": "files", "done": 1, "total": 1}
         """
         completion = self.status(root).completion
         if not completion:

@@ -76,8 +76,8 @@ def scan_volume() -> None:
     """Prints every manifest on the volume that this checkout cannot load or
     would rewrite differently, and exits with status 1 if there is any.
 
-    $ modal run local.py::scan_volume
-    42 manifests scanned, 0 problems
+        $ modal run local.py::scan_volume
+        42 manifests scanned, 0 problems
     """
     total, problems = _scan.remote()
     for line in problems:
@@ -111,9 +111,9 @@ def canonicalize_manifests(apply: bool = False) -> None:
     `--apply` rewrites them; refuses everything if any manifest differs in
     more than an int cpu.
 
-    $ modal run local.py::canonicalize_manifests
-    tokenizers/bpe-800-f90570d566
-    32 manifests to rewrite (dry run; --apply to write)
+        $ modal run local.py::canonicalize_manifests
+        tokenizers/bpe-800-f90570d566
+        32 manifests to rewrite (dry run; --apply to write)
     """
     folders = _canonicalize.remote(apply)
     for folder in folders:

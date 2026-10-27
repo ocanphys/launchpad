@@ -9,8 +9,10 @@ declaration, resolution and launching fit together, each described once, on one 
 Start at [docs/framework.md](docs/framework.md). The map of where things live is
 [docs/repository.md](docs/repository.md), and how traffic flows [docs/launcher.md](docs/launcher.md).
 
-Design rationale goes on the docs page of its subject, under a "Why" heading. This file is
-how to write code here.
+How the code is described (docs pages, docstrings, comments) is in AGENTS.md, shared with
+every other agent: @AGENTS.md
+
+This file is how to write code here.
 
 Subtleties learned the hard way go in [LESSONS.md](LESSONS.md): what is true,
 how it was found, what to do about it. Read it before touching checkpoints,
@@ -47,35 +49,6 @@ the rest of the code reaches it through a few names (`to_manifest`, `from_manife
 replace it with a library, without touching a caller. If callers reach past the seam, it
 is not a seam. This is not the same as extracting helpers: a helper is a name for a
 few lines, a seam is a boundary around a problem you may want to solve differently later.
-
-## Docstrings and comments
-
-**First line says what it returns, present tense.** Then at most one paragraph, for the single
-thing a caller can get wrong. A user-facing function (anything a notebook or a job calls)
-ends with one input/output example with real values; mkdocs renders it on its docs page.
-Stop there.
-
-**Code and its docs page change in the same commit.** A docs page describes the code once;
-any other text about the same subject is folded into the page and deleted, so no two texts
-can disagree.
-
-**Never describe what the code used to be.** No "used to," "no longer," "instead of the old."
-A reader cannot distinguish a description of the present from a description of the past, so
-history in a docstring makes the whole docstring untrustworthy. Git has the history.
-
-**Design rationale belongs on the docs page of its subject, not in the docstring.** "Why this and not the other
-design" is a document. A docstring that argues it makes the reader read an argument to find
-an API.
-
-**Never write a comment that justifies a defect.** If you find yourself explaining *why* the
-duplication is acceptable, that paragraph is the signal to remove the duplication. A
-justification reads as settled and stops anyone re-examining it.
-
-**Docstrings are call sites.** Renaming an attribute means the docstrings that use it are now
-wrong, not just stale.
-
-**Removing a mechanism means grepping its name and clearing every mention in the same commit**:
-docstrings, comments, README, docs.
 
 ## Deleting
 

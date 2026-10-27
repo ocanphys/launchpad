@@ -25,8 +25,8 @@ class Model(ParamConfig):
     A field annotated `Model` holds any subclass, and its manifest names that
     subclass under "class" (artifacts.core.manifest).
 
-    Transformer(vocab_size=1000, sequence_length=32, num_layers=4, d_model=128, d_ff=256, num_heads=16,
-                rope_theta=10000).sequence_length -> 32
+        Transformer(vocab_size=1000, sequence_length=32, num_layers=4, d_model=128, d_ff=256, num_heads=16,
+                    rope_theta=10000).sequence_length -> 32
     """
 
     vocab_size: int = Field(gt=0)
@@ -37,7 +37,7 @@ class Model(ParamConfig):
     def build(self):
         """Returns a freshly initialized torch module on this model's device.
 
-        Transformer(...).build() -> TransformerLM(...) on torch.device("cuda")
+            Transformer(...).build() -> TransformerLM(...) on torch.device("cuda")
         """
         raise NotImplementedError
 
@@ -45,8 +45,8 @@ class Model(ParamConfig):
         """Returns the FLOPs of one forward and backward pass over batch_size sequences: an analytic
         estimate from this architecture's shapes, not a measurement.
 
-        Transformer(vocab_size=1000, sequence_length=8, num_layers=1, d_model=16, d_ff=32, num_heads=2,
-                    rope_theta=10000).step_flops(4) -> 3612672
+            Transformer(vocab_size=1000, sequence_length=8, num_layers=1, d_model=16, d_ff=32, num_heads=2,
+                        rope_theta=10000).step_flops(4) -> 3612672
         """
         raise NotImplementedError
 
@@ -55,8 +55,8 @@ class OptimizerParameters(ParamConfig):
     """Exactly the keyword arguments the optimizer is built with, after its
     parameters; torch checks their values when it builds it.
 
-    OptimizerParameters(lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8).model_dump()
-      -> {"lr": 0.0003, "betas": (0.9, 0.95), "weight_decay": 0.1, "eps": 1e-08}
+        OptimizerParameters(lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8).model_dump()
+          -> {"lr": 0.0003, "betas": (0.9, 0.95), "weight_decay": 0.1, "eps": 1e-08}
     """
 
     lr: float  # fallback: what the optimizer runs with when no lr_schedule overrides it
@@ -89,9 +89,9 @@ class TrainingParameters(ParamConfig):
     via artifacts.core.locate.locate; ``optimizer_parameters`` and
     ``lr_schedule`` are exactly the keyword arguments each is called with.
 
-    TrainingParameters(total_steps=1000, batch_size=64, max_norm=1, lr_schedule=LRSchedule(...),
-                       optimizer="torch.optim.AdamW", optimizer_parameters=OptimizerParameters(...)).max_norm
-      -> 1.0
+        TrainingParameters(total_steps=1000, batch_size=64, max_norm=1, lr_schedule=LRSchedule(...),
+                           optimizer="torch.optim.AdamW", optimizer_parameters=OptimizerParameters(...)).max_norm
+          -> 1.0
     """
 
     total_steps: int = Field(gt=0)
@@ -114,8 +114,8 @@ class LoopConfig(ParamConfig):
     over each window of ``gpu_check_every`` steps, validation and checkpoints
     included, a few steps after the window closes.
 
-    LoopConfig(val_every=200, gpu_check_every=200)
-      -> LoopConfig(val_every=200, gpu_check_every=200, checkpoint_every=100, optimizer_checkpoint_policy='latest')
+        LoopConfig(val_every=200, gpu_check_every=200)
+          -> LoopConfig(val_every=200, gpu_check_every=200, checkpoint_every=100, optimizer_checkpoint_policy='latest')
     """
 
     val_every: int = Field(gt=0)

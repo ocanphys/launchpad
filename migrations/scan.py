@@ -16,8 +16,8 @@ def scan(root: Path) -> tuple[int, list[str]]:
     does not load, or that loads but re-encodes to different bytes, naming the
     first line that differs as stored -> rewritten.
 
-    scan(Path("/storage")) -> (42, [])
-    scan(Path("/storage")) -> (42, ['sources/odyssey: line 3: \\'  "commit": "abc"\\' -> ...'])
+        scan(Path("/storage")) -> (42, [])
+        scan(Path("/storage")) -> (42, ['sources/odyssey: line 3: \\'  "commit": "abc"\\' -> ...'])
     """
     manifests = sorted(root.rglob(MANIFEST))
     problems = []

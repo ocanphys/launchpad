@@ -28,8 +28,8 @@ def plan(root: Path) -> dict[Path, str]:
     differs in anything else, so nothing is rewritten that this script was not
     written for.
 
-    plan(Path("/storage"))
-      -> {Path("/storage/tokenizers/bpe-800-f90570d566/manifest.json"): '{\\n  "artifact": ...'}
+        plan(Path("/storage"))
+          -> {Path("/storage/tokenizers/bpe-800-f90570d566/manifest.json"): '{\\n  "artifact": ...'}
     """
     planned, refused = {}, []
     memo: dict[str, Artifact] = {}
