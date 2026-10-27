@@ -19,7 +19,10 @@ containers mount and neither starts without.
   `/lab` link carries it, and since it travels in a URL it stays a random
   string.
 - `/guide/` is these docs, built by MkDocs from `docs/` and `mkdocs.yml` into
-  `web_image` on every deploy and linked from the header.
+  `web_image` on every deploy and linked from the header. The build is given
+  the source of every module a page renders with `:::` (`main.DOCS_SOURCE`),
+  which mkdocstrings reads without importing; a page that renders a module
+  missing from that list fails `test/test_guide.py`.
 
 ```mermaid
 flowchart TD

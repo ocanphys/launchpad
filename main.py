@@ -46,10 +46,21 @@ ARTIFACTS_SOURCE = ("artifacts", "models")
 
 WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
 GUIDE_DIR = Path("/guide")  # where web_image builds the docs site from docs/ and mkdocs.yml
-web_image = (
+# The modules docs/ renders with `:::`, copied beside mkdocs.yml for the build:
+# mkdocstrings reads their source and never imports it.
+DOCS_SOURCE = ("artifacts", "models", "system", "profiling", "lab.py")
+docs_source = (
     locked_image("web")
     .add_local_file("mkdocs.yml", "/docs-src/mkdocs.yml", copy=True)
     .add_local_dir("docs", "/docs-src/docs", copy=True)
+)
+for source in DOCS_SOURCE:
+    if source.endswith(".py"):
+        docs_source = docs_source.add_local_file(source, f"/docs-src/{source}", copy=True)
+    else:
+        docs_source = docs_source.add_local_dir(source, f"/docs-src/{source}", copy=True, ignore=["**/__pycache__"])
+web_image = (
+    docs_source
     .run_commands(f"mkdocs build -f /docs-src/mkdocs.yml -d {GUIDE_DIR}")
     .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
