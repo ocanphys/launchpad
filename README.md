@@ -12,5 +12,5 @@ uv sync
 mkdocs serve        # http://127.0.0.1:8000
 ```
 
-A deployed app (`modal deploy main.py`) also serves them at `/guide/`. Start
+A deployed app (`mkdocs build --strict && modal deploy main.py`) also serves them at `/guide/`. Start
 with [docs/getting-started.md](docs/getting-started.md).

@@ -41,7 +41,6 @@ from typing import ClassVar
 from pydantic import PrivateAttr
 
 from artifacts import tokenizers
-from artifacts.core.artifact import _digest
 from artifacts.sources import Source
 
 UNKNOWN = "<unk>"  # this template's own choice; your algorithm may not need one
@@ -64,8 +63,8 @@ class TemplateTokenizer(tokenizers.Tokenizer):
     @property
     def uid(self) -> str:
         # readable half first, then a digest of what can't stay readable
-        digest = _digest(self.special_tokens, sorted(s.uid for s in self.sources))
-        return f"template-{self.vocab_size}-{digest}"
+        hashed = self.digest(self.special_tokens, sorted(s.uid for s in self.sources))
+        return f"template-{self.vocab_size}-{hashed}"
 
     @property
     def files(self) -> dict[str, str]:

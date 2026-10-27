@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from artifacts.core.artifact import Artifact, _digest
+from artifacts.core.artifact import Artifact
 from artifacts.core.storage import write_manifest
 from artifacts.mappeddataset import MappedDataSet
 from artifacts.sources import SourceURL
@@ -83,10 +83,10 @@ class MappedDataSetTests(unittest.TestCase):
         one_way = MappedDataSet.from_sources(TOKENIZER, (FIRST, SECOND), ())
         other_way = MappedDataSet.from_sources(TOKENIZER, (SECOND, FIRST), ())
         self.assertNotEqual(one_way.uid, other_way.uid)
-        plain = _digest([s.uid for s in one_way.train_set], [])
+        plain = Artifact.digest([s.uid for s in one_way.train_set], [])
         self.assertNotEqual(one_way.uid, f"mapped-{plain}")
         single = MappedDataSet.from_sources(TOKENIZER, (FIRST,), ())
-        self.assertEqual(single.uid, f"mapped-{_digest([s.uid for s in single.train_set], [])}")
+        self.assertEqual(single.uid, f"mapped-{Artifact.digest([s.uid for s in single.train_set], [])}")
 
     def test_stream_reads_like_the_concatenation_with_eot_between_sources(self):
         with TemporaryDirectory() as directory:

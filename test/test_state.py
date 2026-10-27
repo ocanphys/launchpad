@@ -125,7 +125,7 @@ class StateTests(unittest.TestCase):
         keys = {frozenset(entry) for entry in self.state().values()}
         self.assertEqual(len(keys), 1)
         self.assertEqual(keys.pop(), {
-            "type", "status", "error", "depends_on", "parameters", "blocked_by", "done", "ready",
+            "type", "status", "error", "depends_on", "tags", "parameters", "blocked_by", "done", "ready",
             "verdict", "call_id", "active", "last_heartbeat", "live_progress", "durable_progress",
         })
 
@@ -201,13 +201,20 @@ class StateTests(unittest.TestCase):
         self.assertTrue(entry["done"])
         self.assertEqual(entry["verdict"], "done")
 
-    def test_a_path_once_read_is_not_read_again(self):
+    def test_a_path_once_decoded_is_not_decoded_again(self):
         declare(ODYSSEY, self.root)
-        self.assertEqual(self.state()["sources/odyssey"]["type"], "SourceURL")
-        (self.root / "sources/odyssey" / MANIFEST).write_text("{not json")
-        self.assertEqual(self.state()["sources/odyssey"]["type"], "SourceURL")
-        state.resolved.clear()
-        self.assertEqual(self.state()["sources/odyssey"]["verdict"], "failed")
+        self.state()
+        with patch.object(Artifact, "load", side_effect=AssertionError("decoded twice")):
+            self.assertEqual(self.state()["sources/odyssey"]["type"], "SourceURL")
+
+    def test_tags_are_read_fresh_on_every_scan(self):
+        tagged = SourceURL(name="odyssey", url=ODYSSEY.url, tags={"project": ["language_modeling"]})
+        declare(ODYSSEY, self.root)
+        self.assertEqual(self.state()["sources/odyssey"]["tags"], {})
+        declare(tagged, self.root)  # a matching redeclaration takes the new tags
+        self.assertEqual(self.state()["sources/odyssey"]["tags"], {"project": ["language_modeling"]})
+        declare(ODYSSEY, self.root)
+        self.assertEqual(self.state()["sources/odyssey"]["tags"], {})
 
     # --- leases and beats --------------------------------------------------------
 

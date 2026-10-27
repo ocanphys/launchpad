@@ -18,11 +18,10 @@ containers mount and neither starts without.
 - JupyterLab takes `JUPYTER_TOKEN` instead, which nobody types: the header's
   `/lab` link carries it, and since it travels in a URL it stays a random
   string.
-- `/guide/` is these docs, built by MkDocs from `docs/` and `mkdocs.yml` into
-  `web_image` on every deploy and linked from the header. The build is given
-  the source of every module a page renders with `:::` (`main.DOCS_SOURCE`),
-  which mkdocstrings reads without importing; a page that renders a module
-  missing from that list fails `test/test_guide.py`.
+- `/guide/` is these docs, built by `mkdocs build --strict` on the deploying
+  machine into `site/`, which `web_image` mounts, and linked from the header.
+  Nothing is built in the image, so a deploy ships whatever `site/` holds:
+  build first.
 
 ```mermaid
 flowchart TD
@@ -80,8 +79,9 @@ flowchart TD
   SPLIT["Drag the log split<br/>sets --log-height"]
 ```
 
-Routing is hash-based and client-side, two shapes (`parseRoute`): `""`, the
-table, and `#/artifact/<path>`, one artifact's page. `route()` runs on every
+Routing is hash-based and client-side, three shapes (`parseRoute`): `""` or
+`#/experiments`, the table grouped by experiment, `#/artifacts`, the same table
+of every artifact, and `#/artifact/<path>`, one artifact's page. `route()` runs on every
 `hashchange` and once at load: it switches the page, points `view` at it,
 fetches it once and starts its poll.
 
@@ -89,7 +89,7 @@ fetches it once and starts its poll.
 
 One row per artifact on the volume, by path, from one endpoint, `/state`
 ([Launcher](launcher.md#the-state-map)). There is no grouping by run, source or
-dataset; a manifest the state map could not read lands in the collapsed
+dataset (the experiments view below groups by tag); a manifest the state map could not read lands in the collapsed
 "unreadable manifests" table under it.
 
 Four columns: the artifact (its status dot and type), its path, its progress,
@@ -113,12 +113,30 @@ page's: DEBUG starts off, and selections survive polls and navigation. The
 noise around the launcher (uvicorn, grpc) is its `ambient` source, under an
 **ambient** box, on by default.
 
+### Experiments
+
+The title is two links, `artifacts | experiments`, the open one bold, and the
+page opens on experiments. The experiments view is the same table, fetch and filter bar, restricted to
+artifacts whose `experiment` tag has a value, under a row per experiment
+(sorted by name, with its count) holding the artifacts tagged with it. An
+artifact tagged with two experiments is listed under both, and one with no
+`experiment` tag is not listed at all. The unreadable-manifests list belongs to
+the artifacts view.
+
+The **show dependencies** checkbox, off by default and present only in this
+view, adds under each experiment everything its tagged artifacts are built from,
+transitively, after the tagged ones. An artifact appears once per experiment
+however many of its members depend on it. The filter bar picks the tagged
+artifacts; their dependencies come along whatever it says.
+
 ### Filtering
 
 Above the table, the filter bar walks an artifact's manifest one level of its
 JSON at a time, read off the `/state` map with no request of its own. The top
-level is the artifact's class, "every artifact" to begin with. Picking one
-keeps only its rows, all the same shape from there down, and shows two
+level is the artifact's class, "every artifact" to begin with. Beside it, for
+whichever class is picked, is **tags**: the manifest's tags, one level per tag
+key with a checkbox per value, and a row shows its tags as chips. Picking a class
+keeps only its rows, all the same shape from there down, and shows two more
 filterable keys, both closed:
 
 - **parameters**: the manifest's `parameters` as they nest (`training_parameters`,
@@ -200,7 +218,14 @@ not an error.
 When its job keeps a step log, the page draws it: one uPlot chart per metric,
 training and validation loss sharing one with validation dashed, one line per
 metric per attempt, every row of `train.jsonl` as last read off the volume.
-Drag to zoom, click a legend entry to hide a line.
+Drag to zoom, click a legend entry to hide a line. A checkbox per metric above
+the charts switches that metric on or off, and a checkbox per attempt, in the
+attempt's colour, switches that attempt on or off in every chart at once; all
+are on to begin with, and a chart with no metric or no attempt left is hidden. Which charts exist, which metrics share one,
+and per-line options such as `spanGaps` are the `CHARTS` list at the top of
+`artifactview.js`. Any other numeric column in the step log gets a chart of its
+own after those, a single line per attempt that crosses steps it has no value
+at, and a checkbox like the rest.
 
 Below that, what every call that ever worked on the artifact said, as one
 stream newest first, each line tagged with its call (a short id, the full one on

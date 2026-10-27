@@ -37,19 +37,6 @@ if TYPE_CHECKING:
     from artifacts.core.job import Job
 
 
-def _digest(*parts: object) -> str:
-    """Returns a 10-character hash of `parts`, which subclasses build their
-    `uid` and `artifact_path` from.
-
-    Hashes canonical JSON, so equal parameters give an equal id in every
-    process, -0.0 and 0.0 included. Every part must be JSON-serializable.
-
-        _digest(("<pad>",), ["a", "b"]) -> "54cacb94a0"
-    """
-    blob = json.dumps(manifest.canonical(parts), separators=(",", ":"))
-    return hashlib.sha256(blob.encode()).hexdigest()[:10]
-
-
 # Strict: no str as int, bool as int or list as tuple, though an int in a float
 # field becomes a float. Each base sets it, since a config does not reach the
 # models nested in a field.
@@ -130,48 +117,37 @@ class Artifact(BaseModel):
     the artifacts it is built from, and every other field is a parameter.
 
     `==` and `hash` compare the definition: class, parameters and
-    dependencies, recursively, never `declaring_commit` or
-    `allocated_resources`, so an artifact rebuilt from an older manifest is
-    still the same artifact.
+    dependencies, recursively, never `declaring_commit`, `allocated_resources`
+    or `tags`, so an artifact rebuilt from an older manifest is still the same
+    artifact.
 
         SourceURL(name="odyssey", url="https://example.org/odyssey.txt").artifact_path -> Path("sources/odyssey")
     """
 
     model_config = STRICT
 
-    # Neither of these says which artifact this is (manifest.RECORDED).
-    # declaring_commit is None until lab.declare stamps it on write; both are
-    # None on a dependency decoded from a parent's manifest, which records them
-    # at its own path instead.
+    # The fields a manifest records but that never identify the artifact.
+    RECORDED: ClassVar[tuple[str, ...]] = ("declaring_commit", "allocated_resources", "tags")
+
     declaring_commit: str | None = Field(default=None, repr=False)
     allocated_resources: Resources | None = Field(default_factory=Resources, repr=False)
+    tags: dict[str, list[str]] | None = Field(default_factory=dict, repr=False)
 
     # The dotted path of the Job class that produces this artifact
-    # ("artifacts.sources.jobs.SourceURLJob"), or None for an artifact nothing
-    # produces, whose completion is its dependencies' files.
-    #
-    # A string, never the class: an artifact knowing its producer must not
-    # mean importing it, since a family's jobs.py pulls in torch or numpy and
-    # resolving, inspecting or drawing a graph must stay free of that. `job()`
-    # is the one place the string becomes a class.
     producer: ClassVar[str | None]
 
-    def __init_subclass__(cls, **kwargs):
-        """Rejects a subclass that sets `producer` to anything but a string or None.
+    @staticmethod
+    def digest(*parts: object) -> str:
+        """Returns a 10-character hash of `parts`, which subclasses build their
+        `uid` and `artifact_path` from.
 
-        Catches a wrong value when the class is defined, not when its job is
-        first located. It cannot catch a missing one: bases like sources.Source
-        leave `producer` for their subclasses to set, so a validator checks
-        presence once a class is actually instantiated.
+        Hashes canonical JSON, so equal parameters give an equal id in every
+        process, -0.0 and 0.0 included. Every part must be JSON-serializable.
+
+            Artifact.digest(("<pad>",), ["a", "b"]) -> "54cacb94a0"
         """
-        super().__init_subclass__(**kwargs)
-        producer = cls.__dict__.get("producer")
-        if producer is not None and not isinstance(producer, str):
-            raise TypeError(
-                f"{cls.__name__} must set `producer` to the dotted path of the Job "
-                f'class that produces it -- producer: ClassVar[str] = "artifacts.'
-                f'sources.jobs.SourceURLJob" -- or to None if nothing does'
-            )
+        blob = json.dumps(manifest.canonical(parts), separators=(",", ":"))
+        return hashlib.sha256(blob.encode()).hexdigest()[:10]
 
     @classmethod
     @cache
@@ -187,7 +163,7 @@ class Artifact(BaseModel):
             Tokenizer.dependencies() -> {"sources": frozenset}
         """
         found = {}
-        for name in sorted(cls.model_fields):
+        for name in sorted(set(cls.model_fields) - set(cls.RECORDED)):
             annotation = cls.model_fields[name].annotation
             container = get_origin(annotation) if get_origin(annotation) in (tuple, frozenset) else None
             held = [arm for arm in manifest.arms(get_args(annotation)[0] if container else annotation) if arm is not type(None)]
@@ -209,10 +185,11 @@ class Artifact(BaseModel):
 
     @model_validator(mode="after")
     def _producer_is_set(self) -> Self:
-        if not hasattr(type(self), "producer"):
+        if not isinstance(getattr(type(self), "producer", 0), str | None):
             raise TypeError(
                 f"{type(self).__name__} must set `producer` to the dotted path of "
-                f"the Job class that produces it, or to None if nothing does"
+                f'the Job class that produces it -- producer: ClassVar[str] = "artifacts.'
+                f'sources.jobs.SourceURLJob" -- or to None if nothing does'
             )
         return self
 
@@ -229,7 +206,7 @@ class Artifact(BaseModel):
         return self
 
     def _definition(self) -> tuple:
-        names = sorted(n for n in type(self).model_fields if n not in manifest.RECORDED)
+        names = sorted(n for n in type(self).model_fields if n not in type(self).RECORDED)
         return type(self), tuple((n, getattr(self, n)) for n in names)
 
     def __eq__(self, other: object) -> bool:
@@ -260,7 +237,7 @@ class Artifact(BaseModel):
 
     def to_manifest(self) -> dict:
         """Returns this artifact as a manifest dict: class, declaring commit,
-        resources, own parameters, and a nested definition per dependency.
+        resources, tags, own parameters, and a nested definition per dependency.
 
         It is what manifest.json at artifact_path holds, and from_manifest
         rebuilds the artifact from it alone (see artifacts.core.manifest).

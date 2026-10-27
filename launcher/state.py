@@ -14,7 +14,7 @@ from pathlib import Path
 import modal
 
 from artifacts.core.artifact import Artifact
-from artifacts.core.storage import MANIFEST
+from artifacts.core.storage import MANIFEST, read_manifest
 from config import (
     FLATLINE,
     HEARTBEAT_SECONDS,
@@ -31,7 +31,7 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 # life. A definition at a path is immutable once declared (docs/manifests.md), and the
 # map shows nothing else from the manifest, so a path read once is never read
 # again here; what launching needs fresh (resources) `attempt_launch` reads
-# off the volume itself.
+# off the volume itself, and `state` reads each manifest's tags on every scan.
 resolved: dict[str, Artifact] = {}
 
 # Held by anything in this process that reloads the mount or holds a file on
@@ -125,6 +125,7 @@ def state(root: Path = STORAGE) -> dict[str, dict]:
         state()["runs/toy/pretraining"] -> {
             "type": "Pretraining", "status": "partial", "error": None,
             "depends_on": ["mappeddatasets/mapped-7f3c1a2b"], "blocked_by": [],
+            "tags": {"experiment": ["lr_study"], "project": ["language_modeling"]},
             "parameters": {"run_id": "toy", "config": {...}},
             "done": False, "ready": True, "verdict": "running",
             "call_id": "fc-01JQ8W", "active": True, "last_heartbeat": 1757260800.1,
@@ -132,8 +133,9 @@ def state(root: Path = STORAGE) -> dict[str, dict]:
             "durable_progress": {"phase": "step", "done": 100, "total": 500},
         }
 
-    A manifest that cannot be read is an entry with status "conflict" and
-    its `error`, and the scan continues. `blocked_by` is every direct
+    `tags` are read off the manifest on every scan, since a redeclaration
+    can change them. A manifest that cannot be read is an entry with status
+    "conflict" and its `error`, and the scan continues. `blocked_by` is every direct
     dependency not `done` on this same map, one with no manifest included;
     `ready` is additionally false for an artifact nothing produces.
 
@@ -169,10 +171,12 @@ def state(root: Path = STORAGE) -> dict[str, dict]:
                 "status": "conflict",
                 "error": None,
                 "depends_on": [],
+                "tags": {},
                 "parameters": None,
                 "durable_progress": None,
             }
             try:
+                tags = read_manifest(root, path).get("tags") or {}
                 if path not in resolved:
                     resolved[path] = Artifact.load(path, root, memo)
             except ValueError as error:
@@ -184,6 +188,7 @@ def state(root: Path = STORAGE) -> dict[str, dict]:
                     type=type(artifact).__name__,
                     status="done" if all(present) else "partial" if any(present) else "declared",
                     depends_on=[dep.artifact_path.as_posix() for dep in artifact.deps()],
+                    tags=tags,
                     # This artifact's own fields, never a dependency's manifest. A
                     # dependency is a path in `depends_on` and nothing more: its own
                     # entry on this same map is where anything else about it lives,

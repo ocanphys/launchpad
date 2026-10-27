@@ -15,7 +15,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError, create_model
 
-from artifacts.core.artifact import Artifact, ParamConfig, Resources, _digest
+from artifacts.core.artifact import Artifact, ParamConfig, Resources
 from artifacts.core.manifest import manifest_json
 from artifacts.core.SGD.training import (
     LoopConfig,
@@ -59,7 +59,7 @@ class Plain(Artifact):
     @property
     def uid(self) -> str:
         # identity the way real artifacts build it: a dump of the parameters
-        return _digest(
+        return self.digest(
             self.shapes.model_dump(),
             self.one.uid if self.one else None,
             [p.uid for p in self.sequence],
@@ -86,7 +86,7 @@ class Real(Artifact):
 
     @property
     def uid(self) -> str:
-        return _digest(self.training.model_dump(), self.loop.model_dump(), self.transformer.model_dump(), self.mamba.model_dump())
+        return self.digest(self.training.model_dump(), self.loop.model_dump(), self.transformer.model_dump(), self.mamba.model_dump())
 
     @property
     def artifact_path(self) -> Path:
@@ -377,7 +377,7 @@ class Drawing(Artifact):
 
     @property
     def uid(self) -> str:
-        return _digest(manifest_json(self.to_manifest()["parameters"]))
+        return self.digest(manifest_json(self.to_manifest()["parameters"]))
 
     @property
     def artifact_path(self) -> Path:

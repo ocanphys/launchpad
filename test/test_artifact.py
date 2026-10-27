@@ -94,14 +94,17 @@ class ManifestTests(unittest.TestCase):
             sources=(ODYSSEY, ILIAD),
             declaring_commit="old",
             allocated_resources=Resources(gpu_type="A100"),
+            tags={"experiment": ["lr_study"]},
         )
         rebuilt = Artifact.from_manifest(original.to_manifest())
         self.assertEqual(rebuilt, original)
         self.assertEqual(rebuilt.declaring_commit, "old")
         self.assertEqual(rebuilt.allocated_resources, Resources(gpu_type="A100"))
+        self.assertEqual(rebuilt.tags, {"experiment": ["lr_study"]})
         self.assertFalse(rebuilt.bound)
         # a dependency's recorded fields are at its own path, not in this manifest
-        self.assertEqual({(s.declaring_commit, s.allocated_resources) for s in rebuilt.sources}, {(None, None)})
+        self.assertEqual({(s.declaring_commit, s.allocated_resources, s.tags) for s in rebuilt.sources}, {(None, None, None)})
+        self.assertEqual(ODYSSEY, SourceURL(name="odyssey", url=ODYSSEY.url, tags={"project": ["x"]}))  # not identity
 
     def test_a_shared_memo_decodes_a_shared_subtree_once(self):
         memo = {}
@@ -119,7 +122,7 @@ class ManifestTests(unittest.TestCase):
         self.assertIn('\n  "declaring_commit": ', text)  # two-space indent
         self.assertEqual(
             list(json.loads(text)),
-            ["artifact", "declaring_commit", "allocated_resources", "parameters", "dependencies"],
+            ["artifact", "declaring_commit", "allocated_resources", "tags", "parameters", "dependencies"],
         )
         [embedded] = tokenizer((ODYSSEY,)).to_manifest()["dependencies"]["sources"]
         self.assertEqual(list(embedded), ["artifact", "parameters", "dependencies"])

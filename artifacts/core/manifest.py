@@ -1,6 +1,6 @@
 """The codec: an artifact as a manifest dict and back. A manifest names its
-artifact's class under "artifact", records its declaring commit and resources
-at the root only, holds its own fields under "parameters" and a definition per
+artifact's class under "artifact", records its declaring commit, resources and
+tags at the root only, holds its own fields under "parameters" and a definition per
 dependency under "dependencies". A param config whose class is not exactly the
 one its field names carries that class under "class", at any depth. Nothing
 here opens a file (artifacts.core.storage does); `manifest_json` is the text on
@@ -18,9 +18,6 @@ from artifacts.core.locate import dotted, locate
 
 if TYPE_CHECKING:
     from artifacts.core.artifact import Artifact
-
-# The fields a manifest records but that never identify the artifact.
-RECORDED = ("declaring_commit", "allocated_resources")
 
 
 def arms(annotation: object) -> tuple:
@@ -86,7 +83,7 @@ def parameters(artifact: Artifact) -> dict:
           -> {"name": "odyssey", "url": "https://example.org/odyssey.txt"}
     """
     cls = type(artifact)
-    names = [n for n in cls.model_fields if n not in cls.dependencies() and n not in RECORDED]
+    names = [n for n in cls.model_fields if n not in cls.dependencies() and n not in cls.RECORDED]
     dumped = artifact.model_dump(mode="json", include=set(names), serialize_as_any=True)
     return canonical({n: _with_classes(getattr(artifact, n), cls.model_fields[n].annotation, dumped[n]) for n in names})
 
@@ -106,23 +103,24 @@ def _definition_manifest(artifact: Artifact) -> dict:
 
 def to_manifest(artifact: Artifact) -> dict:
     """Returns the artifact as a manifest dict, enough to rebuild it from
-    nothing else: its class, declaring commit, resources, own parameters, and
+    nothing else: its class, declaring commit, resources, tags, own parameters, and
     the definition of each artifact it is built from.
 
-    Only the root records `declaring_commit` and `allocated_resources`; each
-    dependency records its own at its own path. The five keys keep this order
+    Only the root records `declaring_commit`, `allocated_resources` and `tags`;
+    each dependency records its own at its own path. The six keys keep this order
     and everything below them is sorted, so the text is a pure function of the
     artifact.
 
         to_manifest(odyssey) -> {"artifact": "artifacts.sources.SourceURL", "declaring_commit": "abc1234",
-                                 "allocated_resources": {...}, "parameters": {...}, "dependencies": {}}
+                                 "allocated_resources": {...}, "tags": {}, "parameters": {...}, "dependencies": {}}
     """
     definition = _definition_manifest(artifact)
-    resources = artifact.allocated_resources
+    resources, tags = artifact.allocated_resources, artifact.tags
     return {
         "artifact": definition["artifact"],
         "declaring_commit": artifact.declaring_commit,
         "allocated_resources": None if resources is None else canonical(resources.model_dump(mode="json")),
+        "tags": None if tags is None else canonical(tags),
         "parameters": definition["parameters"],
         "dependencies": definition["dependencies"],
     }
@@ -147,8 +145,8 @@ def _decoded(data: object) -> object:
 def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifact:
     """Returns the artifact a manifest describes and the tree under it, unbound.
 
-    The root keeps the declaring commit and resources its manifest records; a
-    dependency comes back with both None, since they are recorded at its own
+    The root keeps the declaring commit, resources and tags its manifest records; a
+    dependency comes back with all three None, since they are recorded at its own
     path. `memo`, one dict shared across calls, hands back the same instance
     for a subtree decoded before (the dataset under every leg of a run).
 
@@ -173,6 +171,7 @@ def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifa
             **inputs,
             "declaring_commit": data.get("declaring_commit"),
             "allocated_resources": _decoded(data.get("allocated_resources")),
+            "tags": data.get("tags"),
         }
     )
     if memo is not None:

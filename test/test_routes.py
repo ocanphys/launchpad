@@ -219,7 +219,7 @@ def client(**overrides):
     # In the container `web/` is mounted at /web; locally it's the repo's own
     # copy, which is the same files and lets the static mount succeed.
     main.WEB_DIR = Path(__file__).resolve().parents[1] / "web"
-    # The image builds the docs site at GUIDE_DIR; here a one-page stand-in.
+    # The image mounts the docs site at GUIDE_DIR; here a one-page stand-in.
     main.GUIDE_DIR = Path(mkdtemp())
     (main.GUIDE_DIR / "index.html").write_text("<h1>guide</h1>")
     # What LAB_SECRET puts in the container's environment. Every client below

@@ -214,6 +214,24 @@ class DeclareTests(unittest.TestCase):
         self.assertFalse(report.rows[0]["updated"])
         self.assertEqual(report.rows[0]["resources"], [Resources(cpu=4.0).model_dump()] * 2)
 
+    def test_a_commit_overwrites_differing_tags_and_nothing_else(self):
+        with declaring_at("old"):
+            declare(ODYSSEY, self.root, commit=True)
+        wanted = SourceURL(name="odyssey", url=ODYSSEY.url, tags={"project": ["language_modeling"]})
+
+        report = declare(wanted, self.root)  # preview: reported, not written
+        self.assertFalse(report.blockers)
+        self.assertIn('tags differ, requested apply on commit: {} -> {"project": ["language_modeling"]}', report.render())
+        self.assertEqual(lab.Artifact.load("sources/odyssey", self.root).tags, {})
+
+        report = declare(wanted, self.root, commit=True)
+        self.assertTrue(report.rows[0]["updated"])
+        stored = lab.Artifact.load("sources/odyssey", self.root)
+        self.assertEqual(stored.tags, {"project": ["language_modeling"]})
+        self.assertEqual(stored.declaring_commit, "old")
+
+        self.assertFalse(declare(wanted, self.root, commit=True).rows[0]["updated"])  # settled
+
     def test_an_interrupted_declaration_is_completed_by_repeating_it(self):
         declare(TOKENS, self.root, commit=True)
         tokenizer_manifest = self.root / "tokenizers" / TOKENIZER.uid / MANIFEST

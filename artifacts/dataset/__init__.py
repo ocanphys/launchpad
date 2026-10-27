@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, ClassVar, Self
 
 from pydantic import PrivateAttr, model_validator
 
-from artifacts.core.artifact import Artifact, _digest
+from artifacts.core.artifact import Artifact
 from artifacts.sources import Source
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers import Tokenizer
@@ -80,13 +80,13 @@ class DataSet(Artifact):
         # order is identifying here, same reasoning as MappedDataSet's uid:
         # concatenation order changes train.bin/valid.bin's actual contents,
         # so this must not sort train_set/valid_set away.
-        digest = _digest(
+        hashed = self.digest(
             [ts.uid for ts in self.train_set], [ts.uid for ts in self.valid_set]
         )
         if len(self.train_set) > 1 or len(self.valid_set) > 1:
             # The separator changes the merged bytes and therefore their identity.
-            digest = _digest(digest, END_OF_TEXT)
-        return f"dataset-{digest}"
+            hashed = self.digest(hashed, END_OF_TEXT)
+        return f"dataset-{hashed}"
 
     @property
     def artifact_path(self) -> Path:

@@ -25,7 +25,6 @@ import regex as re
 from pydantic import PrivateAttr
 
 from artifacts import tokenizers
-from artifacts.core.artifact import _digest
 from artifacts.sources import Source
 
 # lifting pretokenizer regex from tiktoken
@@ -110,8 +109,8 @@ class Tokenizer(tokenizers.Tokenizer):
         # two tokenizers differing only there don't share a folder. A set has no
         # order, so the digest picks one to hash.
         vocab_label = str(self.vocab_size)
-        digest = _digest(self.vocab_size, self.special_tokens, sorted(s.uid for s in self.sources))
-        return f"bpe-{vocab_label}-{digest}"
+        hashed = self.digest(self.vocab_size, self.special_tokens, sorted(s.uid for s in self.sources))
+        return f"bpe-{vocab_label}-{hashed}"
 
     @property
     def files(self) -> dict[str, str]:

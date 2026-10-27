@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from artifacts.core.artifact import Artifact, _digest
+from artifacts.core.artifact import Artifact
 from artifacts.core.storage import MANIFEST, write_manifest
 from artifacts.dataset import DataSet
 from artifacts.dataset.jobs import DataSetJob
@@ -80,7 +80,7 @@ class DataSetTests(unittest.TestCase):
         for train, valid in (([FIRST, SECOND], []), ([], [FIRST, SECOND])):
             with self.subTest(train=train, valid=valid):
                 dataset = DataSet.from_sources(TOKENIZER, train, valid)
-                plain_digest = _digest(
+                plain_digest = Artifact.digest(
                     [source.uid for source in dataset.train_set],
                     [source.uid for source in dataset.valid_set],
                 )
@@ -114,7 +114,7 @@ class DataSetTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         dataset.uid,
-                        f"dataset-{_digest([s.uid for s in dataset.train_set], [s.uid for s in dataset.valid_set])}",
+                        f"dataset-{Artifact.digest([s.uid for s in dataset.train_set], [s.uid for s in dataset.valid_set])}",
                     )
 
     def test_merge_inserts_actual_eot_id_at_each_file_boundary(self):

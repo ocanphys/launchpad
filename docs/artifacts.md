@@ -54,6 +54,7 @@ type. A concrete type defines:
 | `producer` | A class-level dotted path to its `Job`, or `None` for an artifact that writes no outputs. |
 | `declaring_commit` | The commit that declared its manifest, stamped by `lab.declare` and `None` until then; excluded from identity ([Manifests](manifests.md#recorded-fields)). |
 | `allocated_resources` | Recorded execution allocation, excluded from identity. `None` on a dependency decoded from a parent's manifest, which records it at its own path. |
+| `tags` | Labels to find the artifact by, a dict of `str` to `list[str]` such as `{"experiment": ["lr_study"], "project": ["language_modeling"]}`; `{}` by default. Excluded from identity, and `None` on a dependency decoded from a parent's manifest. The dashboard filters on them ([Dashboard](dashboard.md#filtering)). |
 
 Paths, files, producers and dependency lists are derived; they are not
 constructor arguments or separately persisted state. Artifact modules stay
@@ -148,7 +149,7 @@ Keep three questions distinct:
    deduplication, lease keys, manifest locations, and every map of artifacts
    key on.
 2. **Same definition:** concrete type, parameters, and dependency definitions
-   agree recursively. `declaring_commit`, `allocated_resources` and bound
+   agree recursively. `declaring_commit`, `allocated_resources`, `tags` and bound
    state are excluded at every node. **This is what `==` and `hash()` mean**: `Artifact`
    overrides both to compare its fields except the recorded ones, so an
    artifact rebuilt from an older manifest is still the same artifact. Binding

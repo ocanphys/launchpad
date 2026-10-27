@@ -11,7 +11,6 @@ from typing import ClassVar, Self
 
 from pydantic import model_validator
 
-from artifacts.core.artifact import _digest
 from artifacts.core.SGD.training import Training
 from artifacts.dataset import DataSet
 from artifacts.mappeddataset import MappedDataSet
@@ -59,7 +58,7 @@ class Pretraining(Training):
             FIRST_LEG.lineage_hash -> "69f057c312"  # the first leg in test/test_golden.py
         """
         params = self.parameters()
-        return _digest(
+        return self.digest(
             self.starting_checkpoint.uid if self.starting_checkpoint else None,
             self.dataset.uid,
             self.tokenizer.uid,

@@ -33,7 +33,6 @@ from pathlib import Path
 import modal
 
 from artifacts.core.artifact import Artifact, Resources
-from artifacts.core.manifest import RECORDED
 from artifacts.core.resolve import resolve
 from artifacts.core.SGD.training import Training
 from artifacts.core.storage import write_manifest
@@ -75,7 +74,7 @@ class DeclarationError(ValueError):
 class DeclarationReport:
     """One row per resolved path: path, state, drift, differences, created,
     updated, the stored declaring commit beside the one declaring now, and the
-    stored and requested resources. Counts and the verdict are derived."""
+    stored and requested resources and tags. Counts and the verdict are derived."""
 
     rows: list[dict]
     strict_commit: bool = False
@@ -103,6 +102,10 @@ class DeclarationReport:
             if stored is not None and stored != requested:
                 verb = "updated" if row["updated"] else "differ, requested apply on commit"
                 notes.append(f"resources {verb}: {_set(stored)} -> {_set(requested)}")
+            stored, requested = row["tags"]
+            if stored is not None and stored != requested:
+                verb = "updated" if row["updated"] else "differ, requested apply on commit"
+                notes.append(f"tags {verb}: {json.dumps(stored)} -> {json.dumps(requested)}")
             line = f"{row['path']:<{width}}{row['state']:<{state_width}}"
             lines.append(line.rstrip() + (f"  ({'; '.join(notes)})" if notes else ""))
             if verbose and row["path"] in blocked:
@@ -141,7 +144,7 @@ def _leaves(value: object, prefix: str = "") -> dict[str, object]:
     if isinstance(value, dict) and value:
         out: dict[str, object] = {}
         for key, item in value.items():
-            if key in RECORDED:
+            if key in Artifact.RECORDED:
                 continue
             out.update(_leaves(item, f"{prefix}.{key}" if prefix else key))
         return out
@@ -160,11 +163,11 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
     subtree many manifests embed decodes once.
 
     Drift is the declaring commit stored at this path against `_head()`. A
-    request with `allocated_resources=None` (a dependency of a loaded
-    artifact) requests nothing: its row reports the stored resources as
+    request with `allocated_resources=None` or `tags=None` (a dependency of a
+    loaded artifact) requests nothing: its row reports the stored ones as
     requested, so nothing is compared or written for them."""
     footprint = artifact.status(root)
-    requested = artifact.allocated_resources
+    requested, requested_tags = artifact.allocated_resources, artifact.tags
     row = {
         "path": artifact.artifact_path.as_posix(),
         "state": "new",
@@ -174,6 +177,7 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
         "updated": False,
         "declaring_commit": [None, _head()],
         "resources": [None, None if requested is None else requested.model_dump()],
+        "tags": [None, requested_tags],
     }
     if not footprint.manifest:
         present = [desc for desc, there in footprint.outputs.items() if there]
@@ -192,6 +196,8 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
     assert stored.allocated_resources is not None  # a manifest at its own path records them
     on_disk = stored.allocated_resources.model_dump()
     row["resources"] = [on_disk, on_disk if requested is None else requested.model_dump()]
+    stored_tags = stored.tags or {}  # a manifest written before tags existed records none
+    row["tags"] = [stored_tags, stored_tags if requested_tags is None else requested_tags]
     if stored != artifact:
         row["state"] = "conflict"
         on_disk, wanted = _leaves(stored.to_manifest()), _leaves(artifact.to_manifest())
@@ -274,7 +280,7 @@ def declare(
     """The declaration report for `artifact` and everything it is built from,
     printed and returned; with `commit`, missing manifests are published first,
     stamped with this process's `_head()` as their declaring commit, and
-    existing ones whose resources differ from those requested take the
+    existing ones whose resources or tags differ from those requested take the
     requested ones, everything else in them kept.
 
     Preview writes nothing and returns blockers as rows. Commit refuses over
@@ -304,14 +310,20 @@ def declare(
         if report.blockers:
             raise DeclarationError(report, verbose)
         for node, row in zip(graph, rows):
-            stored, requested = row["resources"]
+            (stored, requested), (stored_tags, requested_tags) = row["resources"], row["tags"]
             if row["state"] == "new":
-                resources = Resources() if node.allocated_resources is None else node.allocated_resources
-                stamped = node.model_copy(update={"declaring_commit": _head(), "allocated_resources": resources})
+                stamped = node.model_copy(
+                    update={
+                        "declaring_commit": _head(),
+                        "allocated_resources": Resources() if node.allocated_resources is None else node.allocated_resources,
+                        "tags": node.tags or {},
+                    }
+                )
                 manifest = stamped.to_manifest()
-            elif stored != requested:
+            elif stored != requested or stored_tags != requested_tags:
                 on_disk = Artifact.load(node.artifact_path, root, memo)
-                manifest = on_disk.model_copy(update={"allocated_resources": node.allocated_resources}).to_manifest()
+                update = {"allocated_resources": node.allocated_resources, "tags": node.tags}
+                manifest = on_disk.model_copy(update=update).to_manifest()
             else:
                 continue
             write_manifest(root, node.artifact_path, manifest)
@@ -319,7 +331,9 @@ def declare(
                 row.update(_inspect(node, root, memo), created=True)
                 row["state"] = row["state"].removeprefix("already ")  # this commit declared it
             else:  # keep the pair, so the report shows what changed to what
-                row.update(_inspect(node, root, memo), updated=True, resources=[stored, requested])
+                row.update(
+                    _inspect(node, root, memo), updated=True, resources=[stored, requested], tags=[stored_tags, requested_tags]
+                )
         if rows[-1]["created"] and notebook is not None and isinstance(artifact, Training):
             copy = root / "runs" / artifact.run_id / f"declare-{artifact.uid}.ipynb"
             copy.parent.mkdir(parents=True, exist_ok=True)
