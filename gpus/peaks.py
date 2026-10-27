@@ -12,7 +12,7 @@ import re
 # datasheets quote the 2:4 structured-sparsity rate, twice as high, so those figures were halved.
 nan = float("nan")
 COLUMNS = ("fp64", "fp32", "tf32", "bf16", "fp16", "fp8", "mem_bw")
-gpu_specs = {
+gpu_specs: dict[str, dict[str, float]] = {
     row: dict(zip(COLUMNS, values))
     for row, values in {  # fp64   fp32   tf32    bf16    fp16    fp8  mem_bw
         "T4":           (0.25,   8.1,   nan,    nan,     65,   nan,   320),
@@ -33,7 +33,7 @@ gpu_specs = {
 }
 
 # gpu_specs column of each torch dtype, keyed by str(dtype).
-PRECISIONS = {
+PRECISIONS: dict[str, str] = {
     "torch.float64": "fp64", "torch.float32": "fp32", "torch.bfloat16": "bf16", "torch.float16": "fp16",
     "torch.float8_e4m3fn": "fp8", "torch.float8_e5m2": "fp8",
 }

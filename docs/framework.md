@@ -179,7 +179,7 @@ need no changes, because they only ever see artifacts and their dependencies.
 
 - Every artifact has one path, and one definition at that path.
 - Dependencies are acyclic.
-- A manifest's definition and recorded commit never change once written.
+- A manifest's definition and declaring commit never change once written.
 - Completed outputs are never modified in place.
 - An artifact is `done` only when every completion file exists at its final
   path.
@@ -198,10 +198,10 @@ What these guarantee in practice:
 | Shared dependency reached twice | One resolved entry; conflicting definitions raise before any write. |
 | Tokenizer sources supplied in reverse order | One definition, equal and equally hashed: the same path, manifest and training input order. |
 | Two sources named alike with different URLs in one set | Refused at construction, not deduplicated. |
-| Manifest round trip | The same definition, field types and recorded fields; the same manifest text; the result unbound. |
+| Manifest round trip | The same definition and field types, and the root's recorded fields; the same manifest text; the result unbound. |
 | Equal definitions written differently (`1` and `1.0` in a float field) | One artifact, one path, one manifest. |
 | Preview against empty storage | A report only; no folders or files created. |
-| Redeclare with a different commit or resources | The existing manifest kept; commit drift blocks only in strict mode; new resources written on commit. |
+| Redeclare from a later commit, or with different resources | The existing manifest kept; drift on every node declared at an older commit, blocking only in strict mode; new resources written on commit. |
 | Redeclaring an already-published path | The existing manifest is read, not overwritten; a different definition is a conflict. |
 | Interrupted declaration | A retry completes the missing manifests without rewriting existing ones. |
 | Interrupted output write | Temporary files do not make an artifact complete; partial outputs are reused only after the job validates them. |

@@ -2,6 +2,7 @@
 the notebook copy a run's declaration leaves behind."""
 
 import io
+import json
 import os
 import unittest
 from contextlib import redirect_stdout
@@ -10,7 +11,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import lab
-from artifacts.core.artifact import Resources
+from artifacts.core.artifact import Artifact, Resources
 from artifacts.core.SGD.training import (
     LoopConfig,
     LRSchedule,
@@ -35,7 +36,7 @@ PRETRAINING = Pretraining(
    
     model=Transformer(
         vocab_size=1000, sequence_length=8, num_layers=1, d_model=16, d_ff=32,
-        num_heads=2, rope_theta=10000, device="cpu",
+        num_heads=2, rope_theta=10000,
     ),
     training_parameters=TrainingParameters(
         total_steps=4, batch_size=4, max_norm=1,
@@ -55,6 +56,11 @@ def declare(artifact, root, **options) -> lab.DeclarationReport:
 
 def states(report: lab.DeclarationReport) -> dict[str, str]:
     return {row["path"]: row["state"] for row in report.rows}
+
+
+def declaring_at(commit: str):
+    """Returns a patch making this process's commit `commit`, as a later checkout would."""
+    return patch("lab._head", return_value=commit)
 
 
 class DeclareTests(unittest.TestCase):
@@ -90,20 +96,59 @@ class DeclareTests(unittest.TestCase):
             self.assertTrue((self.root / row["path"] / MANIFEST).is_file())
 
     def test_redeclaring_keeps_the_existing_manifest_and_reports_drift(self):
-        declare(SourceURL(name="odyssey", url=ODYSSEY.url, commit="old"), self.root, commit=True)
+        with declaring_at("old"):
+            declare(ODYSSEY, self.root, commit=True)
         path = self.root / "sources/odyssey" / MANIFEST
         before = path.read_text()
 
-        requested = SourceURL(name="odyssey", url=ODYSSEY.url, commit="new")
-        report = declare(requested, self.root, commit=True)
-        self.assertEqual(states(report), {"sources/odyssey": "declared"})
-        self.assertTrue(report.rows[0]["drift"])
-        self.assertFalse(report.rows[0]["created"])
-        self.assertEqual(path.read_text(), before)
+        with declaring_at("new"):
+            report = declare(ODYSSEY, self.root, commit=True)
+            self.assertEqual(states(report), {"sources/odyssey": "declared"})
+            self.assertTrue(report.rows[0]["drift"])
+            self.assertEqual(report.rows[0]["declaring_commit"], ["old", "new"])
+            self.assertFalse(report.rows[0]["created"])
+            self.assertEqual(path.read_text(), before)
 
-        with self.assertRaises(lab.DeclarationError) as refused:
-            declare(requested, self.root, commit=True, strict_commit=True)
+            with self.assertRaises(lab.DeclarationError) as refused:
+                declare(ODYSSEY, self.root, commit=True, strict_commit=True)
         self.assertTrue(refused.exception.report.blockers)
+
+    def test_every_manifest_written_records_the_declaring_commit_at_its_root_only(self):
+        with declaring_at("abc"):
+            declare(TOKENS, self.root, commit=True)
+        for row in declare(TOKENS, self.root).rows:
+            data = json.loads((self.root / row["path"] / MANIFEST).read_text())
+            self.assertEqual(data["declaring_commit"], "abc")
+            embedded = json.dumps(data["dependencies"])
+            self.assertNotIn("declaring_commit", embedded)
+            self.assertNotIn("allocated_resources", embedded)
+
+    def test_a_new_artifact_over_older_dependencies_is_drift_on_their_rows(self):
+        with declaring_at("old"):
+            declare(TOKENIZER, self.root, commit=True)
+        with declaring_at("new"):
+            report = declare(TOKENS, self.root)
+            drift = {row["path"]: row["declaring_commit"] for row in report.rows if row["drift"]}
+            self.assertEqual(drift, {"sources/odyssey": ["old", "new"], f"tokenizers/{TOKENIZER.uid}": ["old", "new"]})
+            with self.assertRaises(lab.DeclarationError):
+                declare(TOKENS, self.root, commit=True, strict_commit=True)
+        self.assertFalse((self.root / TOKENS.artifact_path).exists())
+
+    def test_a_dependency_of_a_loaded_artifact_requests_no_resources(self):
+        source = SourceURL(name="odyssey", url=ODYSSEY.url, allocated_resources=Resources(cpu=2.0))
+        tokenizer = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(source,))
+        declare(tokenizer, self.root, commit=True)
+        loaded = Artifact.load(f"tokenizers/{tokenizer.uid}", self.root)
+        (embedded,) = loaded.sources
+        self.assertIsNone(embedded.allocated_resources)
+
+        report = declare(TokenizedSource(tokenizer=loaded, source=embedded), self.root, commit=True)
+        self.assertFalse(report.rows[0]["updated"])
+        self.assertEqual(Artifact.load("sources/odyssey", self.root).allocated_resources, Resources(cpu=2.0))
+
+        (self.root / "sources/odyssey" / MANIFEST).unlink()  # new at its path again: platform defaults
+        declare(loaded, self.root, commit=True)
+        self.assertEqual(Artifact.load("sources/odyssey", self.root).allocated_resources, Resources())
 
     def test_a_different_definition_at_a_published_path_is_a_conflict(self):
         declare(ODYSSEY, self.root, commit=True)
@@ -148,10 +193,9 @@ class DeclareTests(unittest.TestCase):
         self.assertEqual(states(report)[f"tokenizers/{TOKENIZER.uid}"], "new")
 
     def test_a_commit_overwrites_differing_resources_and_nothing_else(self):
-        declare(SourceURL(name="odyssey", url=ODYSSEY.url, commit="old"), self.root, commit=True)
-        wanted = SourceURL(
-            name="odyssey", url=ODYSSEY.url, commit="new", allocated_resources=Resources(cpu=4.0)
-        )
+        with declaring_at("old"):
+            declare(ODYSSEY, self.root, commit=True)
+        wanted = SourceURL(name="odyssey", url=ODYSSEY.url, allocated_resources=Resources(cpu=4.0))
 
         report = declare(wanted, self.root)  # preview: reported, not written
         self.assertFalse(report.blockers)
@@ -164,7 +208,7 @@ class DeclareTests(unittest.TestCase):
         self.assertIn('resources updated: {} -> {"cpu": 4.0}', report.render())
         stored = lab.Artifact.load("sources/odyssey", self.root)
         self.assertEqual(stored.allocated_resources, Resources(cpu=4.0))
-        self.assertEqual(stored.commit, "old")
+        self.assertEqual(stored.declaring_commit, "old")
 
         report = declare(wanted, self.root, commit=True)  # settled: nothing to write
         self.assertFalse(report.rows[0]["updated"])

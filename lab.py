@@ -27,20 +27,33 @@ import os
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import modal
 
-from artifacts.core.artifact import Artifact
+from artifacts.core.artifact import Artifact, Resources
 from artifacts.core.manifest import RECORDED
 from artifacts.core.resolve import resolve
 from artifacts.core.SGD.training import Training
 from artifacts.core.storage import write_manifest
-from config import STORAGE, VOLUME_NAME
+from config import LAB_COMMIT_ENV, STORAGE, VOLUME_NAME, get_git_commit
 from system.runtime import Worker
 
 # States a person has to look at before anything is written.
 BLOCKING = ("conflict", "undeclared")
+
+
+@cache
+def _head() -> str:
+    """Returns the commit of this process, stamped on every manifest it declares.
+
+    Cached, so one session cannot stamp two commits; restart the kernel to pick
+    up new work. The lab container has no git binary and no .git, so there the
+    commit comes from LAB_COMMIT_ENV, which main.py bakes in.
+    """
+    override = os.environ.get(LAB_COMMIT_ENV)
+    return override if override else get_git_commit()
 
 
 class DeclarationError(ValueError):
@@ -61,8 +74,8 @@ class DeclarationError(ValueError):
 @dataclass
 class DeclarationReport:
     """One row per resolved path: path, state, drift, differences, created,
-    updated, and the stored and requested commits and resources. Counts and
-    the verdict are derived."""
+    updated, the stored declaring commit beside the one declaring now, and the
+    stored and requested resources. Counts and the verdict are derived."""
 
     rows: list[dict]
     strict_commit: bool = False
@@ -83,8 +96,8 @@ class DeclarationReport:
         for row in self.rows:
             notes = []
             if row["drift"]:
-                stored, requested = row["commit"]
-                notes.append(f"drift: {stored[:7]} -> {requested[:7]}")
+                stored, declaring = row["declaring_commit"]
+                notes.append(f"drift: {stored[:7]} -> {declaring[:7]}")
             stored, requested = row["resources"]
             if stored is not None and stored != requested:
                 verb = "updated" if row["updated"] else "differ, requested apply on commit"
@@ -122,8 +135,8 @@ def _set(resources: dict) -> str:
 
 
 def _leaves(value: object, prefix: str = "") -> dict[str, object]:
-    """A manifest flattened to dotted leaf paths, commits and resources left
-    out at every level: neither is definition."""
+    """A manifest flattened to dotted leaf paths, the recorded fields left
+    out: neither is definition."""
     if isinstance(value, dict) and value:
         out: dict[str, object] = {}
         for key, item in value.items():
@@ -143,8 +156,14 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
     """One report row: how what `root` holds at this artifact's path compares
     with the artifact requested. Every difference is `key: [on disk, requested]`.
     `memo` is `Artifact.load`'s, shared across one declaration's rows so a
-    subtree many manifests embed decodes once."""
+    subtree many manifests embed decodes once.
+
+    Drift is the declaring commit stored at this path against `_head()`. A
+    request with `allocated_resources=None` (a dependency of a loaded
+    artifact) requests nothing: its row reports the stored resources as
+    requested, so nothing is compared or written for them."""
     footprint = artifact.status(root)
+    requested = artifact.allocated_resources
     row = {
         "path": artifact.artifact_path.as_posix(),
         "state": "new",
@@ -152,8 +171,8 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
         "differences": {},
         "created": False,
         "updated": False,
-        "commit": [None, artifact.commit],
-        "resources": [None, artifact.allocated_resources.model_dump()],
+        "declaring_commit": [None, _head()],
+        "resources": [None, None if requested is None else requested.model_dump()],
     }
     if not footprint.manifest:
         present = [desc for desc, there in footprint.outputs.items() if there]
@@ -167,9 +186,11 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
         row["state"] = "conflict"
         row["differences"] = {"manifest": [str(error), None]}
         return row
-    row["commit"] = [stored.commit, artifact.commit]
-    row["drift"] = stored.commit != artifact.commit
-    row["resources"] = [stored.allocated_resources.model_dump(), artifact.allocated_resources.model_dump()]
+    row["declaring_commit"] = [stored.declaring_commit, _head()]
+    row["drift"] = stored.declaring_commit != _head()
+    assert stored.allocated_resources is not None  # a manifest at its own path records them
+    on_disk = stored.allocated_resources.model_dump()
+    row["resources"] = [on_disk, on_disk if requested is None else requested.model_dump()]
     if stored != artifact:
         row["state"] = "conflict"
         on_disk, wanted = _leaves(stored.to_manifest()), _leaves(artifact.to_manifest())
@@ -230,7 +251,7 @@ def current_notebook() -> bytes | None:
     path = os.environ.get("JPY_SESSION_NAME")
     if path is None:
         try:
-            from IPython import get_ipython
+            from IPython.core.getipython import get_ipython
         except ImportError:  # a worker image: no notebook, by construction
             return None
         kernel = get_ipython()
@@ -250,8 +271,9 @@ def declare(
     notebook: bytes | None = None,
 ) -> DeclarationReport:
     """The declaration report for `artifact` and everything it is built from,
-    printed and returned; with `commit`, missing manifests are published first
-    and existing ones whose resources differ from those requested take the
+    printed and returned; with `commit`, missing manifests are published first,
+    stamped with this process's `_head()` as their declaring commit, and
+    existing ones whose resources differ from those requested take the
     requested ones, everything else in them kept.
 
     Preview writes nothing and returns blockers as rows. Commit refuses over
@@ -283,7 +305,9 @@ def declare(
         for node, row in zip(graph, rows):
             stored, requested = row["resources"]
             if row["state"] == "new":
-                manifest = node.to_manifest()
+                resources = Resources() if node.allocated_resources is None else node.allocated_resources
+                stamped = node.model_copy(update={"declaring_commit": _head(), "allocated_resources": resources})
+                manifest = stamped.to_manifest()
             elif stored != requested:
                 on_disk = Artifact.load(node.artifact_path, root, memo)
                 manifest = on_disk.model_copy(update={"allocated_resources": node.allocated_resources}).to_manifest()

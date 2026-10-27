@@ -26,8 +26,8 @@ class GpuMonitor:
     the model's dtype, is not in gpus/peaks.py.
     """
 
-    def __init__(self, model: "Model", batch_size: int, every: int, step: int, worker: "Worker"):
-        self.device = torch.device(model.device)
+    def __init__(self, model: "Model", device: torch.device, batch_size: int, every: int, step: int, worker: "Worker"):
+        self.device = device
         self.every = every
         self.worker = worker
         self.window = None
@@ -39,7 +39,7 @@ class GpuMonitor:
         except KeyError as error:
             worker.log.warning(f"MFU unknown: {error}")
             gpu = "unknown"
-        self.peak_flops = gpu_specs.get(gpu, {}).get(PRECISIONS.get(model.dtype), math.nan) * 1e12
+        self.peak_flops = gpu_specs.get(gpu, {}).get(PRECISIONS.get(model.dtype, ""), math.nan) * 1e12
         self.step_flops = model.step_flops(batch_size)
         self.vram = torch.cuda.get_device_properties(self.device).total_memory
         self.start, self.start_step = torch.cuda.Event(enable_timing=True), step

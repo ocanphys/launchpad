@@ -77,7 +77,7 @@ lab_image = (
 
 @app.function(
     image=web_image,
-    volumes={STORAGE: volume},
+    volumes={STORAGE.as_posix(): volume},
     max_containers=1,
     region=REGION,
     # The password every route here is behind, and the lab's token, which
@@ -101,7 +101,7 @@ def leasebook():
     return build_api(run_job, jupyter, WEB_DIR, GUIDE_DIR)
 
 
-@app.function(image=web_image, volumes={STORAGE: volume}, region=REGION, schedule=modal.Period(seconds=PERSIST_LOGS_EVERY))
+@app.function(image=web_image, volumes={STORAGE.as_posix(): volume}, region=REGION, schedule=modal.Period(seconds=PERSIST_LOGS_EVERY))
 def persist_logs() -> None:
     """Appends every call's new log rows to its file on the volume, writes
     `call_history.json` and commits: the only writer of either.
@@ -114,7 +114,7 @@ def persist_logs() -> None:
     persist_snapshot(STORAGE, volume)
 
 
-@app.function(image=worker_image, volumes={STORAGE: volume}, timeout=CONTAINER_LIFETIME)
+@app.function(image=worker_image, volumes={STORAGE.as_posix(): volume}, timeout=CONTAINER_LIFETIME)
 def run_job(artifact_path: str) -> None:
     """Load the artifact at `artifact_path`, run whatever produces it, under
     this call's own logger and lease.
@@ -153,7 +153,7 @@ def profile(**parameters) -> dict:
 
 @app.function(
     image=lab_image,
-    volumes={STORAGE: volume},
+    volumes={STORAGE.as_posix(): volume},
     secrets=[modal.Secret.from_name(LAB_SECRET)],
     # One lab, so one filesystem view: two containers would each hold their own
     # uncommitted copy of the same notebook and the later commit would win.

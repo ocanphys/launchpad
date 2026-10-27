@@ -81,10 +81,10 @@ def profile(
     """
     log = call_logger("profile", PROFILER, current_call_id())
     log.info(f"{type(model_declaration).__name__} on {torch.cuda.get_device_name()}, batch_size {batch_size}")
-    model = model_declaration.build()
+    model = model_declaration.build(torch.device("cuda"))
     tokens = torch.randint(
         0, model_declaration.vocab_size, (batch_size, model_declaration.sequence_length),
-        generator=torch.Generator().manual_seed(training_parameters.seed)).to(model_declaration.device)
+        generator=torch.Generator().manual_seed(training_parameters.seed)).to("cuda")
 
     model.train()
     optimizer = locate(training_parameters.optimizer)(

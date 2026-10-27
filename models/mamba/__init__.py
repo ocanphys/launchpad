@@ -5,9 +5,14 @@ artifact never pays for it.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import Field
 
 from artifacts.core.SGD import training
+
+if TYPE_CHECKING:
+    import torch
 
 
 class Mamba(training.Model):
@@ -25,8 +30,8 @@ class Mamba(training.Model):
     d_conv: int = Field(default=4, gt=0)
     expand: int = Field(default=2, gt=0)
 
-    def build(self):
-        """Returns a freshly initialized MambaLM on this model's device."""
+    def build(self, device: torch.device):
+        """Returns a freshly initialized MambaLM on `device`."""
         import torch
 
         from artifacts.core.locate import locate
@@ -39,6 +44,6 @@ class Mamba(training.Model):
             d_state=self.d_state,
             d_conv=self.d_conv,
             expand=self.expand,
-            device=torch.device(self.device),
+            device=device,
             dtype=locate(self.dtype),
         )

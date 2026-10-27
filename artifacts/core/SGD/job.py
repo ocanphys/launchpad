@@ -32,7 +32,8 @@ class TrainingJob(Job):
         self.starting_checkpoint = artifact.starting_checkpoint
         self.training_parameters = artifact.training_parameters
         self.loop_config = artifact.loop_config
-        self.device = torch.device(artifact.model.device)
+        # the GPU when there is one: the device is where the leg runs, not what it trains
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # saved as dotted paths in the config - resolved to the python objects
         self.schedule_fn = locate(self.training_parameters.lr_schedule_fn)
         self.schedule_parameters = self.training_parameters.lr_schedule.model_dump()
@@ -67,7 +68,7 @@ class TrainingJob(Job):
         # state into them. The optimizer is constructed over the live model's
         # parameters, so the two share tensors; loading state_dicts afterwards
         # keeps that link, which pickled whole objects would not.
-        model = self.artifact.model.build()
+        model = self.artifact.model.build(self.device)
         optimizer = locate(self.training_parameters.optimizer)(
             model.parameters(), **self.training_parameters.optimizer_parameters.model_dump()
         )
@@ -121,6 +122,7 @@ class TrainingJob(Job):
             else:
                 # only reachable from a starting checkpoint: failsafes without
                 # an optimizer were skipped above
+                assert self.starting_checkpoint is not None
                 worker.log.warning(
                     f"{self.starting_checkpoint.uid} saved no optimizer, using a fresh one"
                 )

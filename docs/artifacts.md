@@ -52,8 +52,8 @@ type. A concrete type defines:
 | `artifact_path` | The unique path relative to storage, derived from the fields, usually through `uid`. |
 | `files` | A mapping from output names to the filenames this artifact owns. |
 | `producer` | A class-level dotted path to its `Job`, or `None` for an artifact that writes no outputs. |
-| `commit` | Recorded definition provenance, excluded from identity ([Manifests](manifests.md#recorded-fields)). |
-| `allocated_resources` | Recorded execution allocation, excluded from identity. |
+| `declaring_commit` | The commit that declared its manifest, stamped by `lab.declare` and `None` until then; excluded from identity ([Manifests](manifests.md#recorded-fields)). |
+| `allocated_resources` | Recorded execution allocation, excluded from identity. `None` on a dependency decoded from a parent's manifest, which records it at its own path. |
 
 Paths, files, producers and dependency lists are derived; they are not
 constructor arguments or separately persisted state. Artifact modules stay
@@ -127,8 +127,8 @@ failure it prevents:
 6. **A set may not hold two members at one path.** Two `SourceURL`s named
    `odyssey` with different URLs are unequal, so a set keeps both, yet both
    own `sources/odyssey`. The set is refused at the line that built it.
-   Members differing only in `commit` are equal and collapse to one, the first
-   passed.
+   Members differing only in `declaring_commit` are equal and collapse to one,
+   the first passed.
 
 What a parameter may hold is checked when a class is first used, by
 `Artifact.dependencies()`: scalars, `Literal`s, tuples and param configs, and
@@ -148,8 +148,8 @@ Keep three questions distinct:
    deduplication, lease keys, manifest locations, and every map of artifacts
    key on.
 2. **Same definition:** concrete type, parameters, and dependency definitions
-   agree recursively. `commit`, `allocated_resources` and bound state are
-   excluded at every node. **This is what `==` and `hash()` mean**: `Artifact`
+   agree recursively. `declaring_commit`, `allocated_resources` and bound
+   state are excluded at every node. **This is what `==` and `hash()` mean**: `Artifact`
    overrides both to compare its fields except the recorded ones, so an
    artifact rebuilt from an older manifest is still the same artifact. Binding
    does not change equality.
@@ -263,7 +263,7 @@ sources: one `TokenizedSource` per source, then the dataset over them.
 **`==` is definition equality, not a separate method.** `resolve`, `bind` and
 `lab.declare` all ask whether two artifacts are the same definition. A second
 method beside `==` would leave each of them to remember to call it, and the
-one that forgot would turn a commit difference into a conflict. Set-valued
+one that forgot would turn a declaring commit difference into a conflict. Set-valued
 dependencies need a `hash` that agrees with it, so both are overridden
 together.
 

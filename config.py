@@ -41,7 +41,7 @@ LAB_SECRET = "launchpad-lab"  # supplies JUPYTER_TOKEN to both the lab and the d
 LAB_IDLE_SECONDS = 900  # scale the lab container down after this much idle
 # The lab ships named source files, not the repo, so it has no `git` to answer
 # `get_git_commit()` with. main.py bakes the answer in under this name while
-# building lab_image; `artifacts.core.artifact._head()` reads it when it is set.
+# building lab_image; `lab._head()` reads it when it is set.
 LAB_COMMIT_ENV = "LAUNCHPAD_LAB_COMMIT"
 
 

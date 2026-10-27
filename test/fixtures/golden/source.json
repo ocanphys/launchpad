@@ -1,6 +1,6 @@
 {
   "artifact": "artifacts.sources.SourceURL",
-  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "declaring_commit": "0123456789abcdef0123456789abcdef01234567",
   "allocated_resources": {
     "cpu": null,
     "gpu_count": null,

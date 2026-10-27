@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
-from pydantic import model_validator
+from pydantic import PrivateAttr, model_validator
 
 from artifacts.core.artifact import Artifact, _digest
 from artifacts.sources import Source
@@ -115,6 +115,9 @@ class MappedDataSet(Artifact):
 
     # -- the bound view ------------------------------------------------------
 
+    _train_tokens: TokenStream = PrivateAttr()
+    _valid_tokens: TokenStream = PrivateAttr()
+
     def _load(self, root: Path) -> None:
         """Artifact._load's hook: one TokenStream per split, offsets worked out
         from the bin files' lengths. The separator id comes from the split's
@@ -127,11 +130,7 @@ class MappedDataSet(Artifact):
             if len(sources) > 1:
                 [separator] = sources[0].tokenizer.bind(root).encode(END_OF_TEXT)
             stream = TokenStream([ts.paths(root)["tokens"] for ts in sources], separator)
-            # object.__setattr__ because the model is frozen -- `self` here
-            # is the object Artifact.bind read from the stored manifest, never
-            # the one bind() was called on, so this is invisible to whoever is
-            # still holding the unbound original.
-            object.__setattr__(self, name, stream)
+            setattr(self, name, stream)
 
     @property
     def bound(self) -> bool:

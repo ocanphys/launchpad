@@ -38,7 +38,7 @@ SOURCE = SourceURL(name="first", url="https://example.org/first.txt")
 TOKENIZER = Tokenizer(vocab_size=64, special_tokens=("<pad>",), sources=(SOURCE,))
 MODEL = Transformer(
     vocab_size=64, sequence_length=8, num_layers=1, d_model=16, d_ff=32,
-    num_heads=2, rope_theta=10000, device="cpu",
+    num_heads=2, rope_theta=10000,
 )
 TRAINING = TrainingParameters(
     total_steps=4, batch_size=4, max_norm=1,
@@ -365,7 +365,7 @@ class PretrainJobTests(unittest.TestCase):
     def test_validation_scores_a_split_shorter_than_one_batch(self):
         # 2000 tokens hold 249 sequences of 8, all in one batch of up to 300
         wide = rebuilt(self.leg, training_parameters=TrainingParameters.model_validate({**TRAINING.model_dump(), "batch_size": 300}))
-        metrics = PretrainJob(wide).evaluate(MODEL.build(), self.dataset.bind(self.root), worker())
+        metrics = PretrainJob(wide).evaluate(MODEL.build(torch.device("cpu")), self.dataset.bind(self.root), worker())
         self.assertTrue(torch.isfinite(metrics["val_loss"]))
         self.assertEqual(metrics["val_loss_var"].item(), 0.0)  # one batch: no spread, and never NaN
 

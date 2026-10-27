@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from pydantic import Field, model_validator
 
 from artifacts.core.artifact import Artifact, ParamConfig
+
+if TYPE_CHECKING:
+    import torch
 
 
 class Model(ParamConfig):
@@ -32,12 +35,11 @@ class Model(ParamConfig):
     vocab_size: int = Field(gt=0)
     sequence_length: int = Field(gt=0)
     dtype: str = "torch.float32"  # resolved worker-side via artifacts.core.locate.locate
-    device: str = "cuda"
 
-    def build(self):
-        """Returns a freshly initialized torch module on this model's device.
+    def build(self, device: torch.device):
+        """Returns a freshly initialized torch module on `device`.
 
-            Transformer(...).build() -> TransformerLM(...) on torch.device("cuda")
+            Transformer(...).build(torch.device("cpu")) -> TransformerLM(...) with every parameter on the cpu
         """
         raise NotImplementedError
 

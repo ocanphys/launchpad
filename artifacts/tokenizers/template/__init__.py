@@ -38,6 +38,8 @@ import json
 from pathlib import Path
 from typing import ClassVar
 
+from pydantic import PrivateAttr
+
 from artifacts import tokenizers
 from artifacts.core.artifact import _digest
 from artifacts.sources import Source
@@ -73,17 +75,16 @@ class TemplateTokenizer(tokenizers.Tokenizer):
 
     # -- the trained state -------------------------------------------------
 
+    _vocab: dict[int, str] = PrivateAttr()
+    _ids: dict[str, int] = PrivateAttr()
+
     def _load(self, root: Path) -> None:
         """Artifact._load's hook: read this artifact's own tokenizer.json --
         the state encode()/decode() run on -- and check it against what this
         artifact declares. The inverse of TemplateTokenizerJob.save. Override
         this in your own family whenever "using" the artifact means holding
-        something in memory; `bind(root)` calls it for you.
-
-        object.__setattr__ because the model is frozen -- but by the time
-        this runs, `self` is the object Artifact.bind read from the stored
-        manifest, never the one bind() was called on, so mutating it here is
-        invisible to whoever is still holding the unbound original.
+        something in memory; `bind(root)` calls it for you, on the fresh
+        object it read from the stored manifest.
         """
         data = json.loads(self.paths(root)["tokenizer"].read_text())
         if tuple(data["special_tokens"]) != self.special_tokens:
@@ -95,8 +96,8 @@ class TemplateTokenizer(tokenizers.Tokenizer):
                 f"{self.special_tokens}"
             )
         vocab = {int(idx): token for idx, token in data["vocab"].items()}
-        object.__setattr__(self, "_vocab", vocab)
-        object.__setattr__(self, "_ids", {tok: idx for idx, tok in vocab.items()})
+        self._vocab = vocab
+        self._ids = {tok: idx for idx, tok in vocab.items()}
 
     @property
     def bound(self) -> bool:
@@ -124,10 +125,6 @@ class TemplateTokenizer(tokenizers.Tokenizer):
     def encode(self, text: str) -> list[int]:
         self._require("encoding")
         return [self._ids.get(word, self._ids[UNKNOWN]) for word in text.split()]
-
-    def encode_iterable(self, iterable):
-        for item in iterable:
-            yield from self.encode(item)
 
     def decode(self, ids: list[int]) -> str:
         self._require("decoding")

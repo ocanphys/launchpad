@@ -161,4 +161,18 @@ it plans by default and writes only when asked.
 | Runner | Script | What it does |
 | --- | --- | --- |
 | `scan_volume` | `migrations/scan.py` | Reads every manifest on the volume and reports any that does not load (including one whose decoded path is not its folder) or that would re-encode to different text, naming the first differing line. Writes nothing. Run it before and after any change to the codec. |
-| `canonicalize_manifests [--apply]` | `migrations/cpu_floats.py` | Rewrote manifests that stored `allocated_resources.cpu` as an int, written by older code, in the text the code writes today, refusing any other difference. Applied; the scan has reported no problems since. |
+| `migrate_identity [--apply]` | `migrations/identity.py` | Moves the volume to the identity change: drops `device` from every model, renames each root's `commit` to `declaring_commit` keeping its value, drops the recorded fields from every embedded copy, and moves each pretraining leg to its new path, whole, with its notebook copy and its keys in `call_history.json` and the `call_history` and `leases` Dicts. Refuses everything while a call is running, or if a manifest does not decode, two folders become one path, or a new path is taken. Records the moves in `migrations/identity.plan.json` on the volume. A second run plans nothing. |
+
+The identity migration changes what the code reads, so its order matters: the
+new code cannot read an unmigrated manifest, and the deployed code cannot read
+a migrated one.
+
+1. Wait until no call is running, and launch nothing until step 5.
+2. From the checkout of the change, run `modal run local.py::migrate_identity`.
+   It writes nothing; fix whatever it refuses (for two legs that differed
+   only in `device`, delete the one not to keep) and run it again.
+3. Run it with `--apply`.
+4. Run `modal run local.py::scan_volume` from the same checkout; it must
+   report no problems.
+5. `modal deploy main.py`. Until then the deployed dashboard shows the
+   migrated manifests as unreadable; nothing is lost.

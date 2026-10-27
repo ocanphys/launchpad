@@ -35,8 +35,10 @@ pool. Declaring (writing manifests for a whole dependency tree, [Lab](lab.md))
 and launching (granting a lease and spawning the job that fills one in,
 [Launcher](launcher.md)) are separate steps.
 
-Jobs run the deployed code: the commit recorded in a manifest does not select
-which code runs, so a code change takes effect after `modal deploy`.
+Jobs run the deployed code: the declaring commit recorded in a manifest does
+not select which code runs, so a code change takes effect after `modal deploy`.
+A job also picks its own device: a training leg runs on `cuda` when its
+container has a GPU, and on `cpu` otherwise ([Models](models.md#the-contract)).
 
 ## What a job may write
 

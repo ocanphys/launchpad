@@ -142,7 +142,7 @@ pretraining = Pretraining(
     dataset=dataset,
     model=Transformer(vocab_size=tokenizer.vocab_size, d_model=512, d_ff=1344,
                       sequence_length=256, num_layers=4, num_heads=16,
-                      rope_theta=10000, device="cuda"),
+                      rope_theta=10000),
     training_parameters=TrainingParameters(
         total_steps=20000, batch_size=64, ...
     ),

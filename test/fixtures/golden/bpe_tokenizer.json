@@ -1,6 +1,6 @@
 {
   "artifact": "artifacts.tokenizers.bpe.Tokenizer",
-  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "declaring_commit": "0123456789abcdef0123456789abcdef01234567",
   "allocated_resources": {
     "cpu": 4.0,
     "gpu_count": null,
@@ -17,12 +17,6 @@
     "sources": [
       {
         "artifact": "artifacts.sources.SourceURL",
-        "commit": "0123456789abcdef0123456789abcdef01234567",
-        "allocated_resources": {
-          "cpu": null,
-          "gpu_count": null,
-          "gpu_type": null
-        },
         "parameters": {
           "name": "iliad",
           "url": "https://example.org/iliad.txt.gz"
@@ -31,12 +25,6 @@
       },
       {
         "artifact": "artifacts.sources.SourceURL",
-        "commit": "0123456789abcdef0123456789abcdef01234567",
-        "allocated_resources": {
-          "cpu": null,
-          "gpu_count": null,
-          "gpu_type": null
-        },
         "parameters": {
           "name": "odyssey",
           "url": "https://example.org/odyssey.txt"

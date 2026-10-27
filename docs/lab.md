@@ -73,14 +73,21 @@ the kernel is and ships them.
 1. Resolve the requested artifact into its graph ([Artifacts](artifacts.md#resolution)).
 2. Inspect each path once and compare an existing manifest with the request
    using `==`, definition agreement.
-3. Record commit drift and resource differences per node. Drift blocks only
-   with `strict_commit=True`; resource differences never block.
+3. Record drift and resource differences per node. A node drifts when the
+   declaring commit at the root of the manifest at its own path is not the
+   commit declaring now, `lab._head()`, so declaring a new artifact over
+   dependencies declared at an older commit reports drift on each of their
+   rows. Drift blocks only with `strict_commit=True`; resource differences
+   never block. A node carrying `allocated_resources=None`, a dependency of a
+   loaded artifact, requests no resources: its row reports the stored ones,
+   and nothing is compared or written for them.
 4. Collect one row per path with its state, drift and differences. A preview
    returns these in a report and writes nothing, not even a folder.
 5. With `commit=True`, refuse before writing if any row blocks. Otherwise write
-   the manifests of `new` artifacts in dependency order, and rewrite an
-   existing matching manifest whose resources differ with the requested
-   resources, its definition and commit kept. Against the mounted volume,
+   the manifests of `new` artifacts in dependency order, each stamped with
+   `lab._head()` as its `declaring_commit` (and `Resources()` when it requests
+   none), and rewrite an existing matching manifest whose resources differ
+   with the requested resources, its definition and declaring commit kept. Against the mounted volume,
    reload before inspecting and commit after writing.
 6. Return a report recording created and updated manifests and the resulting
    states, reusing the resolved graph.
@@ -113,28 +120,28 @@ flowchart TD
   C -->|no| OUT["Print and return the report"]
   C -->|yes| BL{"Any blockers?<br/>conflict, undeclared, or drift under strict_commit"}
   BL -->|yes| ERR["raise DeclarationError(report)"]
-  BL -->|no| W["Write missing manifests, update changed resources<br/>storage.write_manifest(to_manifest())<br/>model_copy(update={allocated_resources})"]
+  BL -->|no| W["Write missing manifests, update changed resources<br/>storage.write_manifest(to_manifest())<br/>new: model_copy(update={declaring_commit: _head()})<br/>changed: model_copy(update={allocated_resources})"]
   W --> RI["Re-inspect written rows<br/>_inspect()"]
   RI --> CP["Copy the notebook if it created a Training<br/>runs/run_id/declare-uid.ipynb"]
   CP --> SV["Commit the mount (inside a container only)<br/>save()"]
   SV --> OUT
 ```
 
-Example: `sources/odyssey` and `tokenizers/bpe-1000-feeeeefa90` are declared
-and built (the tokenizer's manifest recorded an older commit than `HEAD`); the
-`TokenizedSource` built from them is not yet declared.
+Example: `sources/odyssey` and `tokenizers/bpe-1000-feeeeefa90` were declared
+at commit `a1b2c3d` and built; the `TokenizedSource` built from them is not
+yet declared, and the notebook now runs at `e4f5a6b`.
 
 ```python
 >>> report = lab.declare(tokens)   # preview
-sources/odyssey                                done
+sources/odyssey                                done   (drift: a1b2c3d -> e4f5a6b)
 tokenizers/bpe-1000-feeeeefa90                 done   (drift: a1b2c3d -> e4f5a6b)
 tokenized/bpe-1000-feeeeefa90/odyssey          new
 
 2 done, 1 new
 ok -- 1 to declare
 
->>> lab.declare(tokens, commit=True)   # same rows; the new one gets written
-sources/odyssey                                done
+>>> lab.declare(tokens, commit=True)   # same rows; the new one gets written at e4f5a6b
+sources/odyssey                                done   (drift: a1b2c3d -> e4f5a6b)
 tokenizers/bpe-1000-feeeeefa90                 done   (drift: a1b2c3d -> e4f5a6b)
 tokenized/bpe-1000-feeeeefa90/odyssey          done   (created)
 
@@ -143,7 +150,8 @@ tokenized/bpe-1000-feeeeefa90/odyssey          done   (created)
 ```
 
 `DeclarationReport` is data: its `rows` hold the path, state, drift,
-differences, the stored and requested commit and resources as pairs, and
+differences, the stored declaring commit beside the one declaring now
+(`declaring_commit`), the stored and requested resources as a pair, and
 whether a manifest was created or updated; counts and the verdict are derived
 from them. A blocked commit raises `DeclarationError` with the report
 attached. A graph that is structurally invalid raises before any report
@@ -201,7 +209,7 @@ never resolves a whole pipeline.
 
 A leg's `model.pt` holds the model state, and the leg's `model` parameter
 describes the architecture, so the network can be rebuilt in a notebook. A
-notebook may have no GPU, so the example moves the model to the CPU.
+notebook may have no GPU, so the example builds it on the CPU.
 
 ```python
 import torch
@@ -211,8 +219,7 @@ from config import STORAGE
 leg = Artifact.load("runs/<run_id>/pretraining/<uid>")
 state = torch.load(leg.paths(STORAGE)["model"], map_location="cpu")
 
-# a new model, built and validated again, with only the device changed
-network = type(leg.model)(**dict(leg.model) | {"device": "cpu"}).build()
+network = leg.model.build(torch.device("cpu"))
 network.load_state_dict(state["model"])
 ```
 

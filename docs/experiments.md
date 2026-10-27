@@ -43,7 +43,7 @@ The transformer leg is in both experiments and is trained once.
 
 A tag cannot be part of an artifact's identity. If it were, adding a tag would
 change an artifact's path and the sharing above would break. Tags sit beside
-the definition the way `commit` and `allocated_resources` do: recorded, and
+the definition the way `declaring_commit` and `allocated_resources` do: recorded, and
 excluded from identity.
 
 ## Where the closest thing lives today

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import regex as re
+from pydantic import PrivateAttr
 
 from artifacts import tokenizers
 from artifacts.core.artifact import _digest
@@ -53,12 +54,11 @@ def mergebpairs(pretoken: list, pair: tuple, new_index: int, track_diff: bool = 
             one entry of ``pair`` itself for every occurrence merged. Empty when
             ``track_diff`` is False.
     """
+    to_add: list[tuple[int, int]] = []
+    to_remove: list[tuple[int, int]] = []
     if not pair:
-        return pretoken
+        return pretoken, to_add, to_remove
     else:
-        if track_diff:
-            to_add = []
-            to_remove = []
         i = 0
         while i < len(pretoken):
             if (
@@ -82,10 +82,7 @@ def mergebpairs(pretoken: list, pair: tuple, new_index: int, track_diff: bool = 
                     to_remove.append(pair)
                 pretoken = left + [new_index] + right
             i += 1
-        if track_diff:
-            return pretoken, to_add, to_remove
-        else:
-            return pretoken
+        return pretoken, to_add, to_remove
 
 
 def _read_state(data: dict) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
@@ -122,22 +119,19 @@ class Tokenizer(tokenizers.Tokenizer):
 
     # -- the trained state -------------------------------------------------
     #
-    # Held on the instance and deliberately not a field: it isn't what
-    # identifies this tokenizer, so it stays out of ==, hash, and the manifest.
-    # object.__setattr__ because the model is frozen -- but by the time
-    # this runs, `self` is the object Artifact.bind read from the stored
-    # manifest, not the one bind() was called on. Nobody else holds a
-    # reference to it yet, so mutating it here is invisible to everyone but
-    # the caller about to receive it back.
+    # Private attributes, not fields: they don't identify this tokenizer, so
+    # they stay out of ==, hash and the manifest. Only _load sets them, on the
+    # fresh object bind read from the stored manifest.
+    _vocab: dict[int, bytes] = PrivateAttr()
+    _merges: list[tuple[bytes, bytes]] = PrivateAttr()
+    _bytes_to_id: dict[bytes, int] = PrivateAttr()
+    _merge_dict: dict[tuple[int, ...], int] = PrivateAttr()
+    _cache: dict[str, list[int]] = PrivateAttr()  # pretoken -> its ids
 
     def _load(self, root: Path) -> None:
         """Artifact._load's hook: read this artifact's own tokenizer.json --
         the state encode()/decode() run on -- and check it against what this
         artifact declares. The inverse of TokenizerJob.save.
-
-        object.__setattr__ because the model is frozen -- see the comment
-        above this method for why that's safe: `self` here is the object bind
-        read from the manifest, not the artifact anyone else is holding.
         """
         data = json.loads(self.paths(root)["tokenizer"].read_text())
         if tuple(data["special_tokens"]) != self.special_tokens:
@@ -151,20 +145,13 @@ class Tokenizer(tokenizers.Tokenizer):
             )
         vocab, merges = _read_state(data)
         bytes_to_id = {token: idx for idx, token in vocab.items()}
-        object.__setattr__(self, "_vocab", vocab)
-        object.__setattr__(self, "_merges", merges)
-        object.__setattr__(self, "_bytes_to_id", bytes_to_id)
-        object.__setattr__(
-            self,
-            "_merge_dict",
-            {
-                tuple(bytes_to_id[bytes(b)] for b in merge): bytes_to_id[
-                    b"".join(merge)
-                ]
-                for merge in merges
-            },
-        )
-        object.__setattr__(self, "_cache", {})  # pretoken:str -> list[int]
+        self._vocab = vocab
+        self._merges = merges
+        self._bytes_to_id = bytes_to_id
+        self._merge_dict = {
+            tuple(bytes_to_id[bytes(b)] for b in merge): bytes_to_id[b"".join(merge)] for merge in merges
+        }
+        self._cache = {}
 
     @property
     def bound(self) -> bool:
@@ -212,10 +199,6 @@ class Tokenizer(tokenizers.Tokenizer):
                     ids.extend(self.encode_pretoken(pretoken))
         return ids
 
-    def encode_iterable(self, iterable):
-        for item in iterable:
-            yield from self.encode(item)
-
     def encode_pass(self, ids: list[int]):
         min_index = float("inf")
         next_merge = None
@@ -233,7 +216,7 @@ class Tokenizer(tokenizers.Tokenizer):
         pretoken_l = [self._bytes_to_id[bytes([b])] for b in pretoken.encode("utf-8")]
         next_merge = self.encode_pass(pretoken_l)
         while next_merge:
-            pretoken_l = mergebpairs(pretoken_l, *next_merge, track_diff=False)
+            pretoken_l, _, _ = mergebpairs(pretoken_l, *next_merge, track_diff=False)
             next_merge = self.encode_pass(pretoken_l)
         self._cache[pretoken] = pretoken_l
         return pretoken_l

@@ -29,14 +29,14 @@ function paramValue(value) {
   return JSON.stringify(value, null, expandedParams ? 2 : 0);
 }
 
-// Type, then one row each for the manifest's commit and allocated
+// Type, then one row each for the manifest's declaring commit and allocated
 // resources and its own parameters, and one link per direct dependency.
 // The rows are the manifest as the disk holds it; a dependency is just its
 // artifact_path (the state map's `depends_on`), so drilling further is a
 // click to that artifact's own page rather than the whole tree being
 // dumped on this one.
 function summary(entry, manifest) {
-  const { artifact, parameters, ...about } = manifest; // about: commit, allocated_resources
+  const { artifact, parameters, ...about } = manifest; // about: declaring_commit, allocated_resources
   const params = [...Object.entries(about), ...Object.entries(parameters || {})];
   const deps = entry.depends_on || [];
   const nested = params.some(([, value]) => value !== null && typeof value === "object");

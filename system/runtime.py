@@ -60,7 +60,7 @@ class Worker:
 
     artifact_path: str
     call_id: str
-    log: logging.LoggerAdapter
+    log: logging.Logger | logging.LoggerAdapter
     confirm_lease: Callable[..., None]
     progress: dict
 

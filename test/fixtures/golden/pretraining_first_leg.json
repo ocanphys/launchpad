@@ -1,6 +1,6 @@
 {
   "artifact": "artifacts.stages.pretraining.Pretraining",
-  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "declaring_commit": "0123456789abcdef0123456789abcdef01234567",
   "allocated_resources": {
     "cpu": null,
     "gpu_count": 1,
@@ -17,7 +17,6 @@
       "class": "models.transformer.Transformer",
       "d_ff": 256,
       "d_model": 128,
-      "device": "cuda",
       "dtype": "torch.float32",
       "num_heads": 16,
       "num_layers": 4,
@@ -53,33 +52,15 @@
   "dependencies": {
     "dataset": {
       "artifact": "artifacts.mappeddataset.MappedDataSet",
-      "commit": "0123456789abcdef0123456789abcdef01234567",
-      "allocated_resources": {
-        "cpu": null,
-        "gpu_count": null,
-        "gpu_type": null
-      },
       "parameters": {},
       "dependencies": {
         "train_set": [
           {
             "artifact": "artifacts.tokenized.TokenizedSource",
-            "commit": "0123456789abcdef0123456789abcdef01234567",
-            "allocated_resources": {
-              "cpu": null,
-              "gpu_count": null,
-              "gpu_type": null
-            },
             "parameters": {},
             "dependencies": {
               "source": {
                 "artifact": "artifacts.sources.SourceURL",
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-                "allocated_resources": {
-                  "cpu": null,
-                  "gpu_count": null,
-                  "gpu_type": null
-                },
                 "parameters": {
                   "name": "odyssey",
                   "url": "https://example.org/odyssey.txt"
@@ -88,12 +69,6 @@
               },
               "tokenizer": {
                 "artifact": "artifacts.tokenizers.bpe.Tokenizer",
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-                "allocated_resources": {
-                  "cpu": 4.0,
-                  "gpu_count": null,
-                  "gpu_type": null
-                },
                 "parameters": {
                   "special_tokens": [
                     "<|endoftext|>",
@@ -105,12 +80,6 @@
                   "sources": [
                     {
                       "artifact": "artifacts.sources.SourceURL",
-                      "commit": "0123456789abcdef0123456789abcdef01234567",
-                      "allocated_resources": {
-                        "cpu": null,
-                        "gpu_count": null,
-                        "gpu_type": null
-                      },
                       "parameters": {
                         "name": "iliad",
                         "url": "https://example.org/iliad.txt.gz"
@@ -119,12 +88,6 @@
                     },
                     {
                       "artifact": "artifacts.sources.SourceURL",
-                      "commit": "0123456789abcdef0123456789abcdef01234567",
-                      "allocated_resources": {
-                        "cpu": null,
-                        "gpu_count": null,
-                        "gpu_type": null
-                      },
                       "parameters": {
                         "name": "odyssey",
                         "url": "https://example.org/odyssey.txt"
@@ -138,22 +101,10 @@
           },
           {
             "artifact": "artifacts.tokenized.TokenizedSource",
-            "commit": "0123456789abcdef0123456789abcdef01234567",
-            "allocated_resources": {
-              "cpu": null,
-              "gpu_count": null,
-              "gpu_type": null
-            },
             "parameters": {},
             "dependencies": {
               "source": {
                 "artifact": "artifacts.sources.SourceURL",
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-                "allocated_resources": {
-                  "cpu": null,
-                  "gpu_count": null,
-                  "gpu_type": null
-                },
                 "parameters": {
                   "name": "iliad",
                   "url": "https://example.org/iliad.txt.gz"
@@ -162,12 +113,6 @@
               },
               "tokenizer": {
                 "artifact": "artifacts.tokenizers.bpe.Tokenizer",
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-                "allocated_resources": {
-                  "cpu": 4.0,
-                  "gpu_count": null,
-                  "gpu_type": null
-                },
                 "parameters": {
                   "special_tokens": [
                     "<|endoftext|>",
@@ -179,12 +124,6 @@
                   "sources": [
                     {
                       "artifact": "artifacts.sources.SourceURL",
-                      "commit": "0123456789abcdef0123456789abcdef01234567",
-                      "allocated_resources": {
-                        "cpu": null,
-                        "gpu_count": null,
-                        "gpu_type": null
-                      },
                       "parameters": {
                         "name": "iliad",
                         "url": "https://example.org/iliad.txt.gz"
@@ -193,12 +132,6 @@
                     },
                     {
                       "artifact": "artifacts.sources.SourceURL",
-                      "commit": "0123456789abcdef0123456789abcdef01234567",
-                      "allocated_resources": {
-                        "cpu": null,
-                        "gpu_count": null,
-                        "gpu_type": null
-                      },
                       "parameters": {
                         "name": "odyssey",
                         "url": "https://example.org/odyssey.txt"
@@ -214,22 +147,10 @@
         "valid_set": [
           {
             "artifact": "artifacts.tokenized.TokenizedSource",
-            "commit": "0123456789abcdef0123456789abcdef01234567",
-            "allocated_resources": {
-              "cpu": null,
-              "gpu_count": null,
-              "gpu_type": null
-            },
             "parameters": {},
             "dependencies": {
               "source": {
                 "artifact": "artifacts.sources.SourceURL",
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-                "allocated_resources": {
-                  "cpu": null,
-                  "gpu_count": null,
-                  "gpu_type": null
-                },
                 "parameters": {
                   "name": "iliad",
                   "url": "https://example.org/iliad.txt.gz"
@@ -238,12 +159,6 @@
               },
               "tokenizer": {
                 "artifact": "artifacts.tokenizers.bpe.Tokenizer",
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-                "allocated_resources": {
-                  "cpu": 4.0,
-                  "gpu_count": null,
-                  "gpu_type": null
-                },
                 "parameters": {
                   "special_tokens": [
                     "<|endoftext|>",
@@ -255,12 +170,6 @@
                   "sources": [
                     {
                       "artifact": "artifacts.sources.SourceURL",
-                      "commit": "0123456789abcdef0123456789abcdef01234567",
-                      "allocated_resources": {
-                        "cpu": null,
-                        "gpu_count": null,
-                        "gpu_type": null
-                      },
                       "parameters": {
                         "name": "iliad",
                         "url": "https://example.org/iliad.txt.gz"
@@ -269,12 +178,6 @@
                     },
                     {
                       "artifact": "artifacts.sources.SourceURL",
-                      "commit": "0123456789abcdef0123456789abcdef01234567",
-                      "allocated_resources": {
-                        "cpu": null,
-                        "gpu_count": null,
-                        "gpu_type": null
-                      },
                       "parameters": {
                         "name": "odyssey",
                         "url": "https://example.org/odyssey.txt"

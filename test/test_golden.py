@@ -26,21 +26,21 @@ from models.transformer import Transformer
 from models.transformerV2 import Transformer as TransformerV2
 
 GOLDEN = Path(__file__).parent / "fixtures" / "golden"
-COMMIT = "0123456789abcdef0123456789abcdef01234567"  # every node sets it, so no byte depends on HEAD
+COMMIT = "0123456789abcdef0123456789abcdef01234567"  # what lab.declare would stamp on each, fixed
 
-ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt", commit=COMMIT)
-ILIAD = SourceURL(name="iliad", url="https://example.org/iliad.txt.gz", commit=COMMIT)
+ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt", declaring_commit=COMMIT)
+ILIAD = SourceURL(name="iliad", url="https://example.org/iliad.txt.gz", declaring_commit=COMMIT)
 BPE = Tokenizer(
     vocab_size=1000,
     special_tokens=("<|endoftext|>", "<pad>"),
     sources=(ODYSSEY, ILIAD),
-    commit=COMMIT,
+    declaring_commit=COMMIT,
     allocated_resources=Resources(cpu=4),
 )
-TOKENS_ODYSSEY = TokenizedSource(tokenizer=BPE, source=ODYSSEY, commit=COMMIT)
-TOKENS_ILIAD = TokenizedSource(tokenizer=BPE, source=ILIAD, commit=COMMIT)
-DATASET = DataSet(train_set=(TOKENS_ODYSSEY, TOKENS_ILIAD), valid_set=(TOKENS_ILIAD,), commit=COMMIT)
-MAPPED = MappedDataSet(train_set=(TOKENS_ODYSSEY, TOKENS_ILIAD), valid_set=(TOKENS_ILIAD,), commit=COMMIT)
+TOKENS_ODYSSEY = TokenizedSource(tokenizer=BPE, source=ODYSSEY, declaring_commit=COMMIT)
+TOKENS_ILIAD = TokenizedSource(tokenizer=BPE, source=ILIAD, declaring_commit=COMMIT)
+DATASET = DataSet(train_set=(TOKENS_ODYSSEY, TOKENS_ILIAD), valid_set=(TOKENS_ILIAD,), declaring_commit=COMMIT)
+MAPPED = MappedDataSet(train_set=(TOKENS_ODYSSEY, TOKENS_ILIAD), valid_set=(TOKENS_ILIAD,), declaring_commit=COMMIT)
 
 TRAINING = TrainingParameters(
     total_steps=1000,
@@ -61,7 +61,7 @@ FIRST_LEG = Pretraining(
     model=Transformer(**TRANSFORMER_FIELDS),
     training_parameters=TRAINING,
     loop_config=LOOP,
-    commit=COMMIT,
+    declaring_commit=COMMIT,
     allocated_resources=Resources(gpu_type="T4", gpu_count=1),
 )
 
@@ -69,7 +69,7 @@ CASES: dict[str, Artifact] = {
     "source": ODYSSEY,
     "bpe_tokenizer": BPE,
     "template_tokenizer": TemplateTokenizer(
-        vocab_size=500, special_tokens=("<unk>",), sources=(ODYSSEY,), commit=COMMIT
+        vocab_size=500, special_tokens=("<unk>",), sources=(ODYSSEY,), declaring_commit=COMMIT
     ),
     "tokenized_source": TOKENS_ODYSSEY,
     "dataset": DATASET,
@@ -82,7 +82,7 @@ CASES: dict[str, Artifact] = {
         starting_checkpoint=FIRST_LEG,
         training_parameters=TRAINING,
         loop_config=LOOP,
-        commit=COMMIT,
+        declaring_commit=COMMIT,
     ),
     "pretraining_transformerV2": Pretraining(
         run_id="GOLDEN-V2",
@@ -90,7 +90,7 @@ CASES: dict[str, Artifact] = {
         model=TransformerV2(**TRANSFORMER_FIELDS),
         training_parameters=TRAINING,
         loop_config=LOOP,
-        commit=COMMIT,
+        declaring_commit=COMMIT,
     ),
     "pretraining_mamba": Pretraining(
         run_id="GOLDEN-MAMBA",
@@ -98,7 +98,7 @@ CASES: dict[str, Artifact] = {
         model=Mamba(vocab_size=1000, sequence_length=32, num_layers=2, d_model=64),
         training_parameters=TRAINING,
         loop_config=LOOP,
-        commit=COMMIT,
+        declaring_commit=COMMIT,
     ),
 }
 

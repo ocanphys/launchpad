@@ -192,7 +192,7 @@ expired grace or a container killed hard reaches the row on the next poll.
 ## The artifact page
 
 `#/artifact/<path>` shows the artifact's manifest as the server's mount holds
-it: its type, then a row each for its commit, its allocated resources and its
+it: its type, then a row each for its declaring commit, its allocated resources and its
 own parameters, and one link per direct dependency. Dependencies are named, not
 inlined: clicking one navigates to its page. A path with no entry is a message,
 not an error.

@@ -1,7 +1,7 @@
 # Manifests
 
 Every declared artifact owns `root / artifact_path / "manifest.json"`: a
-self-contained definition with its dependencies' manifests embedded
+self-contained definition with its dependencies' definitions embedded
 recursively. Embedding is what lets one manifest be decoded and compared on its
 own, since definition equality recurses through dependencies; an artifact's
 whole graph rebuilds from its one manifest, without loading any outputs. A
@@ -10,15 +10,13 @@ tokenizer trained on one source:
 ```json
 {
   "artifact": "artifacts.tokenizers.bpe.Tokenizer",
-  "commit": "<defining-revision>",
+  "declaring_commit": "<declaring-revision>",
   "allocated_resources": {"cpu": null, "gpu_count": null, "gpu_type": null},
   "parameters": {"special_tokens": ["<pad>"], "vocab_size": 1000},
   "dependencies": {
     "sources": [
       {
         "artifact": "artifacts.sources.SourceURL",
-        "commit": "<defining-revision>",
-        "allocated_resources": {"cpu": null, "gpu_count": null, "gpu_type": null},
         "parameters": {"name": "odyssey", "url": "https://example.org/odyssey.txt"},
         "dependencies": {}
       }
@@ -30,10 +28,12 @@ tokenizer trained on one source:
 `"artifact"` is the concrete class's dotted path. `parameters` and
 `dependencies` partition that class's fields by annotation
 ([Artifacts](artifacts.md#dependencies-and-parameters)), so `sources=(source,)`
-becomes an array of manifests while `special_tokens`, also an array, stays a
-parameter. A dependency's value is a manifest, an array of manifests, or
-`null`. Declaration also writes the source's manifest at its own
-`sources/odyssey/manifest.json`.
+becomes an array of definitions while `special_tokens`, also an array, stays a
+parameter. A dependency's value is an embedded definition, an array of them, or
+`null`. An embedded definition has three keys, `artifact`, `parameters` and
+`dependencies`: the recorded fields are at the root only
+([Recorded fields](#recorded-fields)). Declaration also writes the source's
+own manifest, with its own recorded fields, at `sources/odyssey/manifest.json`.
 
 ## Three modules
 
@@ -78,7 +78,8 @@ flowchart LR
 ## Canonical text
 
 The text is a pure function of the artifact, recorded fields included: the
-five top-level keys in the order above, every nested map sorted by key, `-0.0`
+five top-level keys in the order above (three in an embedded definition),
+every nested map sorted by key, `-0.0`
 written as `0.0` (it equals `0.0`, so it must encode equal), NaN and infinity
 refused (no other JSON reader accepts them), `indent=2`, UTF-8 unescaped, and a
 final newline. A set of dependencies is an array sorted by artifact path; a
@@ -89,9 +90,11 @@ Two invariants follow, and only these two:
 - **Round trip:** `from_manifest(to_manifest(a)) == a`, with the same path, and
   a decoded manifest re-encodes to exactly its own text.
 - **Equal artifacts have equal paths and equal definitions.** Two `==`
-  artifacts can still have different manifests, differing in `commit` or
-  `allocated_resources`, which `==` ignores and the manifest records. Nothing
-  compares manifest text to decide whether two definitions agree.
+  artifacts can still have different manifests, differing in
+  `declaring_commit` or `allocated_resources`, which `==` ignores and the
+  manifest records at its root. Their embedded definitions are identical
+  bytes in any parent. Nothing compares manifest text to decide whether two
+  definitions agree.
 
 There is no format version: one program reads and writes manifests, and a
 format change is migrated explicitly, every manifest in one pass, one script
@@ -134,7 +137,11 @@ reason: `to_manifest` encodes each one by calling itself.
 **Decoding.** `from_manifest` decodes each dependency into an instance first,
 from its own `"artifact"` key, then walks `"parameters"` once, bottom-up: every
 JSON array becomes a tuple, and every object carrying `"class"` becomes an
-instance of that class. Then it validates the artifact from those values. All
+instance of that class. Then it validates the artifact from those values,
+with `declaring_commit` and `allocated_resources` as the manifest records them:
+an absent key decodes as `None`. A root always has both keys, since
+`lab.declare` writes them, and an embedded definition never does, so one rule
+decodes both, and every dependency comes back with both `None`. All
 validators run, so a manifest that breaks an invariant (a vocabulary mismatch,
 say) cannot be loaded. A nested instance is not validated twice, so decoding a
 long run validates each node once.
@@ -154,7 +161,10 @@ Two things it never does, and why:
 **Memo.** An artifact is a pure function of its manifest, so decoding is
 memoizable. `memo` is one dict a caller keeps across calls: each distinct node
 is constructed once, so a run's legs, each embedding every leg before it,
-share their subtrees as single instances. Instances are frozen, so sharing is
+share their subtrees as single instances. An embedded definition and the same
+artifact's own manifest are different JSON, so they decode to different
+instances: the embedded one with `None` recorded fields, the own-path one with
+its stored values. Instances are frozen, so sharing is
 safe; the one thing a shared instance must not be is bound, which is why
 `bind` never passes a memo.
 
@@ -171,25 +181,35 @@ round-tripped by the tests instead.
 
 ## Recorded fields
 
-`commit` and `allocated_resources` are recorded with every artifact and
-excluded from identity and `==`.
+`declaring_commit` and `allocated_resources` are excluded from identity and
+`==`, and recorded once per artifact: at the root of its own manifest. A
+parent embeds its dependencies' definitions without them, and a dependency
+decoded from a parent has both `None`, meaning "recorded at its own path".
+Whatever needs them reads the artifact's own manifest: declaration loads each
+node from its path, the launcher and `run_job` load the artifact they run, and
+`bind` loads the stored artifact.
 
-New definitions capture the process's defining revision once per process: the
-HEAD hash, with `-dirty` when the working tree has uncommitted changes, since
-what ships is what is on disk; a container without git reads the revision baked
-into its image. Decoding always keeps the manifest's recorded value. Mixed
-revisions within a graph are allowed.
+`declaring_commit` is the commit of the process that declared the manifest.
+`lab.declare` stamps it on every manifest it creates, whatever the object in
+the notebook holds; a fresh object has `None`, since a request has no
+declaring commit until it is declared. The commit is the HEAD hash, with
+`-dirty` when the working tree has uncommitted changes, since what ships is
+what is on disk, read once per process. The lab container has no git, so it
+reads the revision baked into its image; declaring from a laptop runs
+`lab.declare` in such a container, built from the laptop's checkout, so the
+stamp is the laptop's commit. A graph's artifacts may be declared at different
+commits; [Lab](lab.md#declaration) reports that as drift.
 
-`commit` describes the definition. It neither selects execution code nor proves
-which code produced the outputs: execution uses deployed code. Resources
-configure that execution; an unspecified dimension is recorded as `null`, and
-Modal supplies its platform default for it.
+`declaring_commit` describes the declaration. It neither selects execution
+code nor proves which code produced the outputs: execution uses deployed
+code, and the commit a job runs is not recorded. Resources configure that
+execution; an unspecified dimension is recorded as `null`, and Modal supplies
+its platform default for it.
 
-Once written, a manifest's definition and commit are immutable. A matching
-redeclaration keeps both; only its resources follow the latest committed
-declaration, since they configure the next execution and nothing else. The
-manifest at an artifact's own path is authoritative; an embedded copy in a
-parent's manifest cannot override it.
+Once written, a manifest's definition and declaring commit are immutable. A
+matching redeclaration keeps both; only its resources follow the latest
+committed declaration, since they configure the next execution and nothing
+else. The manifest at an artifact's own path is authoritative.
 
 ## Why
 
@@ -197,7 +217,8 @@ parent's manifest cannot override it.
 | --- | --- |
 | Fields alone for a param config of its annotated class | Its class can move or be renamed without migrating manifests, and the JSON reads as plain data. |
 | A class key only where a subclass stands, at any depth | Without it a subclass would be written as its base, silently; with it everywhere, renaming any param config would break every manifest. |
-| Dependency manifests embedded | A manifest decodes and compares on its own, without reading other folders. Long chains make large manifests, which `memo` keeps cheap to decode. |
+| Dependency definitions embedded | A manifest decodes and compares on its own, without reading other folders. Long chains make large manifests, which `memo` keeps cheap to decode. |
+| Recorded fields at the root only | An embedded copy carried the declaring process's commit, not the one its dependency was declared at, and repeated what that dependency's own manifest holds. Without them, an embedded definition is exactly a definition, and two equal dependencies embed as the same bytes in any parent. |
 | Codec and storage in separate modules | The codec stays a pure function of dicts, tested with no folder; one module owns the file layout, the path checks and their errors. |
 | Producer, optimizer and dtype as dotted strings | Declaring and resolving never import torch, numpy or a family's jobs; the worker resolves them. |
 

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from abc import abstractmethod
 from collections import Counter
 from dataclasses import dataclass
@@ -31,24 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from artifacts.core import manifest, storage
 from artifacts.core.locate import locate
-from config import LAB_COMMIT_ENV, get_git_commit
 
 if TYPE_CHECKING:
     # Type-only: job.py imports Artifact from here, so a real import would be
     # circular. job() needs only `producer` (a string) at runtime.
     from artifacts.core.job import Job
-
-
-@cache
-def _head() -> str:
-    """Returns the commit stamped on every artifact built in this process.
-
-    Cached, so one session cannot stamp two commits onto one tree; restart the
-    kernel to pick up new work. The lab container has no git binary and no
-    .git, so there the commit comes from LAB_COMMIT_ENV, which main.py bakes in.
-    """
-    override = os.environ.get(LAB_COMMIT_ENV)
-    return override if override else get_git_commit()
 
 
 def _digest(*parts: object) -> str:
@@ -144,8 +130,9 @@ class Artifact(BaseModel):
     the artifacts it is built from, and every other field is a parameter.
 
     `==` and `hash` compare the definition: class, parameters and
-    dependencies, recursively, never `commit` or `allocated_resources`, so an
-    artifact rebuilt from an older manifest is still the same artifact.
+    dependencies, recursively, never `declaring_commit` or
+    `allocated_resources`, so an artifact rebuilt from an older manifest is
+    still the same artifact.
 
         SourceURL(name="odyssey", url="https://example.org/odyssey.txt").artifact_path -> Path("sources/odyssey")
     """
@@ -153,8 +140,11 @@ class Artifact(BaseModel):
     model_config = STRICT
 
     # Neither of these says which artifact this is (manifest.RECORDED).
-    commit: str = Field(default_factory=_head, repr=False)
-    allocated_resources: Resources = Field(default_factory=Resources, repr=False)
+    # declaring_commit is None until lab.declare stamps it on write; both are
+    # None on a dependency decoded from a parent's manifest, which records them
+    # at its own path instead.
+    declaring_commit: str | None = Field(default=None, repr=False)
+    allocated_resources: Resources | None = Field(default_factory=Resources, repr=False)
 
     # The dotted path of the Job class that produces this artifact
     # ("artifacts.sources.jobs.SourceURLJob"), or None for an artifact nothing
@@ -245,7 +235,7 @@ class Artifact(BaseModel):
     def __eq__(self, other: object) -> bool:
         """Returns whether `other` is the same definition: class, parameters and dependencies.
 
-            SourceURL(name="a", url=u, commit="x") == SourceURL(name="a", url=u, commit="y") -> True
+            SourceURL(name="a", url=u, declaring_commit="x") == SourceURL(name="a", url=u, declaring_commit="y") -> True
         """
         return isinstance(other, Artifact) and self._definition() == other._definition()
 
@@ -269,8 +259,8 @@ class Artifact(BaseModel):
         ]
 
     def to_manifest(self) -> dict:
-        """Returns this artifact as a manifest dict: class, commit, resources,
-        own parameters, and a nested manifest per dependency.
+        """Returns this artifact as a manifest dict: class, declaring commit,
+        resources, own parameters, and a nested definition per dependency.
 
         It is what manifest.json at artifact_path holds, and from_manifest
         rebuilds the artifact from it alone (see artifacts.core.manifest).
@@ -350,14 +340,15 @@ class Artifact(BaseModel):
 
         The stored manifest is the authority on what lives at a path: a
         definition disagreeing with it raises rather than being handed someone
-        else's outputs, and the result carries the stored commit and resources.
+        else's outputs, and the result carries the stored declaring commit and
+        resources.
         The object bind is called on is never modified.
 
             bound = bpe.bind(root); bound.decode(bound.encode("hello")) -> "hello"
         """
         at = storage.root_of(root)
         stored = Artifact.load(self.artifact_path, at)
-        if stored != self:
+        if not isinstance(stored, type(self)) or stored != self:
             raise ValueError(
                 f"{self.artifact_path} holds a different definition -- bind what is "
                 f"declared there, or declare this one at its own path"

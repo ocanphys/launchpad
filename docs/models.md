@@ -17,15 +17,20 @@ declaring a leg stays cheap.
 | `vocab_size` | `Pretraining`, which refuses a model whose vocabulary is not its tokenizer's. |
 | `sequence_length` | The pretraining job, for the shape of every batch it draws. |
 | `dtype` | `build()`, as a dotted torch dtype (`"torch.float32"`) resolved on the worker; profiling reports it. |
-| `device` | The training job, which builds the model there and moves batches to it. |
 
 A subclass adds its own shapes as fields, with their constraints written on
 the fields (`num_layers: int = Field(gt=0)`), and implements two methods:
-`build()` returns the freshly initialized torch module, and `step_flops()`
+`build(device)` returns the freshly initialized torch module on `device`, and `step_flops()`
 returns an analytic count of one step's FLOPs, which `gpus/monitor.py` turns
 into MFU and the profiler reports. A value that breaks a constraint is refused
 when the model is built, at that line, with a `ValidationError` naming the
 field.
+
+The device is not a field. It is where a leg runs, not what it trains, so the
+training job picks it, `cuda` when there is a GPU and `cpu` otherwise, and
+passes it to `build` and to the GPU monitor; batches go to the same device.
+A leg has one path whichever device trains it, and the profiler builds on
+`cuda`.
 
 ## Which class a manifest names
 
@@ -41,12 +46,14 @@ The codec writes that key for any param config held in a field annotated with
 one of its base classes, at any depth, and reads it back; `Model` declares
 nothing for it. The import path is part of the stored format: moving or
 renaming an architecture class leaves every manifest that names it unreadable
-until a migration rewrites it.
+until a migration rewrites it. It is also part of a leg's identity, since
+`lineage_hash` digests the model as encoded ([Training](training.md#identity)),
+so that migration moves the legs as well.
 
 ## Adding an architecture
 
 Add a package under `models/` whose `__init__.py` defines a `Model` subclass:
-its fields and their constraints, `build()` importing torch inside it, and
+its fields and their constraints, `build(device)` importing torch inside it, and
 `step_flops()`. `Pretraining` needs no change, since it reads only the fields
 `Model` declares.
 

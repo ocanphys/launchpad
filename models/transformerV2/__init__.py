@@ -5,11 +5,14 @@ import so declaring an artifact never pays for it.
 
 from __future__ import annotations
 
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 from pydantic import Field, model_validator
 
 from artifacts.core.SGD import training
+
+if TYPE_CHECKING:
+    import torch
 
 
 class Transformer(training.Model):
@@ -32,8 +35,8 @@ class Transformer(training.Model):
             raise ValueError("d_model must be divisible by num_heads")
         return self
 
-    def build(self):
-        """Returns a freshly initialized TransformerLM on this model's device."""
+    def build(self, device: torch.device):
+        """Returns a freshly initialized TransformerLM on `device`."""
         import torch
 
         from artifacts.core.locate import locate
@@ -47,7 +50,7 @@ class Transformer(training.Model):
             d_ff=self.d_ff,
             num_heads=self.num_heads,
             rope_theta=self.rope_theta,
-            device=torch.device(self.device),
+            device=device,
             dtype=locate(self.dtype),
         )
 

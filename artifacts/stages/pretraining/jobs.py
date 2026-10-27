@@ -74,7 +74,7 @@ class PretrainJob(TrainingJob):
         # resume from initial model or most recent failsafe checkpoint.
         model, optimizer, step = self.resume(root, worker)
         steplog = StepLog(root, self.artifact.artifact_path.as_posix())
-        gpu_monitor = GpuMonitor(self.artifact.model, batch_size, gpu_check_every, step, worker)
+        gpu_monitor = GpuMonitor(self.artifact.model, self.device, batch_size, gpu_check_every, step, worker)
         dataset = self.dataset.bind(root)
         get_train_batch = dataset.train_batches(batch_size, sequence_length, seed)
         # optimization notes for data pipeline: drawing step + 1's batch

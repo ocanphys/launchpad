@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
-from pydantic import model_validator
+from pydantic import PrivateAttr, model_validator
 
 from artifacts.core.artifact import Artifact, _digest
 from artifacts.sources import Source
@@ -98,11 +98,12 @@ class DataSet(Artifact):
 
     # -- the bound view ------------------------------------------------------
 
+    _train_tokens: np.ndarray = PrivateAttr()
+    _valid_tokens: np.ndarray = PrivateAttr()
+
     def _load(self, root: Path) -> None:
         """Artifact._load's hook: one memmap per split over the bin its job
-        wrote. object.__setattr__ because the model is frozen -- `self`
-        here is the object Artifact.bind read from the stored manifest, never
-        the one bind() was called on."""
+        wrote, set on the fresh object bind read from the stored manifest."""
         import numpy as np  # local: only a process that binds pays for numpy
 
         for name, path in (
@@ -115,7 +116,7 @@ class DataSet(Artifact):
                 if path.stat().st_size
                 else np.empty(0, dtype=np.uint16)
             )
-            object.__setattr__(self, name, tokens)
+            setattr(self, name, tokens)
 
     @property
     def bound(self) -> bool:

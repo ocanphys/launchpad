@@ -52,16 +52,19 @@ class Pretraining(Training):
 
     @cached_property
     def lineage_hash(self) -> str:
-        """A readable short id for this leg's trajectory and ancestry.
-        The hash includes anything that can change the training trajectory.
+        """Returns a short id for this leg's trajectory and ancestry: the legs
+        before it, its data, and its model and training parameters exactly as
+        its manifest writes them, the model's class included.
+
+            FIRST_LEG.lineage_hash -> "69f057c312"  # the first leg in test/test_golden.py
         """
+        params = self.parameters()
         return _digest(
             self.starting_checkpoint.uid if self.starting_checkpoint else None,
             self.dataset.uid,
             self.tokenizer.uid,
-            type(self.model).__module__,
-            self.model.model_dump(),
-            self.training_parameters.model_dump(),
+            params["model"],
+            params["training_parameters"],
         )
 
     @property

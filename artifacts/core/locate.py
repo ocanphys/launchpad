@@ -27,7 +27,7 @@ def locate(path: str) -> Any:
             # else means a module along the way was found and failed on its
             # own terms, which must surface, not get silently treated as
             # "keep shrinking the prefix".
-            if exc.name == prefix or prefix.startswith(exc.name + "."):
+            if exc.name is not None and (exc.name == prefix or prefix.startswith(exc.name + ".")):
                 continue
             raise
         for attr in parts[split:]:

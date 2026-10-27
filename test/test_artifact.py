@@ -92,14 +92,16 @@ class ManifestTests(unittest.TestCase):
             vocab_size=1000,
             special_tokens=("<pad>",),
             sources=(ODYSSEY, ILIAD),
-            commit="old",
+            declaring_commit="old",
             allocated_resources=Resources(gpu_type="A100"),
         )
         rebuilt = Artifact.from_manifest(original.to_manifest())
         self.assertEqual(rebuilt, original)
-        self.assertEqual(rebuilt.commit, "old")
+        self.assertEqual(rebuilt.declaring_commit, "old")
         self.assertEqual(rebuilt.allocated_resources, Resources(gpu_type="A100"))
         self.assertFalse(rebuilt.bound)
+        # a dependency's recorded fields are at its own path, not in this manifest
+        self.assertEqual({(s.declaring_commit, s.allocated_resources) for s in rebuilt.sources}, {(None, None)})
 
     def test_a_shared_memo_decodes_a_shared_subtree_once(self):
         memo = {}
@@ -114,11 +116,13 @@ class ManifestTests(unittest.TestCase):
     def test_bytes_are_canonical(self):
         text = manifest_json(ODYSSEY.to_manifest())
         self.assertTrue(text.endswith("}\n"))
-        self.assertIn('\n  "commit": ', text)  # two-space indent
+        self.assertIn('\n  "declaring_commit": ', text)  # two-space indent
         self.assertEqual(
             list(json.loads(text)),
-            ["artifact", "commit", "allocated_resources", "parameters", "dependencies"],
+            ["artifact", "declaring_commit", "allocated_resources", "parameters", "dependencies"],
         )
+        [embedded] = tokenizer((ODYSSEY,)).to_manifest()["dependencies"]["sources"]
+        self.assertEqual(list(embedded), ["artifact", "parameters", "dependencies"])
         # Resources declares cpu, gpu_type, gpu_count; the file sorts them, so
         # reordering the dataclass cannot rewrite every manifest that has one.
         self.assertEqual(
@@ -249,15 +253,15 @@ class BindTests(unittest.TestCase):
     def test_bind_returns_the_stored_declaration_and_leaves_the_original(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            stored = SourceURL(name="odyssey", url=ODYSSEY.url, commit="old")
+            stored = SourceURL(name="odyssey", url=ODYSSEY.url, declaring_commit="old")
             declare(stored, root)
             build(stored, root)
 
             bound = ODYSSEY.bind(root)
             self.assertEqual(bound, ODYSSEY)
             self.assertIsNot(bound, ODYSSEY)
-            self.assertEqual(bound.commit, "old")  # the manifest is the authority
-            self.assertNotEqual(ODYSSEY.commit, "old")
+            self.assertEqual(bound.declaring_commit, "old")  # the manifest is the authority
+            self.assertIsNone(ODYSSEY.declaring_commit)
 
     def test_bind_refuses_a_definition_the_path_does_not_hold(self):
         with TemporaryDirectory() as directory:

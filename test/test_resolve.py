@@ -57,8 +57,8 @@ class ResolveTests(unittest.TestCase):
         )
 
     def test_a_shared_dependency_resolves_once_keeping_the_first_object(self):
-        direct = SourceURL(name="odyssey", url=ODYSSEY.url, commit="direct")
-        nested = SourceURL(name="odyssey", url=ODYSSEY.url, commit="nested")
+        direct = SourceURL(name="odyssey", url=ODYSSEY.url, declaring_commit="direct")
+        nested = SourceURL(name="odyssey", url=ODYSSEY.url, declaring_commit="nested")
         tokens = TokenizedSource(tokenizer=tokenizer(nested), source=direct)
         sources = [a for a in resolve(tokens) if isinstance(a, Source)]
         self.assertEqual(len(sources), 1)

@@ -138,6 +138,7 @@ def attempt_launch(artifact_path: str, run_job, root: Path = STORAGE) -> tuple[b
     if grant:
         log_call(grant["call_id"]).info(f"{artifact_path}: stale lease dropped by a new launch")
     leases.pop(artifact_path, None)
+    assert artifact.allocated_resources is not None  # a manifest at its own path records them
     options = resource_options(artifact.allocated_resources)
     fn = run_job.with_options(**options) if options else run_job
     call = fn.spawn(artifact_path)

@@ -5,6 +5,7 @@ annotates `tokenizer: Tokenizer` and never names a family.
 """
 
 from abc import abstractmethod
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from artifacts.core.artifact import Artifact
@@ -25,3 +26,12 @@ class Tokenizer(Artifact):
     @abstractmethod
     def decode(self, ids: list[int]) -> str:
         """The text `ids` spell; raises unless bound."""
+
+    def encode_iterable(self, texts: Iterable[str]) -> Iterator[int]:
+        """Returns the ids of each text in turn, encoding one at a time, so a
+        source of any size is never held whole.
+
+            list(bound.encode_iterable(["hello", " world"])) -> bound.encode("hello") + bound.encode(" world")
+        """
+        for text in texts:
+            yield from self.encode(text)

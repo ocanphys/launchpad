@@ -35,8 +35,8 @@ flowchart TD
 
 Logging and the heartbeat start before the worker touches the mount, so a
 failure in its own reload is still the call's first logged row rather than
-silence. The worker reads the manifest at its own path, which is authoritative
-over any copy embedded in a parent, runs the job, commits its writes whatever
+silence. The worker reads the manifest at its own path, the only one that
+records the artifact's declaring commit and resources, runs the job, commits its writes whatever
 the outcome, and reports one of three endings: `done`, `failed` or
 `lease lost`. A cancel arrives as a lost lease, which is what it is: the
 launcher took the artifact away.

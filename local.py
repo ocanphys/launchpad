@@ -5,7 +5,7 @@
     report = declare_on_volume(pretraining, commit=True)  # publish
 
     modal run local.py::scan_volume                       # every manifest, reread
-    modal run local.py::canonicalize_manifests [--apply]  # int cpus written as floats
+    modal run local.py::migrate_identity [--apply]        # the identity change, once
 
 The volume's mount exists only inside a container, so each of these is an
 ephemeral Modal app that mounts the volume, runs this checkout's code there,
@@ -26,7 +26,7 @@ app = modal.App("launchpad-local")
 # and with it `main`, which the worker image does not carry.
 @app.function(
     image=main.worker_image.add_local_python_source("lab"),
-    volumes={main.STORAGE: main.volume},
+    volumes={main.STORAGE.as_posix(): main.volume},
     serialized=True,
 )
 def _declare(artifact: Artifact, **options) -> DeclarationReport:
@@ -61,7 +61,7 @@ def declare_on_volume(
 
 @app.function(
     image=main.worker_image.add_local_python_source("migrations"),
-    volumes={main.STORAGE: main.volume},
+    volumes={main.STORAGE.as_posix(): main.volume},
     serialized=True,
 )
 def _scan() -> tuple[int, list[str]]:
@@ -89,36 +89,57 @@ def scan_volume() -> None:
 
 @app.function(
     image=main.worker_image.add_local_python_source("migrations"),
-    volumes={main.STORAGE: main.volume},
+    volumes={main.STORAGE.as_posix(): main.volume},
     serialized=True,
 )
-def _canonicalize(apply: bool) -> list[str]:
-    from config import STORAGE
-    from launcher.state import volume
-    from migrations.cpu_floats import plan
+def _migrate_identity(apply: bool) -> dict[str, str]:
+    import json
+    import time
 
-    planned = plan(STORAGE)
+    from config import STORAGE
+    from launcher.state import is_active, is_starting, volume
+    from migrations import identity
+    from system.lease_protocol import beats, call_history, leases
+
+    volume.reload()
+    now = time.time()
+    running = [
+        path
+        for path, grant in leases.items()
+        if is_active(grant, beat := beats.get(grant["call_id"]), now) or is_starting(grant, beat, now)
+    ]
+    if running:
+        raise RuntimeError(f"calls are running, so nothing is migrated: {running}")
+    planned = identity.plan(STORAGE)
     if apply:
-        for path, text in planned.items():
-            path.write_text(text)
+        identity.apply(STORAGE, planned)
+        moved = identity.moves(planned)
+        for old, new in moved.items():
+            for keyed in (call_history, leases):
+                if old in keyed:
+                    keyed.put(new, keyed.pop(old))
+        record = STORAGE / "migrations" / "identity.plan.json"
+        record.parent.mkdir(exist_ok=True)
+        record.write_text(json.dumps(moved, indent=2) + "\n")
         volume.commit()
-    return [path.parent.relative_to(STORAGE).as_posix() for path in planned]
+    return {folder.as_posix(): artifact.artifact_path.as_posix() for folder, artifact in planned.items()}
 
 
 @app.local_entrypoint()
-def canonicalize_manifests(apply: bool = False) -> None:
-    """Prints the manifests `migrations.cpu_floats` would rewrite, and with
-    `--apply` rewrites them; refuses everything if any manifest differs in
-    more than an int cpu.
+def migrate_identity(apply: bool = False) -> None:
+    """Prints every manifest `migrations.identity` rewrites, with its old and
+    new path when the folder moves, and with `--apply` moves and rewrites them.
+    Refuses everything while a call is running, or if any manifest would not
+    decode, collide or land on a taken path.
 
-        $ modal run local.py::canonicalize_manifests
-        tokenizers/bpe-800-f90570d566
-        32 manifests to rewrite (dry run; --apply to write)
+        $ modal run local.py::migrate_identity
+        runs/GOLDEN/pretraining/0-1000-639552a92c -> runs/GOLDEN/pretraining/0-1000-69f057c312
+        sources/odyssey
+        ...
+        11 manifests, 4 of them moving (dry run; --apply to write)
     """
-    folders = _canonicalize.remote(apply)
-    for folder in folders:
-        print(folder)
-    if apply:
-        print(f"{len(folders)} manifests rewritten; now run modal run local.py::scan_volume")
-    else:
-        print(f"{len(folders)} manifests to rewrite (dry run; --apply to write)")
+    planned = _migrate_identity.remote(apply)
+    for old, new in planned.items():
+        print(old if old == new else f"{old} -> {new}")
+    summary = f"{len(planned)} manifests, {sum(old != new for old, new in planned.items())} of them moving"
+    print(f"{summary}: written; now run modal run local.py::scan_volume" if apply else f"{summary} (dry run; --apply to write)")

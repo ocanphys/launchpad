@@ -123,7 +123,7 @@ STATE = {
 # dependency manifests nested under `dependencies`.
 MANIFEST = {
     "artifact": "artifacts.stages.pretraining.Pretraining",
-    "commit": "a299cc8",
+    "declaring_commit": "a299cc8",
     "allocated_resources": {"cpu": None, "gpu_type": "A100", "gpu_count": 1},
     "parameters": {"run_id": "toy"},
 }

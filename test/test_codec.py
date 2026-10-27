@@ -132,7 +132,7 @@ REALS = st.builds(
 
 
 def plain(shapes: Shapes, **dependencies) -> Plain:
-    return Plain(shapes=shapes, commit="c", **dependencies)
+    return Plain(shapes=shapes, declaring_commit="c", **dependencies)
 
 
 def reread(artifact: Artifact) -> tuple[Artifact, str]:
@@ -230,7 +230,7 @@ SHAPE = Shapes(leaf=LEAF, many=(1.0,), pair=(1, "a"), leaves=())
 
 
 def test_a_recorded_field_changes_the_manifest_but_not_the_definition():
-    first, second = plain(SHAPE), Plain(shapes=SHAPE, commit="d", allocated_resources=Resources(cpu=4))
+    first, second = plain(SHAPE), Plain(shapes=SHAPE, declaring_commit="d", allocated_resources=Resources(cpu=4))
     assert first == second and hash(first) == hash(second)
     assert first.artifact_path == second.artifact_path
     assert first.to_manifest() != second.to_manifest()
@@ -276,7 +276,7 @@ def test_a_shapes_value_strict_validation_would_have_to_convert_is_refused(field
 
 def test_a_dependency_of_the_wrong_type_is_refused():
     with pytest.raises(ValidationError, match="one"):
-        plain(SHAPE, one=Drawing(commit="c"))
+        plain(SHAPE, one=Drawing(declaring_commit="c"))
     with pytest.raises(ValidationError, match="sequence"):
         plain(SHAPE, sequence=[plain(SHAPE)])
 
@@ -284,7 +284,7 @@ def test_a_dependency_of_the_wrong_type_is_refused():
 def test_a_set_dependency_takes_any_iterable_and_keeps_one_of_two_commit_only_twins():
     other = plain(Shapes(**dict(SHAPE) | {"many": (2.0,)}))
     assert plain(SHAPE, group=[other]).group == frozenset({other})
-    assert plain(SHAPE, group=(other, Plain(shapes=other.shapes, commit="d"))).group == frozenset({other})
+    assert plain(SHAPE, group=(other, Plain(shapes=other.shapes, declaring_commit="d"))).group == frozenset({other})
 
 
 # Refused manifests
@@ -390,7 +390,7 @@ class Drawing(Artifact):
 
 @pytest.mark.parametrize("shape", [Square(sides=4, width=2), Polygon(sides=3, angles=(60, 60, 60)), Shape(sides=0)])
 def test_a_param_config_field_holding_a_subclass_survives_as_its_own_class(shape):
-    drawing = Drawing(shape=shape, commit="c")
+    drawing = Drawing(shape=shape, declaring_commit="c")
     back, text = reread(drawing)
     written = drawing.to_manifest()["parameters"]["shape"]
     assert written.get("class") == (None if type(shape) is Shape else f"{__name__}.{type(shape).__qualname__}")
@@ -399,7 +399,7 @@ def test_a_param_config_field_holding_a_subclass_survives_as_its_own_class(shape
 
 
 def test_a_subclass_nested_in_a_tuple_inside_a_param_config_survives_as_its_own_class():
-    drawing = Drawing(gallery=Gallery(shapes=(Square(sides=4, width=1.5), Shape(sides=3))), commit="c")
+    drawing = Drawing(gallery=Gallery(shapes=(Square(sides=4, width=1.5), Shape(sides=3))), declaring_commit="c")
     back, text = reread(drawing)
     assert [type(s) for s in back.gallery.shapes] == [Square, Shape]
     assert back == drawing

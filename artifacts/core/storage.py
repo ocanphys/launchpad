@@ -46,7 +46,7 @@ def read_manifest(root: Path | None, artifact_path: Path | str) -> dict:
     a path that leaves root or a file that is not JSON, naming the file.
 
         read_manifest(Path("/storage"), "sources/odyssey")
-          -> {"artifact": "artifacts.sources.SourceURL", "commit": "abc1234", ...}
+          -> {"artifact": "artifacts.sources.SourceURL", "declaring_commit": "abc1234", ...}
     """
     path = _manifest_path(root, artifact_path)
     try:

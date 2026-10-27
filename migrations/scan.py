@@ -17,7 +17,7 @@ def scan(root: Path) -> tuple[int, list[str]]:
     first line that differs as stored -> rewritten.
 
         scan(Path("/storage")) -> (42, [])
-        scan(Path("/storage")) -> (42, ['sources/odyssey: line 3: \\'  "commit": "abc"\\' -> ...'])
+        scan(Path("/storage")) -> (42, ['sources/odyssey: line 3: \\'  "declaring_commit": "abc"\\' -> ...'])
     """
     manifests = sorted(root.rglob(MANIFEST))
     problems = []

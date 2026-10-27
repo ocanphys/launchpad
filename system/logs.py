@@ -117,7 +117,7 @@ def continued(call_id: str, source: str) -> list[dict]:
     return list(max((call_logs.get(key) or [] for key in keys), key=len))
 
 
-def try_publish(what: str, put: Callable[[], None], logger: logging.Logger | logging.LoggerAdapter) -> None:
+def try_publish(what: str, put: Callable[[], object], logger: logging.Logger | logging.LoggerAdapter) -> None:
     """Runs `put`, turning a failure into a warning row the next pass carries
     rather than an exception that would take its thread down."""
     try:

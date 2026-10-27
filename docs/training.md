@@ -30,7 +30,7 @@ leg = Pretraining(
     dataset=dataset,
     model=Transformer(
         vocab_size=tokenizer.vocab_size, sequence_length=256, num_layers=4,
-        d_model=512, d_ff=1344, num_heads=16, rope_theta=10000, device="cuda",
+        d_model=512, d_ff=1344, num_heads=16, rope_theta=10000,
     ),
     training_parameters=TrainingParameters(
         total_steps=20000, batch_size=64, max_norm=1.0,
@@ -117,10 +117,10 @@ Function by function:
 
 ```mermaid
 flowchart TD
-  INIT["PretrainJob.__init__() -> TrainingJob.__init__()<br/>locate(lr_schedule_fn), torch.manual_seed(seed)"] --> R
+  INIT["PretrainJob.__init__() -> TrainingJob.__init__()<br/>the device: cuda when there is a GPU, else cpu<br/>locate(lr_schedule_fn), torch.manual_seed(seed)"] --> R
   R["PretrainJob.run(root, worker)"] --> DONE{"Already complete?<br/>status().complete"}
   DONE -->|yes| SKIP["Log and return"]
-  DONE -->|no| RES["Build model and optimizer<br/>TrainingJob.resume(): Model.build(), locate(optimizer)"]
+  DONE -->|no| RES["Build model and optimizer<br/>TrainingJob.resume(): Model.build(device), locate(optimizer)"]
   RES --> PICK{"Where to start from"}
   PICK -->|"newest failsafe holding optimizer state"| FS["checkpoints/step.pt"]
   PICK -->|"else the previous leg"| SCK["starting_checkpoint model.pt, step must equal start_step"]
@@ -288,9 +288,13 @@ leg's name carries a hash of its history:
 
 `lineage_hash` digests everything that can change the trajectory: the
 starting checkpoint's uid (recursively, the whole chain), the dataset's and
-tokenizer's uids, the model (its package and fields) and the training
-parameters. `loop_config` and `run_id` stay out: the first controls
-observation, not the trajectory, and the second is already in the path. The
+tokenizer's uids, and the model and training parameters exactly as the leg's
+manifest writes them. The model's `"class"` key is among them, so moving or
+renaming an architecture class moves its legs, and the two `Transformer`
+classes, which have the same fields, give different legs. `loop_config` and
+`run_id` stay out: the first controls observation, not the trajectory, and the
+second is already in the path. The device is not a parameter at all: the job
+picks it, so a leg has one path whichever device trains it. The
 steps are in the name for people to read. Change anything hashed and you get a
 new leg beside the old one.
 
@@ -350,7 +354,7 @@ in the lineage hash, so decide it before the first real run.
   and the rename under it needs a check on the real mount. Fallback: plain
   `torch.load` to CPU.
 - **Peak memory on resume.** State is loaded with `map_location` set to the
-  model's device while the fresh model and optimizer already sit there, so
+  job's device while the fresh model and optimizer already sit there, so
   resume briefly holds two copies of both. `map_location="cpu"` removes the
   transient at the cost of a slower copy.
 - **`torch.compile(model)`** is usually a free 1.3 to 2x on this shape on CUDA.

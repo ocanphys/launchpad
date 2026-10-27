@@ -1,16 +1,17 @@
 """The codec: an artifact as a manifest dict and back. A manifest names its
-artifact's class under "artifact", records its commit and resources, holds its
-own fields under "parameters" and a manifest per dependency under
-"dependencies". A param config whose class is not exactly the one its field
-names carries that class under "class", at any depth. Nothing here opens a
-file (artifacts.core.storage does); `manifest_json` is the text on disk.
+artifact's class under "artifact", records its declaring commit and resources
+at the root only, holds its own fields under "parameters" and a definition per
+dependency under "dependencies". A param config whose class is not exactly the
+one its field names carries that class under "class", at any depth. Nothing
+here opens a file (artifacts.core.storage does); `manifest_json` is the text on
+disk.
 """
 
 from __future__ import annotations
 
 import json
 from types import UnionType
-from typing import TYPE_CHECKING, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
 
 import artifacts.core.artifact as core
 from artifacts.core.locate import dotted, locate
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
     from artifacts.core.artifact import Artifact
 
 # The fields a manifest records but that never identify the artifact.
-RECORDED = ("commit", "allocated_resources")
+RECORDED = ("declaring_commit", "allocated_resources")
 
 
 def arms(annotation: object) -> tuple:
@@ -30,7 +31,7 @@ def arms(annotation: object) -> tuple:
     return get_args(annotation) if get_origin(annotation) in (UnionType, Union) else (annotation,)
 
 
-def canonical(value: object) -> object:
+def canonical(value: object) -> Any:
     """Returns `value` as JSON data with keys sorted and -0.0 written as 0.0,
     so equal values give equal JSON.
 
@@ -43,7 +44,7 @@ def canonical(value: object) -> object:
     )
 
 
-def members(value: object, container: type | None) -> list[Artifact]:
+def members(value: Any, container: type | None) -> list[Artifact]:
     """Returns a dependency field's artifacts in manifest order: a set's
     sorted by artifact path, never by set iteration.
 
@@ -54,7 +55,7 @@ def members(value: object, container: type | None) -> list[Artifact]:
     return sorted(value, key=lambda a: a.artifact_path.as_posix()) if container is frozenset else list(value)
 
 
-def _with_classes(value: object, annotation: object, data: object) -> object:
+def _with_classes(value: object, annotation: object, data: Any) -> object:
     """Returns `data`, the JSON dump of a field holding `value`, with "class"
     added to every param config whose class is not the one its annotation names."""
     if isinstance(value, core.ParamConfig):
@@ -90,30 +91,40 @@ def parameters(artifact: Artifact) -> dict:
     return canonical({n: _with_classes(getattr(artifact, n), cls.model_fields[n].annotation, dumped[n]) for n in names})
 
 
-def to_manifest(artifact: Artifact) -> dict:
-    """Returns the artifact as a manifest dict, enough to rebuild it from
-    nothing else: its class, commit, resources, own parameters, and a manifest
-    apiece for the artifacts it is built from.
-
-    The five keys keep this order and everything below them is sorted, so the
-    text is a pure function of the artifact.
-
-        to_manifest(odyssey) -> {"artifact": "artifacts.sources.SourceURL", "commit": "abc1234",
-                                 "allocated_resources": {...}, "parameters": {...}, "dependencies": {}}
-    """
+def _definition_manifest(artifact: Artifact) -> dict:
+    """Returns the artifact's class, parameters and its dependencies'
+    definitions, recursively: what a parent embeds."""
     deps = {}
     for name, container in type(artifact).dependencies().items():
         value = getattr(artifact, name)
         if container is None:
-            deps[name] = None if value is None else to_manifest(value)
+            deps[name] = None if value is None else _definition_manifest(value)
         else:
-            deps[name] = [to_manifest(member) for member in members(value, container)]
+            deps[name] = [_definition_manifest(member) for member in members(value, container)]
+    return {"artifact": dotted(type(artifact)), "parameters": parameters(artifact), "dependencies": deps}
+
+
+def to_manifest(artifact: Artifact) -> dict:
+    """Returns the artifact as a manifest dict, enough to rebuild it from
+    nothing else: its class, declaring commit, resources, own parameters, and
+    the definition of each artifact it is built from.
+
+    Only the root records `declaring_commit` and `allocated_resources`; each
+    dependency records its own at its own path. The five keys keep this order
+    and everything below them is sorted, so the text is a pure function of the
+    artifact.
+
+        to_manifest(odyssey) -> {"artifact": "artifacts.sources.SourceURL", "declaring_commit": "abc1234",
+                                 "allocated_resources": {...}, "parameters": {...}, "dependencies": {}}
+    """
+    definition = _definition_manifest(artifact)
+    resources = artifact.allocated_resources
     return {
-        "artifact": dotted(type(artifact)),
-        "commit": artifact.commit,
-        "allocated_resources": canonical(artifact.allocated_resources.model_dump(mode="json")),
-        "parameters": parameters(artifact),
-        "dependencies": deps,
+        "artifact": definition["artifact"],
+        "declaring_commit": artifact.declaring_commit,
+        "allocated_resources": None if resources is None else canonical(resources.model_dump(mode="json")),
+        "parameters": definition["parameters"],
+        "dependencies": definition["dependencies"],
     }
 
 
@@ -136,14 +147,15 @@ def _decoded(data: object) -> object:
 def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifact:
     """Returns the artifact a manifest describes and the tree under it, unbound.
 
-    Each node keeps the commit and resources its manifest records. `memo`, one
-    dict shared across calls, hands back the same instance for a subtree
-    decoded before (the dataset under every leg of a run).
+    The root keeps the declaring commit and resources its manifest records; a
+    dependency comes back with both None, since they are recorded at its own
+    path. `memo`, one dict shared across calls, hands back the same instance
+    for a subtree decoded before (the dataset under every leg of a run).
 
         from_manifest(odyssey.to_manifest()) == odyssey -> True
     """
-    key = json.dumps(data, sort_keys=True) if memo is not None else None
-    if key is not None and key in memo:
+    key = json.dumps(data, sort_keys=True) if memo is not None else ""
+    if memo is not None and key in memo:
         return memo[key]
     cls = locate(data["artifact"])
     if not (isinstance(cls, type) and issubclass(cls, core.Artifact)):
@@ -157,9 +169,13 @@ def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifa
         else:
             inputs[name] = container(from_manifest(item, memo) for item in value)
     artifact = cls.model_validate(
-        {**inputs, "commit": data["commit"], "allocated_resources": _decoded(data["allocated_resources"])}
+        {
+            **inputs,
+            "declaring_commit": data.get("declaring_commit"),
+            "allocated_resources": _decoded(data.get("allocated_resources")),
+        }
     )
-    if key is not None:
+    if memo is not None:
         memo[key] = artifact
     return artifact
 
