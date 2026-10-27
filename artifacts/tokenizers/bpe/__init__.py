@@ -18,7 +18,6 @@ Unbound, they say so rather than returning nonsense.
 """
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -103,7 +102,6 @@ def _read_state(data: dict) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]
     return vocab, merges
 
 
-@dataclass(frozen=True)
 class Tokenizer(tokenizers.Tokenizer):
     producer: ClassVar[str] = "artifacts.tokenizers.bpe.jobs.TokenizerJob"
 
@@ -126,7 +124,7 @@ class Tokenizer(tokenizers.Tokenizer):
     #
     # Held on the instance and deliberately not a field: it isn't what
     # identifies this tokenizer, so it stays out of ==, hash, and the manifest.
-    # object.__setattr__ because the dataclass is frozen -- but by the time
+    # object.__setattr__ because the model is frozen -- but by the time
     # this runs, `self` is the object Artifact.bind read from the stored
     # manifest, not the one bind() was called on. Nobody else holds a
     # reference to it yet, so mutating it here is invisible to everyone but
@@ -137,7 +135,7 @@ class Tokenizer(tokenizers.Tokenizer):
         the state encode()/decode() run on -- and check it against what this
         artifact declares. The inverse of TokenizerJob.save.
 
-        object.__setattr__ because the dataclass is frozen -- see the comment
+        object.__setattr__ because the model is frozen -- see the comment
         above this method for why that's safe: `self` here is the object bind
         read from the manifest, not the artifact anyone else is holding.
         """

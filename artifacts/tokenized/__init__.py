@@ -3,7 +3,6 @@ family because it belongs to neither side -- a tokenizer family does not own
 what its tokenizers are run over, and a dataset only consumes these.
 """
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -12,7 +11,6 @@ from artifacts.sources import Source
 from artifacts.tokenizers import Tokenizer
 
 
-@dataclass(frozen=True)
 class TokenizedSource(Artifact):
     producer: ClassVar[str] = "artifacts.tokenized.jobs.TokenizeSourceJob"
 

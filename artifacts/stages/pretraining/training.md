@@ -16,7 +16,7 @@ Models are not artifacts. A leg holds its architecture as `model`: an
 instance of a `Model` subclass from a package under `models/`, such as
 `models.transformer.Transformer`, whose fields are the architecture's
 parameters, each model declaring its own (`vocab_size` and `sequence_length`
-included). `Model` is polymorphic, so a manifest writes the model as one map
+included). A `Model` field holds a subclass, so a manifest writes the model as one map
 with its class under `"class"` beside its fields, and one `Pretraining` class
 trains every architecture. The package is torch-free at import; `build()`
 imports the `nn.Module` and constructs it on the model's `device`, and

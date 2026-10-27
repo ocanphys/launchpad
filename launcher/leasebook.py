@@ -23,7 +23,8 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from artifacts.core.artifact import MANIFEST, Artifact
+from artifacts.core.artifact import Artifact
+from artifacts.core.storage import MANIFEST
 from config import REFRESH_BATCH, REFRESH_WAIT_SECONDS, STORAGE, TRAIN_LOG
 from launcher.gate import gate
 from launcher.resources import resource_options

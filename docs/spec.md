@@ -14,65 +14,7 @@ Moved to [Artifacts](artifacts.md).
 
 ## 3. Manifests and loading
 
-Every declared artifact owns `root / artifact_path / "manifest.json"`: a self-contained definition, with dependency manifests embedded recursively. Embedding is what lets a manifest be decoded and compared on its own, since definition equality recurses through dependencies. A tokenizer trained on one source:
-
-```json
-{
-  "artifact": "artifacts.tokenizers.bpe.Tokenizer",
-  "commit": "<defining-revision>",
-  "allocated_resources": {"cpu": null, "gpu_count": null, "gpu_type": null},
-  "parameters": {"special_tokens": ["<pad>"], "vocab_size": 1000},
-  "dependencies": {
-    "sources": [
-      {
-        "artifact": "artifacts.sources.SourceURL",
-        "commit": "<defining-revision>",
-        "allocated_resources": {"cpu": null, "gpu_count": null, "gpu_type": null},
-        "parameters": {"name": "odyssey", "url": "https://example.org/odyssey.txt"},
-        "dependencies": {}
-      }
-    ]
-  }
-}
-```
-
-The `"artifact"` key is the concrete class's dotted path. The `parameters` and `dependencies` maps partition that class's constructor fields by annotation, so `sources=(source,)` becomes an array of manifests while `special_tokens`, also an array, stays a parameter. Dependency values are manifests, arrays of manifests, or `null`. Declaration also writes the source's manifest at its own `sources/odyssey/manifest.json`.
-
-Manifest bytes are a pure function of the definition: the five top-level keys in the order above, every nested map sorted by key, so reordering a dataclass's fields changes nothing on disk.
-
-A parameter is encoded and decoded by pydantic against its field's annotation, so the annotation alone rebuilds it. A field type is allowed exactly when that holds, and the field schema (`artifacts/core/schema.py`) checks it when a class is first used: no `Any`, no tuple or set without item types, no mutable containers, no artifact inside a parameter. Dependencies are annotated as artifacts, never hidden in a parameter.
-
-A manifest stores a record's fields and not its class, so the annotation is the schema: a record encodes as plain data, and its class can move or be renamed without migrating manifests. It follows that a record field holds exactly its annotated class, since a subclass would decode as the base, and that a union holds at most one record type, since nothing on disk tells two apart. The one exception is declared by the base class: a record class with `polymorphic = True`, such as `Model`, may stand in a field as any subclass, and that field's manifest carries the subclass's dotted path under `"class"`, beside its fields; `class` is a Python keyword, so no field collides with it. Decoding reads it and rebuilds the record as `locate(class)`. That is how one `Pretraining` class trains every architecture: `"model": {"class": "models.transformer.Transformer", "d_model": 64, ...}`.
-
-**A constructor keeps a value only if its manifest decodes back equal to it, field types included.** Every constructor runs each parameter through the codec, so an int in a float field becomes that float, `-0.0` becomes `0.0`, and records are rebuilt through their constructors; anything that would not come back exactly raises instead of being coerced. Coercion would let an artifact differ from what its manifest decodes to, breaking the `==` that declaration and `bind` depend on; normalizing means two equal artifacts encode, and so hash and land, identically. Decoding is equally strict and refuses unknown and missing fields. `LESSONS.md` records the pydantic settings this takes.
-
-Conversion is separate from filesystem access:
-
-```python
-artifact.to_manifest() -> dict
-artifact.parameters() -> dict
-Artifact.from_manifest(data: dict, memo=None) -> Artifact
-Artifact.load(artifact_path, root=None, memo=None) -> Artifact
-artifact.bind(root=None) -> Self
-```
-
-`to_manifest` and `from_manifest` touch no storage; the manifest names the concrete class `from_manifest` and `load` build. `load` reads the manifest at `root / artifact_path` and passes it to `from_manifest`. A missing manifest raises `FileNotFoundError`; anything else that keeps it from rebuilding an artifact (unreadable JSON, an unknown class, a field that does not fit) raises `ValueError` naming the folder, so a scan can turn one bad manifest into one bad row. It also rejects a rebuilt artifact whose path differs from the folder: a path is a pure function of the definition, so a mismatch means the folder was copied or renamed.
-
-**`load` and `from_manifest` always return an unbound instance, even when every output exists.** Call `.bind()` before using output-dependent methods.
-
-An artifact is a pure function of its manifest, so decoding is memoizable. `memo` is one dict a caller keeps across calls: each distinct node is constructed once, so a run's legs, each embedding every leg before it, share their subtrees as single instances. Instances are frozen, so sharing them is safe; the one thing a shared instance must not be is bound, which is why `bind` never passes a memo.
-
-A definition at a path never changes once declared, so a reader may decode each path once and keep it; the launcher does, for its whole life. What a redeclaration may change, the resources, is read fresh by launching.
-
-The round-trip contract is definition agreement, plus preservation of recorded commit and resources. Path equality alone is too weak to test serialization.
-
-### Recorded fields
-
-New definitions capture the process's defining revision once per process: the HEAD hash, with `-dirty` when the working tree has uncommitted changes, since what ships is what is on disk; a container without git reads the revision baked into its image. Reconstruction always retains the manifest's recorded value. Mixed revisions within a graph are allowed.
-
-`commit` describes the definition. It neither selects execution code nor proves which code produced the outputs. Execution uses deployed code. Resources configure that execution; an unspecified dimension is recorded as `null`, and Modal supplies its platform default for it.
-
-Once written, a manifest's definition and commit are immutable. A matching redeclaration retains both; only its resources follow the latest committed declaration, since they configure the next execution and nothing else. The manifest at an artifact's own path is authoritative for execution; an embedded copy in a parent's manifest cannot override it. General annotations, mutable labels, and execution histories are outside this manifest schema.
+Moved to [Manifests](manifests.md).
 
 ## 4. Storage, status, and binding
 
@@ -127,23 +69,7 @@ Every bind builds fresh runtime state; runtime caches and open handles never ent
 
 ## 5. Pure dependency resolution
 
-`resolve(artifact) -> list[Artifact]` traverses the artifact's direct dependencies depth-first in `deps()` order. It emits dependencies before dependents and each path once; the requested artifact is last.
-
-- A path revisited on the active traversal stack is a cycle and raises.
-- A repeated path must have an agreeing definition before it can be deduplicated, so a shared path cannot conceal a conflicting leaf.
-- For agreeing duplicates, retain the first encountered object, including its non-identifying recorded fields.
-
-Resolution reads no storage and makes no launch decisions; its traversal state lives within the call.
-
-```python
-for artifact in resolve(tokens):
-    print(artifact.artifact_path)
-# sources/odyssey
-# tokenizers/<tokenizer-uid>
-# tokenized/<tokenizer-uid>/odyssey
-```
-
-The source occurs once even though both the tokenizer and tokenized source reference it.
+Moved to [Artifacts](artifacts.md#resolution).
 
 ## 6. `lab`: the notebook-facing API
 
@@ -261,7 +187,7 @@ Execution ownership must prevent two workers from **publishing** to the same pat
 
 Implement in this order, with a complete source-to-tokenizer-to-tokenized-source example working end to end before connecting execution:
 
-1. Immutable definitions, normalization, manifest round trips, and pure resolution.
+1. Immutable definitions, strict validation, manifest round trips, and pure resolution.
 2. Declaration, status, and binding.
 3. Generic state discovery and dependency validation, including virtual datasets.
 4. Execution ownership and atomic output publication.

@@ -56,23 +56,18 @@ chain with crashes in every leg, and random crash points. The runnable
 version lives in the session scratchpad, not the repo; `test_pretrain.py`
 keeps the cases that matter as unit tests.
 
-## Dataclass inheritance with defaults needs `kw_only`
-
-A subclass that re-declares a base field (to narrow its type, as
-`Pretraining.starting_checkpoint` does) makes that field positional again, in
-the base's slot. With a defaulted base field followed by required subclass
-fields this raises "non-default argument follows default argument" at class
-creation. `Training` and every subclass are `kw_only=True`, so field order is
-never a constraint. Every artifact is constructed with keywords anyway.
-
 ## Artifact annotations must be real imports
 
-`manifest.py` rebuilds artifacts with `get_type_hints`, which resolves each
-annotation in the defining module's globals at call time. An import under
-`TYPE_CHECKING` makes the annotation a string nothing can resolve, and
-`from_manifest` fails. This is why a base artifact cannot hold a `dataset`
-field typed with a family's class without importing that family, and why
-`dataset` and `tokenizer` live on `Pretraining`, not on `Training`.
+Pydantic resolves every field's annotation in the defining module's globals:
+a self-reference when the class is created, a class defined later in the
+module when the class is first used. An import under `TYPE_CHECKING` leaves
+the annotation a string nothing can resolve, so the class stays incompletely
+defined and raises at its first instantiation. This is why a base artifact
+cannot hold a `dataset` field typed with a family's class without importing
+that family, and why `dataset` and `tokenizer` live on `Pretraining`, not on
+`Training`. It is also why `Artifact.dependencies()`, which reads the
+annotations, runs at first use rather than at class creation: in
+`__pydantic_init_subclass__` a forward reference is still a `ForwardRef`.
 
 ## Failsafe stripping writes the new file first
 
@@ -311,26 +306,36 @@ linked op as "not from PyTorch".
 
 ## pydantic is strict only where it is told to be, and silent where it is not
 
-The manifest codec is pydantic, and each of these passed a test until a
-property test or a probe hit it:
+Artifacts and param configs are pydantic models under one strict config, and
+each of these passed a test until a probe hit it:
 
-- A stdlib dataclass takes no config (`TypeAdapter(Record, config=...)`
-  raises), so `extra="forbid"` and `allow_inf_nan=False` silently do nothing.
-  A model's config does reach every dataclass nested in its fields, so the
-  codec wraps each annotation as the one field of a model (`_field`).
-- A dataclass instance is trusted for its type unless
-  `revalidate_instances="always"`: `Leaf(count=True)` passes as a `Leaf`.
-- A subclass instance validates as its base, dropping the subclass's fields,
-  and the serializer writes it as the base too, with no warning even under
-  `warnings="error"`. Only comparing the result with the input catches it.
-- The serializer writes `True` in an int field as `1`, and `1 == True`, so a
-  JSON round trip plus `==` cannot catch a bool passed as an int. Strict
-  Python-mode validation does.
-- `-0.0 == 0.0`, but they encode differently, so identity hashes differed;
-  the codec parses floats with `float(s) + 0.0`.
+- **A config does not reach nested models.** Each model validates with its
+  own config, so `Artifact` and `ParamConfig` both set `STRICT`; a base that
+  forgot it would validate its subclasses laxly, coercing `"1"` to `1`.
+- **pydantic serializes a value by its field's annotation, not its class.**
+  A `Transformer` in a field annotated `Model` dumps as `Model`'s fields only,
+  with no warning. `parameters()` dumps with `serialize_as_any=True`, and
+  dependencies are never dumped by pydantic at all.
+- **Under `strict=True`, any `before` or `wrap` validator breaks JSON-mode
+  decoding of tuples.** After such a validator, pydantic continues with Python
+  objects and refuses a JSON array for a `tuple` field, even inside
+  `model_validate_json`. `Artifact` has one (the set conversion), so decoding
+  runs in Python mode, turning arrays into tuples first.
+- **Strict mode accepts only a frozenset for a `frozenset` field.** A tuple or
+  a list is refused, which is why `Artifact` converts set-valued dependencies
+  before validation.
+- **`-0.0` survives validation**, and `-0.0 == 0.0` while JSON writes them
+  differently, so identity digests would differ; `canonical()` parses floats
+  with `float(s) + 0.0`, for digests and manifests alike.
+- **`model_copy(update=...)` neither validates nor clears cached properties.**
+  It accepts `True` into an `int` field, and a copied leg keeps its old cached
+  `lineage_hash`, so its old path. A definition change is a new construction;
+  `model_copy` replaces recorded fields only.
+- **pydantic has no per-field `compare=False`**, so `Artifact` overrides
+  `__eq__` and `__hash__` to leave the recorded fields out; subclasses inherit
+  both, since pydantic installs its own `__hash__` only where no base defines
+  one.
 
-So `normalize` is three steps and none is redundant: strict Python-mode
-validation (exact types), a JSON round trip (the value the disk gives back),
-and `restored == value` (nothing silently narrowed). A test that the codec
-round-trips is not enough; test that it refuses, per case
-(test/test_codec.py), and that the properties fail with `normalize` disabled.
+A test that the codec round-trips is not enough; test that it refuses, per
+case (test/test_codec.py), and that a subclass comes back as its own class at
+every depth.

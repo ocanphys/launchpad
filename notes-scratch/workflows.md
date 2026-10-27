@@ -64,38 +64,11 @@ flowchart LR
 
 ## 2. Artifact lifecycle
 
-The whole path of one artifact, from a notebook cell to a bound object. Each
-step has its own diagram below.
-
-```mermaid
-flowchart LR
-  C["Construct<br/>Artifact subclass(...)"] --> X["Resolve<br/>resolve()"]
-  X --> I["Inspect and commit manifests<br/>lab.declare(commit=True)"]
-  I --> S["Appear on dashboard<br/>state(), GET /state"]
-  S --> L["Launch<br/>attempt_launch()"]
-  L --> R["Run<br/>run_job(), artifact.job().run()"]
-  R --> P["Publish outputs<br/>worker.publishing(), volume.commit()"]
-  P --> N["Notify and recompute<br/>announce(), listen(), recompute()"]
-  N --> S
-  P --> B["Use<br/>Artifact.bind(), downstream jobs"]
-  R -.-> LG["Logs<br/>start_logging(), persist_snapshot()"]
-```
+Moved to [docs/artifacts.md](../docs/artifacts.md#lifecycle).
 
 ## 3. Constructing an artifact
 
-What happens on `Tokenizer(...)`, `Pretraining(...)` and friends: a frozen
-dataclass whose `Artifact.__post_init__` holds every field to the field schema
-(`artifacts/core/artifact.py`, `artifacts/core/schema.py`).
-
-```mermaid
-flowchart TD
-  A["Call the constructor<br/>Cls(*args, **kwargs)"] --> F["Build the frozen dataclass"]
-  F --> P["Check the class sets producer<br/>Artifact.__post_init__()"]
-  P --> C["Normalize each parameter through the codec<br/>schema.annotations(), schema.polymorphic(), manifest.normalize()"]
-  C --> D["Check each dependency's type, turn a set field into a frozenset, refuse duplicate paths in it<br/>schema.dependencies()"]
-  D --> S["Subclass checks<br/>subclass __post_init__(): e.g. DataSet tokenizer checks, Training model inheritance"]
-  S --> H["Concrete Artifact"]
-```
+Moved to [docs/artifacts.md](../docs/artifacts.md#construction).
 
 ## 4. Declaring
 
@@ -123,24 +96,9 @@ flowchart TD
 
 ## 5. Manifest codec, load and bind
 
-`artifacts/core/manifest.py` is the codec, with pydantic encoding and decoding
-each parameter against its field's annotation; `Artifact` exposes it through
-`to_manifest`, `from_manifest`, `load` and `bind`.
-
-```mermaid
-flowchart LR
-  A["Concrete Artifact"] -->|"to_manifest(): parameters(), _encode()"| M["Manifest dict<br/>artifact, commit, allocated_resources, parameters, dependencies"]
-  M -->|"manifest_json()"| F[("root/artifact_path/manifest.json")]
-  F -->|"Artifact.load(): parse, path must match folder"| M2["Manifest dict"]
-  M2 -->|"from_manifest(): locate(class), annotations(), _decode(), memo"| A2["Unbound Artifact"]
-  A2 -->|"bind(): load stored, require ==, status().completion all present"| LD["Load files onto it<br/>_load() hook"]
-  LD --> T1["bpe.Tokenizer._load(): vocab, merges, _read_state()"]
-  LD --> T2["DataSet._load(): np.memmap per split"]
-  LD --> T3["MappedDataSet._load(): TokenStream per split"]
-  LD --> T4["TemplateTokenizer._load(): vocab"]
-```
-
-Status is a pure filesystem read, used by declaring, launching and the state map:
+The codec, load and bind moved to [docs/manifests.md](../docs/manifests.md).
+Status stays here until the repository page takes it. It is a pure filesystem
+read, used by declaring, launching and the state map:
 
 ```mermaid
 flowchart LR
@@ -289,49 +247,7 @@ flowchart TD
 
 ## 12. Artifact families
 
-What each artifact is built from and the job that fills it. An arrow is a
-dependency field; the label is the field name.
-
-```mermaid
-flowchart LR
-  SRC["SourceURL<br/>sources/name/body.txt<br/>SourceURLJob.run(): urlopen(), gunzip, worker.publishing()"]
-  TOK["bpe.Tokenizer<br/>tokenizers/bpe-.../tokenizer.json<br/>TokenizerJob.run(): process_chunks(), PAT pretokenize,<br/>heap of pairs, mergebpairs(), resolve(), save()"]
-  TMP["TemplateTokenizer<br/>tokenizers/template-.../tokenizer.json<br/>TemplateTokenizerJob.run(): word counts, save()"]
-  TS["TokenizedSource<br/>tokenized/tokenizer/source/tokens.bin<br/>TokenizeSourceJob.run(): tokenizer.bind(), encode_iterable()"]
-  DS["DataSet<br/>datasets/dataset-.../train.bin, valid.bin<br/>DataSetJob.run(): concatenate tokens.bin with END_OF_TEXT"]
-  MDS["MappedDataSet, no producer<br/>mappeddatasets/mapped-.../manifest.json only<br/>completion_paths(): the sources' tokens.bin"]
-  MOD["Model parameter<br/>Transformer.build() -> TransformerLM<br/>Mamba.build() -> MambaLM"]
-  PT["Pretraining leg<br/>runs/run_id/pretraining/start-end-hash/model.pt<br/>PretrainJob.run(), see section 13"]
-
-  SRC -->|sources| TOK
-  SRC -.->|sources| TMP
-  SRC -->|source| TS
-  TOK -->|tokenizer| TS
-  TMP -.->|tokenizer| TS
-  TS -->|"train_set, valid_set"| DS
-  TS -->|"train_set, valid_set"| MDS
-  DS -->|dataset| PT
-  MDS -->|dataset| PT
-  MOD -->|model| PT
-  PT -->|starting_checkpoint| PT
-```
-
-Shortcuts that build the middle of that graph from raw sources:
-
-```mermaid
-flowchart LR
-  FS["DataSet.from_sources(tokenizer, train_sources, valid_sources)<br/>MappedDataSet.from_sources(...)"] --> TSN["One TokenizedSource(tokenizer, source) per source"]
-  TSN --> DSN["DataSet or MappedDataSet(train_set, valid_set)"]
-```
-
-Reading a bound `MappedDataSet`:
-
-```mermaid
-flowchart LR
-  B["MappedDataSet.bind()"] --> L["_load(): separator = tokenizer.bind().encode(END_OF_TEXT)"]
-  L --> TS["TokenStream(paths, separator): one np.memmap per tokens.bin, offsets"]
-  TS --> GI["TokenStream.__getitem__(): bisect_right(), slice inside one file or concatenate across"]
-```
+Moved to [docs/artifacts.md](../docs/artifacts.md#families).
 
 ## 13. Training a leg
 

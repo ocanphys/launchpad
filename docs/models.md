@@ -37,8 +37,9 @@ path under `"class"`, beside its fields:
 "model": {"class": "models.transformer.Transformer", "d_model": 128, "num_heads": 16, ...}
 ```
 
-`Model` declares `polymorphic = True`, which is what tells the codec to write
-and read that key. The import path is part of the stored format: moving or
+The codec writes that key for any param config held in a field annotated with
+one of its base classes, at any depth, and reads it back; `Model` declares
+nothing for it. The import path is part of the stored format: moving or
 renaming an architecture class leaves every manifest that names it unreadable
 until a migration rewrites it.
 

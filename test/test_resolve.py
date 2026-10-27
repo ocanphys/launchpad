@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -21,7 +20,6 @@ def tokenizer(*sources: Source) -> Tokenizer:
     return Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=sources)
 
 
-@dataclass(frozen=True)
 class Link(Artifact):
     """One optional dependency, so a cycle can be closed by hand."""
 
@@ -75,7 +73,7 @@ class ResolveTests(unittest.TestCase):
             resolve(tokens)
 
     def test_a_cycle_is_reported_as_a_chain(self):
-        a, b = Link("a"), Link("b")
+        a, b = Link(name="a"), Link(name="b")
         object.__setattr__(a, "to", b)
         object.__setattr__(b, "to", a)
         with self.assertRaisesRegex(ValueError, "cycle: links/a -> links/b -> links/a"):

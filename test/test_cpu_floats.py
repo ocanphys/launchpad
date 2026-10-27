@@ -5,8 +5,8 @@ bytes, and refuses a root with any other difference."""
 import pytest
 from test_golden import CASES
 
-from artifacts.core.artifact import MANIFEST
 from artifacts.core.manifest import manifest_json
+from artifacts.core.storage import MANIFEST
 from migrations.cpu_floats import plan
 from migrations.scan import scan
 

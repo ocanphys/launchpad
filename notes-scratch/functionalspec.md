@@ -11,34 +11,7 @@ user launches it, and shows the state of every artifact on a dashboard.
 
 ## 1. Artifacts
 
-- An artifact is an immutable definition of something that should exist: a
-  type and its typed parameters.
-- An artifact may own any number of output files, or none.
-- Parameters are every input that determines the result. A parameter whose type
-  is an artifact, or a collection of artifacts, is a dependency. Whether a
-  parameter is a dependency is decided by its declared type, never by its value.
-- Every artifact has a storage path derived from its type and parameters. The
-  path is its identity: deduplication, ownership and manifest locations key on
-  it.
-- Two artifacts are the same definition when their type, parameters and
-  dependency definitions agree recursively. A shared path is never evidence of a
-  shared definition: two definitions at one path are a conflict, never merged.
-- Changing a parameter or any upstream definition yields a different
-  definition, and normally a different path, so it declares a new artifact.
-  The old one remains.
-- The defining code revision and the requested compute resources are recorded
-  with every artifact and excluded from identity and equality.
-- Parameter values are normalized when an artifact is defined: a value is kept
-  only if its stored form reads back equal to it, so `1` and `1.0` for a
-  real-valued parameter are one artifact, and a value that would not survive
-  storage is rejected.
-- A dependency collection is either ordered, where order and repeats are part of
-  the definition, or a set, where neither is. A set with two members at one path
-  is rejected.
-- Defining an artifact reads no storage and does not require the artifact to
-  exist.
-- A virtual artifact owns no files and has no job. It is complete when the
-  dependency files it reads exist, and it is never launched.
+Moved to [docs/artifacts.md](../docs/artifacts.md).
 
 ## 2. Jobs
 
@@ -61,28 +34,14 @@ user launches it, and shows the state of every artifact on a dashboard.
 
 ## 3. Dependencies and resolution
 
-- Resolving a request returns every artifact it needs, dependencies before
-  dependents, each path once. Resolution reads no storage.
-- A cycle is rejected.
-- A repeated path with a disagreeing definition is rejected. Agreeing duplicates
-  keep the first one encountered, recorded fields included.
-- An artifact shared by several requests or runs is one path, declared once and
-  built once.
-- An artifact's manifest embeds its dependencies' manifests recursively, so its
-  whole dependency graph can be rebuilt from that one manifest.
+Moved to [docs/artifacts.md](../docs/artifacts.md#resolution).
 
 ## 4. Manifests and provenance
 
-- Every declared artifact owns a manifest at its path, holding its type,
-  recorded code revision, requested resources, parameters and dependencies.
-- A manifest's contents are a pure function of the definition.
-- A manifest reads back on its own to an equal artifact, without loading any
-  outputs. Reading rejects a manifest whose definition does not belong at the
-  location it was found, and reports an unreadable one naming its location.
-- Once written, a manifest's definition and code revision never change.
-  Redeclaring may update its requested resources and nothing else.
-- The recorded code revision marks whether the working tree had uncommitted
-  changes. Revisions may be mixed within one graph.
+Manifests, their recorded fields and their immutability moved to
+[docs/manifests.md](../docs/manifests.md). Still here until the lab and
+launcher pages take them:
+
 - Declaring a new training run keeps a copy of the notebook that declared it.
 - Every execution ever granted for an artifact is recorded, each with its logs.
 

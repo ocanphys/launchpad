@@ -6,8 +6,9 @@ writes it back unchanged. Run against the volume from a laptop with
 from itertools import zip_longest
 from pathlib import Path
 
-from artifacts.core.artifact import MANIFEST, Artifact
+from artifacts.core.artifact import Artifact
 from artifacts.core.manifest import manifest_json
+from artifacts.core.storage import MANIFEST
 
 
 def scan(root: Path) -> tuple[int, list[str]]:

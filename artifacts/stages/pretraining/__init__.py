@@ -5,7 +5,6 @@ package under models/.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import ClassVar
@@ -17,7 +16,6 @@ from artifacts.mappeddataset import MappedDataSet
 from artifacts.tokenizers import Tokenizer
 
 
-@dataclass(frozen=True, kw_only=True)
 class Pretraining(Training):
     """A pretraining leg: next-token prediction over the dataset's token
     stream."""
@@ -27,8 +25,8 @@ class Pretraining(Training):
     dataset: DataSet | MappedDataSet
     starting_checkpoint: Pretraining | None = None
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    def model_post_init(self, context: object) -> None:
+        super().model_post_init(context)
         # a model speaks one tokenizer for life: the one its dataset was
         # tokenized with, and the one every earlier leg trained with
         if self.model.vocab_size != self.tokenizer.vocab_size:

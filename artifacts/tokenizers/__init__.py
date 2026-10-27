@@ -5,13 +5,11 @@ annotates `tokenizer: Tokenizer` and never names a family.
 """
 
 from abc import abstractmethod
-from dataclasses import dataclass
 from pathlib import Path
 
 from artifacts.core.artifact import Artifact
 
 
-@dataclass(frozen=True)
 class Tokenizer(Artifact):
     vocab_size: int
     special_tokens: tuple[str, ...]

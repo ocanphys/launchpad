@@ -10,13 +10,14 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import lab
-from artifacts.core.artifact import MANIFEST, Resources
+from artifacts.core.artifact import Resources
 from artifacts.core.SGD.training import (
     LoopConfig,
     LRSchedule,
     OptimizerParameters,
     TrainingParameters,
 )
+from artifacts.core.storage import MANIFEST
 from artifacts.dataset import DataSet
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining

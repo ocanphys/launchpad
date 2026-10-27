@@ -14,7 +14,7 @@ how to write code here.
 
 Subtleties learned the hard way go in [LESSONS.md](LESSONS.md): what is true,
 how it was found, what to do about it. Read it before touching checkpoints,
-resume, manifests or dataclass inheritance; add to it whenever a bug or a review
+resume, manifests or pydantic validation; add to it whenever a bug or a review
 turns up something the code cannot say for itself.
 
 ## Abstraction

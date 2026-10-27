@@ -8,10 +8,9 @@ stays free of torch so declaring an artifact never imports it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Literal
 
 from pydantic import Field
 
@@ -24,13 +23,11 @@ class Model(ParamConfig):
     fields declared here are the ones stages and jobs read off any model.
 
     A field annotated `Model` holds any subclass, and its manifest names that
-    subclass under "class" (`polymorphic`).
+    subclass under "class" (artifacts.core.manifest).
 
     Transformer(vocab_size=1000, sequence_length=32, num_layers=4, d_model=128, d_ff=256, num_heads=16,
                 rope_theta=10000).sequence_length -> 32
     """
-
-    polymorphic: ClassVar[bool] = True
 
     vocab_size: int = Field(gt=0)
     sequence_length: int = Field(gt=0)
@@ -127,9 +124,6 @@ class LoopConfig(ParamConfig):
     optimizer_checkpoint_policy: Literal["all", "latest"] = "latest"
 
 
-# kw_only here and on every subclass, so their fields never have to be
-# ordered around these defaults
-@dataclass(frozen=True, kw_only=True)
 class Training(Artifact):
     """One training leg from ``start_step`` to ``end_step``.
 
@@ -148,8 +142,8 @@ class Training(Artifact):
     model: Model | None = None
     starting_checkpoint: Training | None = None
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    def model_post_init(self, context: object) -> None:
+        super().model_post_init(context)
         if self.starting_checkpoint is None:
             if self.model is None:
                 raise ValueError("model is required without a starting_checkpoint")

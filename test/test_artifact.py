@@ -7,18 +7,17 @@ that distinguishes one absolute path from another (spec.md section 4).
 
 import json
 import unittest
-from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import ClassVar
 
-from artifacts.core.artifact import MANIFEST, Artifact, Resources
+from artifacts.core.artifact import Artifact, Resources
 from artifacts.core.manifest import manifest_json
+from artifacts.core.storage import MANIFEST, write_manifest
 from artifacts.sources import Source, SourceURL
 from artifacts.tokenizers.bpe import Tokenizer
 
 
-@dataclass(frozen=True)
 class Virtual(Artifact):
     """Owns no files and nothing produces it: done when its sources are."""
 
@@ -44,9 +43,7 @@ class Virtual(Artifact):
 
 def declare(artifact: Artifact, root: Path) -> None:
     """Write one manifest, the way declaration will (spec.md section 6)."""
-    path = root / artifact.artifact_path / MANIFEST
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(manifest_json(artifact.to_manifest()))
+    write_manifest(root, artifact.artifact_path, artifact.to_manifest())
 
 
 def build(artifact: Artifact, root: Path) -> None:

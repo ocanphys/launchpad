@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -30,7 +29,6 @@ def require_separator(name: str, sources: tuple[TokenizedSource, ...]) -> None:
         )
 
 
-@dataclass(frozen=True)
 class MappedDataSet(Artifact):
     """A training set that owns no bytes: it is done exactly when the
     TokenizedSources it depends on are (`completion_paths`), and its bound
@@ -50,8 +48,8 @@ class MappedDataSet(Artifact):
     train_set: tuple[TokenizedSource, ...]
     valid_set: tuple[TokenizedSource, ...]
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    def model_post_init(self, context: object) -> None:
+        super().model_post_init(context)
         # Completion is borrowed from the sources, and every file of an empty
         # borrowing is present: with neither split filled this artifact would
         # read as done before anything existed. One split may still be empty.
@@ -74,8 +72,8 @@ class MappedDataSet(Artifact):
         valid_sources: tuple[Source, ...],
     ) -> MappedDataSet:
         return cls(
-            train_set=tuple(TokenizedSource(tokenizer, s) for s in train_sources),
-            valid_set=tuple(TokenizedSource(tokenizer, s) for s in valid_sources),
+            train_set=tuple(TokenizedSource(tokenizer=tokenizer, source=s) for s in train_sources),
+            valid_set=tuple(TokenizedSource(tokenizer=tokenizer, source=s) for s in valid_sources),
         )
 
     @property
@@ -126,7 +124,7 @@ class MappedDataSet(Artifact):
             if len(sources) > 1:
                 [separator] = sources[0].tokenizer.bind(root).encode(END_OF_TEXT)
             stream = TokenStream([ts.paths(root)["tokens"] for ts in sources], separator)
-            # object.__setattr__ because the dataclass is frozen -- `self` here
+            # object.__setattr__ because the model is frozen -- `self` here
             # is the object Artifact.bind read from the stored manifest, never
             # the one bind() was called on, so this is invisible to whoever is
             # still holding the unbound original.

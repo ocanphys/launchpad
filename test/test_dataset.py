@@ -9,7 +9,8 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from artifacts.core.artifact import MANIFEST, Artifact, _digest
+from artifacts.core.artifact import Artifact, _digest
+from artifacts.core.storage import MANIFEST, write_manifest
 from artifacts.dataset import DataSet
 from artifacts.dataset.jobs import DataSetJob
 from artifacts.sources import SourceURL
@@ -39,8 +40,7 @@ def built(root: Path, train: range, valid: range) -> DataSet:
     """A built, bound DataSet whose training split is FIRST holding `train`
     and whose validation split is SECOND holding `valid`."""
     dataset = DataSet.from_sources(NO_EOT, (FIRST,), (SECOND,))
-    (root / dataset.artifact_path).mkdir(parents=True)
-    (root / dataset.artifact_path / MANIFEST).write_text(json.dumps(dataset.to_manifest()))
+    write_manifest(root, dataset.artifact_path, dataset.to_manifest())
     for source, tokens in ((dataset.train_set[0], train), (dataset.valid_set[0], valid)):
         path = source.paths(root)["tokens"]
         path.parent.mkdir(parents=True)
@@ -62,7 +62,7 @@ class DataSetTests(unittest.TestCase):
                 self.assertIn("special_tokens", str(error.exception))
 
     def test_every_source_shares_one_tokenizer_across_both_splits(self):
-        first, second = TokenizedSource(TOKENIZER, FIRST), TokenizedSource(NO_EOT, SECOND)
+        first, second = TokenizedSource(tokenizer=TOKENIZER, source=FIRST), TokenizedSource(tokenizer=NO_EOT, source=SECOND)
         for train, valid in (((first, second), ()), ((), (first, second)), ((first,), (second,))):
             with (
                 self.subTest(train=train, valid=valid),
@@ -89,7 +89,7 @@ class DataSetTests(unittest.TestCase):
     def test_empty_and_single_source_splits_need_no_eot_or_tokenizer_files(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            source = TokenizedSource(NO_EOT, FIRST)
+            source = TokenizedSource(tokenizer=NO_EOT, source=FIRST)
             path = source.paths(root)["tokens"]
             path.parent.mkdir(parents=True)
             content = array("H", [7, 300, 65535]).tobytes()
@@ -120,9 +120,7 @@ class DataSetTests(unittest.TestCase):
     def test_merge_inserts_actual_eot_id_at_each_file_boundary(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            folder = root / TOKENIZER.artifact_path
-            folder.mkdir(parents=True)
-            (folder / MANIFEST).write_text(json.dumps(TOKENIZER.to_manifest()))
+            write_manifest(root, TOKENIZER.artifact_path, TOKENIZER.to_manifest())
             # Training can stop below vocab_size; use the ID from the saved vocab.
             vocab = {str(i): bytes([i]).decode("latin-1") for i in range(256)}
             vocab.update({"256": "<pad>", "257": "<|endoftext|>"})

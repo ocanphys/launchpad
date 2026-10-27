@@ -1,11 +1,9 @@
-from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
 from artifacts.core.artifact import Artifact
 
 
-@dataclass(frozen=True)
 class Source(Artifact):
     """A named body of raw text at sources/<name>/body.txt. Subclasses say
     where the text comes from; everything downstream reads only the file."""
@@ -25,7 +23,6 @@ class Source(Artifact):
         return {"raw text": "body.txt"}
 
 
-@dataclass(frozen=True)
 class SourceURL(Source):
     """Text downloaded from a URL. A URL ending in .gz is unzipped on the way
     in, so body.txt is plain text whichever one it was."""

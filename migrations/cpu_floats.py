@@ -13,8 +13,9 @@ changes.
 import re
 from pathlib import Path
 
-from artifacts.core.artifact import MANIFEST, Artifact
+from artifacts.core.artifact import Artifact
 from artifacts.core.manifest import manifest_json
+from artifacts.core.storage import MANIFEST
 
 CPU_INT = re.compile(r'(\s*"cpu": )(\d+)(,?)')
 

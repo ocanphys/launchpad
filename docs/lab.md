@@ -60,8 +60,6 @@ describes the architecture, so the network can be rebuilt in a notebook. A
 notebook may have no GPU, so the example moves the model to the CPU.
 
 ```python
-from dataclasses import replace
-
 import torch
 
 from config import STORAGE
@@ -69,7 +67,8 @@ from config import STORAGE
 leg = Artifact.load("runs/<run_id>/pretraining/<uid>")
 state = torch.load(leg.paths(STORAGE)["model"], map_location="cpu")
 
-network = replace(leg.model, device="cpu").build()
+# a new model, built and validated again, with only the device changed
+network = type(leg.model)(**dict(leg.model) | {"device": "cpu"}).build()
 network.load_state_dict(state["model"])
 ```
 

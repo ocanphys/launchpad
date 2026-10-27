@@ -26,15 +26,16 @@ import logging
 import os
 import tempfile
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import modal
 
-from artifacts.core.artifact import MANIFEST, Artifact
-from artifacts.core.manifest import manifest_json
+from artifacts.core.artifact import Artifact
+from artifacts.core.manifest import RECORDED
 from artifacts.core.resolve import resolve
 from artifacts.core.SGD.training import Training
+from artifacts.core.storage import write_manifest
 from config import STORAGE, VOLUME_NAME
 from system.runtime import Worker
 
@@ -126,7 +127,7 @@ def _leaves(value: object, prefix: str = "") -> dict[str, object]:
     if isinstance(value, dict) and value:
         out: dict[str, object] = {}
         for key, item in value.items():
-            if key in ("commit", "allocated_resources"):
+            if key in RECORDED:
                 continue
             out.update(_leaves(item, f"{prefix}.{key}" if prefix else key))
         return out
@@ -285,12 +286,10 @@ def declare(
                 manifest = node.to_manifest()
             elif stored != requested:
                 on_disk = Artifact.load(node.artifact_path, root, memo)
-                manifest = replace(on_disk, allocated_resources=node.allocated_resources).to_manifest()
+                manifest = on_disk.model_copy(update={"allocated_resources": node.allocated_resources}).to_manifest()
             else:
                 continue
-            path = root / node.artifact_path / MANIFEST
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(manifest_json(manifest))
+            write_manifest(root, node.artifact_path, manifest)
             if row["state"] == "new":
                 row.update(_inspect(node, root, memo), created=True)
             else:  # keep the pair, so the report shows what changed to what

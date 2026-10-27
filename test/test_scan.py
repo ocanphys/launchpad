@@ -7,8 +7,8 @@ import shutil
 import pytest
 from test_golden import CASES, ODYSSEY
 
-from artifacts.core.artifact import MANIFEST
 from artifacts.core.manifest import manifest_json
+from artifacts.core.storage import MANIFEST
 from migrations.scan import scan
 
 

@@ -9,7 +9,8 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from artifacts.core.artifact import MANIFEST, Artifact, _digest
+from artifacts.core.artifact import Artifact, _digest
+from artifacts.core.storage import write_manifest
 from artifacts.mappeddataset import MappedDataSet
 from artifacts.sources import SourceURL
 from artifacts.tokenizers.bpe import Tokenizer
@@ -27,9 +28,7 @@ EOT = 257
 
 
 def declare(artifact: Artifact, root: Path) -> None:
-    path = root / artifact.artifact_path / MANIFEST
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(artifact.to_manifest()))
+    write_manifest(root, artifact.artifact_path, artifact.to_manifest())
 
 
 def build_tokenizer(root: Path) -> None:

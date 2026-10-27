@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -28,7 +27,6 @@ def require_separator(name: str, sources: tuple[TokenizedSource, ...]) -> None:
         )
 
 
-@dataclass(frozen=True)
 class DataSet(Artifact):
     """A training set built by physically concatenating every source's
     tokens into train.bin/valid.bin, with <|endoftext|> between sources
@@ -49,8 +47,8 @@ class DataSet(Artifact):
     train_set: tuple[TokenizedSource, ...]
     valid_set: tuple[TokenizedSource, ...]
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    def model_post_init(self, context: object) -> None:
+        super().model_post_init(context)
         tokenizers = sorted({source.tokenizer.uid for source in (*self.train_set, *self.valid_set)})
         if len(tokenizers) > 1:
             raise ValueError(f"{type(self).__name__} mixes tokenizers {', '.join(tokenizers)}")
@@ -65,8 +63,8 @@ class DataSet(Artifact):
         valid_sources: tuple[Source, ...],
     ) -> DataSet:
         return cls(
-            train_set=tuple(TokenizedSource(tokenizer, s) for s in train_sources),
-            valid_set=tuple(TokenizedSource(tokenizer, s) for s in valid_sources),
+            train_set=tuple(TokenizedSource(tokenizer=tokenizer, source=s) for s in train_sources),
+            valid_set=tuple(TokenizedSource(tokenizer=tokenizer, source=s) for s in valid_sources),
         )
 
     @property
@@ -99,7 +97,7 @@ class DataSet(Artifact):
 
     def _load(self, root: Path) -> None:
         """Artifact._load's hook: one memmap per split over the bin its job
-        wrote. object.__setattr__ because the dataclass is frozen -- `self`
+        wrote. object.__setattr__ because the model is frozen -- `self`
         here is the object Artifact.bind read from the stored manifest, never
         the one bind() was called on."""
         import numpy as np  # local: only a process that binds pays for numpy

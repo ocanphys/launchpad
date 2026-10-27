@@ -35,7 +35,6 @@ the digest over whatever can't stay readable.
 """
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -46,7 +45,6 @@ from artifacts.sources import Source
 UNKNOWN = "<unk>"  # this template's own choice; your algorithm may not need one
 
 
-@dataclass(frozen=True)
 class TemplateTokenizer(tokenizers.Tokenizer):
     """The parameters of a training run, and the tokenizer it produces.
 
@@ -82,7 +80,7 @@ class TemplateTokenizer(tokenizers.Tokenizer):
         this in your own family whenever "using" the artifact means holding
         something in memory; `bind(root)` calls it for you.
 
-        object.__setattr__ because the dataclass is frozen -- but by the time
+        object.__setattr__ because the model is frozen -- but by the time
         this runs, `self` is the object Artifact.bind read from the stored
         manifest, never the one bind() was called on, so mutating it here is
         invisible to whoever is still holding the unbound original.

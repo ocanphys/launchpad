@@ -4,7 +4,6 @@ crashed attempt, and one leg continuing from another's final model."""
 import json
 import unittest
 from array import array
-from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -12,7 +11,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
-from artifacts.core.artifact import MANIFEST, Artifact
+from artifacts.core.artifact import Artifact
 from artifacts.core.SGD.lr_schedule import lr_cosine_schedule
 from artifacts.core.SGD.steplog import StepLog
 from artifacts.core.SGD.training import (
@@ -21,6 +20,7 @@ from artifacts.core.SGD.training import (
     OptimizerParameters,
     TrainingParameters,
 )
+from artifacts.core.storage import write_manifest
 from artifacts.dataset import DataSet
 from artifacts.dataset.jobs import DataSetJob
 from artifacts.sources import SourceURL
@@ -48,6 +48,12 @@ TRAINING = TrainingParameters(
 LOOP = LoopConfig(val_every=2, gpu_check_every=2, checkpoint_every=2)
 
 
+def rebuilt(artifact: Artifact, **changes) -> Artifact:
+    """Returns `artifact` constructed again with `changes`, so its validators run and its
+    cached identity is recomputed, as model_copy would not."""
+    return type(artifact)(**{name: getattr(artifact, name) for name in type(artifact).model_fields} | changes)
+
+
 def worker() -> Worker:
     """A real `Worker` with the lease no-opped: a job writes every file
     through `worker.publishing`, so the stand-in has to be one that publishes.
@@ -61,9 +67,7 @@ def logged(worker: Worker) -> list[str]:
 
 def declare(artifact: Artifact, root: Path) -> None:
     """Write one manifest, the way declaration will -- what bind reads back."""
-    path = root / artifact.artifact_path / MANIFEST
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(artifact.to_manifest()))
+    write_manifest(root, artifact.artifact_path, artifact.to_manifest())
 
 
 def build_dataset(root: Path) -> DataSet:
@@ -306,7 +310,7 @@ class PretrainJobTests(unittest.TestCase):
             self.assertEqual(set(r), {"step", "attempt", "loss", "grad_norm", "learning_rate"} | validated)
 
     def test_a_crash_between_validations_leaves_no_gap_and_the_last_step_validates(self):
-        sparse = replace(self.leg, loop_config=LoopConfig.model_validate({**LOOP.model_dump(), "val_every": 3, "checkpoint_every": 2}))
+        sparse = rebuilt(self.leg, loop_config=LoopConfig.model_validate({**LOOP.model_dump(), "val_every": 3, "checkpoint_every": 2}))
         folder = self.root / sparse.artifact_path
         with crash_after_first_failsafe(), self.assertRaisesRegex(RuntimeError, "died"):
             PretrainJob(sparse).run(self.root, worker())
@@ -353,7 +357,7 @@ class PretrainJobTests(unittest.TestCase):
 
     def test_validation_scores_a_split_shorter_than_one_batch(self):
         # 2000 tokens hold 249 sequences of 8, all in one batch of up to 300
-        wide = replace(self.leg, training_parameters=TrainingParameters.model_validate({**TRAINING.model_dump(), "batch_size": 300}))
+        wide = rebuilt(self.leg, training_parameters=TrainingParameters.model_validate({**TRAINING.model_dump(), "batch_size": 300}))
         metrics = PretrainJob(wide).evaluate(MODEL.build(), self.dataset.bind(self.root), worker())
         self.assertTrue(torch.isfinite(metrics["val_loss"]))
         self.assertEqual(metrics["val_loss_var"].item(), 0.0)  # one batch: no spread, and never NaN
@@ -375,8 +379,8 @@ class PretrainJobTests(unittest.TestCase):
         other = Tokenizer(vocab_size=64, special_tokens=("<eos>",), sources=(SOURCE,))
         with self.assertRaisesRegex(ValueError, "mixes tokenizers"):
             DataSet(
-                train_set=(TokenizedSource(TOKENIZER, SOURCE),),
-                valid_set=(TokenizedSource(other, SOURCE),),
+                train_set=(TokenizedSource(tokenizer=TOKENIZER, source=SOURCE),),
+                valid_set=(TokenizedSource(tokenizer=other, source=SOURCE),),
             )
         self.assertEqual(self.leg.tokenizer, TOKENIZER)
 

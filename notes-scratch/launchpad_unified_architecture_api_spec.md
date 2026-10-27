@@ -52,7 +52,7 @@ Why:
 - Pydantic has no per-field `compare=False` (**verified**: `Field` has no `compare` parameter in 2.13.4), so the exclusion has to be an override.
 
 ```python
-RECORDED = ("commit", "allocated_resources")
+RECORDED = ("commit", "allocated_resources")  # as built, in manifest.py: the codec owns which fields a manifest records
 
 class Artifact(BaseModel):
     def _definition(self) -> tuple:
@@ -209,7 +209,7 @@ Rules, each with the failure it prevents:
 
 `schema._check_parameter` refuses, when a class is first used, any parameter annotated `Any`, `object`, a bare `tuple`, a `list`, a `dict`, a `frozenset` of non-artifacts, a mutable dataclass, a union of two param config types, or an artifact hidden inside a parameter. Pydantic accepts most of these annotations without complaint.
 
-**Recommendation: keep one small guard, run when an `Artifact` subclass is created** (`__pydantic_init_subclass__`, which sees the finished `model_fields`; **verified**). It refuses, in a parameter annotation and in the fields of any param config it names:
+**Recommendation (as built): keep one small guard, run when an `Artifact` class is first used**, by the first call to `Artifact.dependencies()`, as `schema.py` did. Not at class creation: in `__pydantic_init_subclass__` a self-reference is resolved but a field annotated with a class defined later in its module is still a `ForwardRef` (**verified**), so the guard would misread it. It refuses, in a parameter annotation and in the fields of any param config it names:
 
 - `list`, `dict`, `set`, `frozenset`, `Any`, `object`;
 - an artifact type anywhere outside the four dependency shapes.
@@ -400,7 +400,7 @@ def write_manifest(root: Path, artifact_path: Path | str, manifest: dict) -> Non
     """
 ```
 
-`Artifact.load` becomes `from_manifest(read_manifest(root, path), memo)` plus the check that the decoded artifact's path is the folder it was read from. That check is about identity, not files, so it stays on the artifact. Its contract is unchanged: `FileNotFoundError` for a missing manifest, a `ValueError` naming the folder for anything that will not decode, and a `ValueError` when the decoded path is not the folder. `status` keeps its own file-presence checks, since it looks at an artifact's outputs as well as its manifest. `MANIFEST` and `_root` move from artifact.py to storage.py, and their importers (artifact.py, lab.py, launcher/state.py, launcher/leasebook.py, tests) import them from there. `storage.py` imports `manifest_json` from the codec, which owns the byte format; the codec imports nothing from storage.
+`Artifact.load` becomes `from_manifest(read_manifest(root, path), memo)` plus the check that the decoded artifact's path is the folder it was read from. That check is about identity, not files, so it stays on the artifact. Its contract is unchanged: `FileNotFoundError` for a missing manifest, a `ValueError` naming the folder for anything that will not decode, and a `ValueError` when the decoded path is not the folder. `status` keeps its own file-presence checks, since it looks at an artifact's outputs as well as its manifest. `MANIFEST` and `_root` move from artifact.py to storage.py (as built, `_root` is public as `storage.root_of`, since `load`, `status` and `bind` use it too), and their importers (artifact.py, lab.py, launcher/state.py, launcher/leasebook.py, tests) import them from there. `storage.py` imports `manifest_json` from the codec, which owns the byte format; the codec imports nothing from storage.
 
 Manifests are still written directly, without a temporary file and a rename: they are small, written in one call, and written before any job runs (docs/spec.md §6).
 
@@ -577,7 +577,7 @@ These are the signatures as they will be when this spec has landed. The identity
 ## `artifacts/core/artifact.py`
 
 ```python
-RECORDED = ("commit", "allocated_resources")
+RECORDED = ("commit", "allocated_resources")  # as built, in manifest.py: the codec owns which fields a manifest records
 
 
 # Strict: no str as int, bool as int or list as tuple, though an int in a

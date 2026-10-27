@@ -10,14 +10,14 @@ import io
 import json
 import unittest
 from contextlib import redirect_stdout
-from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import ClassVar
 from unittest.mock import patch
 
 import lab
-from artifacts.core.artifact import MANIFEST, Artifact
+from artifacts.core.artifact import Artifact
+from artifacts.core.storage import MANIFEST
 from artifacts.dataset import DataSet
 from artifacts.sources import SourceURL
 from artifacts.tokenized import TokenizedSource
@@ -35,7 +35,6 @@ NOW = 1_000_000.0
 FLATLINE_SECONDS = FLATLINE * HEARTBEAT_SECONDS
 
 
-@dataclass(frozen=True)
 class Virtual(Artifact):
     """Owns no files and nothing produces it: done when its sources are."""
 

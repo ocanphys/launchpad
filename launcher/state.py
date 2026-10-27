@@ -13,7 +13,8 @@ from pathlib import Path
 
 import modal
 
-from artifacts.core.artifact import MANIFEST, Artifact
+from artifacts.core.artifact import Artifact
+from artifacts.core.storage import MANIFEST
 from config import (
     FLATLINE,
     HEARTBEAT_SECONDS,
