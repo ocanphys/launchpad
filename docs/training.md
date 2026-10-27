@@ -16,17 +16,46 @@ names its job and decides its `uid`, `artifact_path` and `lineage_hash`;
 ## Declaring a run
 
 A leg is declared like any other artifact. Everything that decides the result
-is a parameter.
+is a parameter. Here three books from Project Gutenberg train the model and a
+fourth validates it:
 
 ```python
 from artifacts.core.SGD.training import (
     LoopConfig, LRSchedule, OptimizerParameters, TrainingParameters,
 )
+from artifacts.mappeddataset import MappedDataSet
+from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
+from artifacts.tokenizers.bpe import Tokenizer
 from models.transformer import Transformer
 
+# Sources: each downloads one book to sources/<name>/body.txt.
+GUTENBERG = "https://www.gutenberg.org/cache/epub"
+pride = SourceURL(name="pride-and-prejudice", url=f"{GUTENBERG}/1342/pg1342.txt")
+moby = SourceURL(name="moby-dick", url=f"{GUTENBERG}/2701/pg2701.txt")
+frankenstein = SourceURL(name="frankenstein", url=f"{GUTENBERG}/84/pg84.txt")
+alice = SourceURL(name="alice-in-wonderland", url=f"{GUTENBERG}/11/pg11.txt")
+
+# Tokenizer: BPE merges learned from the training books. <|endoftext|> is the
+# separator the dataset puts between books, so no sequence runs from one into
+# the next.
+tokenizer = Tokenizer(
+    vocab_size=4096,
+    special_tokens=("<|endoftext|>",),
+    sources=(pride, moby, frankenstein),
+)
+
+# Dataset: every book tokenized with that tokenizer, the token files read in
+# place. DataSet takes the same arguments and concatenates them into its own.
+dataset = MappedDataSet.from_sources(
+    tokenizer=tokenizer,
+    train_sources=(pride, moby, frankenstein),
+    valid_sources=(alice,),
+)
+
+# The leg: the model and how it is trained.
 leg = Pretraining(
-    run_id="tinystories",
+    run_id="gutenberg",
     dataset=dataset,
     model=Transformer(
         vocab_size=tokenizer.vocab_size, sequence_length=256, num_layers=4,
@@ -258,7 +287,7 @@ flowchart LR
 
 ```python
 leg2 = Pretraining(
-    run_id="tinystories",
+    run_id="gutenberg",
     dataset=dataset,
     starting_checkpoint=leg,          # no model: it is leg's
     training_parameters=TrainingParameters(total_steps=20000, ...),

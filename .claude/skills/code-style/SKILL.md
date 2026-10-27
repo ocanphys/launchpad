@@ -1,6 +1,6 @@
 ---
 name: code-style
-description: Code style and module-organization guidelines for this project (launchpad): docstring format, when a function is justified, and how to structure modules. Load before writing or reviewing Python code here.
+description: Code style and module-organization guidelines for this project (launchpad) docstring format, when a function is justified, and how to structure modules. Load before writing or reviewing Python code here.
 ---
 
 # Code style

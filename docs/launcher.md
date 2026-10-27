@@ -74,10 +74,11 @@ no graph walk; a dependency is a path in `depends_on`, and whatever else is true
 of it lives on its own entry, so no entry goes stale when another changes.
 `parameters` is the artifact's own fields only, never a dependency's manifest.
 A definition at a path never changes once declared, so each path is decoded
-once and kept for the container's life. The `state` docstring owns the
+once and kept for the container's life; the one thing read from the manifest
+again on every scan is its `tags`, which a redeclaration can change. The `state` docstring owns the
 entry's fields.
 
-An entry has two halves. The **durable half** (type, parameters, status,
+An entry has two halves. The **durable half** (type, parameters, tags, status,
 `done`, `ready`, `blocked_by`, `durable_progress`) changes only when the volume
 does, so only a recompute changes it. The **live half** (`call_id`, `active`,
 `last_heartbeat`, `live_progress`, `verdict`) is `launcher.state.liveness` over

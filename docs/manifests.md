@@ -12,6 +12,7 @@ tokenizer trained on one source:
   "artifact": "artifacts.tokenizers.bpe.Tokenizer",
   "declaring_commit": "<declaring-revision>",
   "allocated_resources": {"cpu": null, "gpu_count": null, "gpu_type": null},
+  "tags": {"project": ["language_modeling"]},
   "parameters": {"special_tokens": ["<pad>"], "vocab_size": 1000},
   "dependencies": {
     "sources": [
@@ -91,7 +92,7 @@ Two invariants follow, and only these two:
   a decoded manifest re-encodes to exactly its own text.
 - **Equal artifacts have equal paths and equal definitions.** Two `==`
   artifacts can still have different manifests, differing in
-  `declaring_commit` or `allocated_resources`, which `==` ignores and the
+  `declaring_commit`, `allocated_resources` or `tags`, which `==` ignores and the
   manifest records at its root. Their embedded definitions are identical
   bytes in any parent. Nothing compares manifest text to decide whether two
   definitions agree.
@@ -137,8 +138,8 @@ reason: `to_manifest` encodes each one by calling itself.
 from its own `"artifact"` key, then walks `"parameters"` once, bottom-up: every
 JSON array becomes a tuple, and every object carrying `"class"` becomes an
 instance of that class. Then it validates the artifact from those values,
-with `declaring_commit` and `allocated_resources` as the manifest records them:
-an absent key decodes as `None`. A root always has both keys, since
+with `declaring_commit`, `allocated_resources` and `tags` as the manifest records them:
+an absent key decodes as `None`. A root always has all three keys, since
 `lab.declare` writes them, and an embedded definition never does, so one rule
 decodes both, and every dependency comes back with both `None`. All
 validators run, so a manifest that breaks an invariant (a vocabulary mismatch,
@@ -180,10 +181,10 @@ round-tripped by the tests instead.
 
 ## Recorded fields
 
-`declaring_commit` and `allocated_resources` are excluded from identity and
+`declaring_commit`, `allocated_resources` and `tags` are excluded from identity and
 `==`, and recorded once per artifact: at the root of its own manifest. A
 parent embeds its dependencies' definitions without them, and a dependency
-decoded from a parent has both `None`, meaning "recorded at its own path".
+decoded from a parent has all three `None`, meaning "recorded at its own path".
 Whatever needs them reads the artifact's own manifest: declaration loads each
 node from its path, the launcher and `run_job` load the artifact they run, and
 `bind` loads the stored artifact.
@@ -206,9 +207,10 @@ execution; an unspecified dimension is recorded as `null`, and Modal supplies
 its platform default for it.
 
 Once written, a manifest's definition and declaring commit are immutable. A
-matching redeclaration keeps both; only its resources follow the latest
-committed declaration, since they configure the next execution and nothing
-else. The manifest at an artifact's own path is authoritative.
+matching redeclaration keeps both; only its resources and tags follow the
+latest committed declaration. Resources configure the next execution and tags
+only label the artifact. A redeclaration that passes no tags records `{}`, as
+one that passes no resources records the defaults. The manifest at an artifact's own path is authoritative.
 
 ## Why
 

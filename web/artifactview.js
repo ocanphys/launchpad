@@ -118,9 +118,27 @@ function logs(calls) {
 
 // One chart per entry, every metric in it drawn on the same axes: training
 // and validation loss share a chart, so the gap between them reads off the
-// curves rather than off two charts side by side.
-const CHARTS = [["loss", "val_loss"], ["grad_norm"], ["learning_rate"]];
-const METRICS = CHARTS.flat();
+// curves rather than off two charts side by side. A plot is its `metric` and
+// any uPlot series option to override, as `spanGaps: true` does for
+// validation: measured every val_every steps, its line has to cross the steps
+// in between instead of breaking at each of them. A metric in the step log that
+// is not named here gets a chart of its own after these, its line crossing gaps
+// (see `layoutFor`).
+const CHARTS = [
+  [{ metric: "loss" }, { metric: "val_loss", spanGaps: true }],
+  [{ metric: "grad_norm" }],
+  [{ metric: "learning_rate" }],
+  [{ metric: "mfu", spanGaps: true }],
+  [{ metric: "peak_allocated_pct" }, { metric: "peak_reserved_pct", spanGaps: true }],
+];
+// Columns of a step row that are not metrics.
+const ROW_KEYS = ["step", "attempt"];
+// The metrics and the attempts the reader has switched off, the latter in
+// every chart at once. Page state rather than DOM state: the charts are
+// rebuilt when the step log changes, and the choice has to outlive that.
+// Everything starts on.
+const hiddenMetrics = new Set();
+const hiddenAttempts = new Set();
 // One color per attempt, cycling: attempt 1 is always the first color, so a
 // leg's history reads the same on every visit.
 const ATTEMPT_COLORS = ["#0969da", "#cf222e", "#1a7f37", "#8250df", "#bf8700", "#e16f24"];
@@ -131,60 +149,106 @@ function fmt(value) {
   return String(Number(Number(value).toPrecision(3)));
 }
 
+// The charts to draw for a leg's step rows: CHARTS, then one chart per metric
+// the rows hold a number for that CHARTS does not name, by name.
+function layoutFor(train) {
+  const named = new Set(CHARTS.flat().map((plot) => plot.metric));
+  const extra = [...new Set(train.flatMap(Object.keys))]
+    .filter((key) => !ROW_KEYS.includes(key) && !named.has(key) && train.some((row) => typeof row[key] === "number"))
+    .sort();
+  return [...CHARTS, ...extra.map((metric) => [{ metric, spanGaps: true }])];
+}
+
 // uPlot's columnar data off the leg's step rows: `steps` is every step any
 // attempt took, `ys[metric][i]` attempt i's value at each of them, null
 // where it has no row (before its resume point, after its crash). One x
 // for every attempt is what puts a step two attempts both took at one
 // place on the chart.
-function columns(train) {
+function columns(train, metrics) {
   const steps = [...new Set(train.map((r) => r.step))].sort((a, b) => a - b);
   const attempts = [...new Set(train.map((r) => r.attempt))].sort((a, b) => a - b);
   const at = new Map(steps.map((s, i) => [s, i]));
-  const ys = Object.fromEntries(METRICS.map((m) => [m, attempts.map(() => new Array(steps.length).fill(null))]));
+  const ys = Object.fromEntries(metrics.map((m) => [m, attempts.map(() => new Array(steps.length).fill(null))]));
   for (const row of train) {
     const i = attempts.indexOf(row.attempt), j = at.get(row.step);
-    for (const metric of METRICS) ys[metric][i][j] = row[metric] ?? null;
+    for (const metric of metrics) ys[metric][i][j] = row[metric] ?? null;
   }
   return { steps, attempts, ys };
 }
 
-// One chart's metrics against step, every attempt its own color and every
-// metric after the first dashed. Drag to zoom x, double-click to reset,
-// click a legend entry to hide that line; the cursor is synced across the
-// leg's charts so hovering one reads the step off all three.
-function chart(metrics, { steps, attempts, ys }) {
+// One chart's plots (see CHARTS) against step, every attempt its own color
+// and every plot after the first dashed. Returns the chart's node, its uPlot
+// and its `syncLegend`, which `showLines` calls. Drag to zoom x, double-click
+// to reset, click a legend entry to hide that line; the cursor is synced across
+// the leg's charts so hovering one reads the step off all of them.
+//
+// The legend lists a line only while it is switched on at the top, and while
+// the cursor is over a step the line has a value at.
+function chart(plots, { steps, attempts, ys }) {
+  const metrics = plots.map((plot) => plot.metric);
   const node = el("div", { class: "curve" });
+  const lines = plots.flatMap(({ metric }) => attempts.map((attempt) => ({ metric, attempt })));
+  // uPlot keeps a legend row per series, the step's first; some charts have no
+  // row for the step, so the rows are counted from the end.
+  const syncLegend = (u) => {
+    const rows = u.root.querySelectorAll(".u-legend .u-series");
+    const at = u.cursor.idx;
+    lines.forEach(({ metric, attempt }, k) => {
+      const row = rows[rows.length - lines.length + k];
+      if (!row) return;
+      const off = hiddenMetrics.has(metric) || hiddenAttempts.has(attempt);
+      row.style.display = off || (at != null && u.data[k + 1][at] == null) ? "none" : "";
+    });
+  };
   const axis = {
     stroke: getComputedStyle(document.body).color,
-    font: "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    font: "9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    gap: 2,
     grid: { stroke: "rgba(128,128,128,.15)" },
-    ticks: { stroke: "rgba(128,128,128,.3)" },
+    ticks: { stroke: "rgba(128,128,128,.3)", size: 3 },
   };
-  new uPlot(
+  const u = new uPlot(
     {
       ...CHART,
       title: metrics.join(" / "),
       cursor: { sync: { key: "curves" }, drag: { x: true, y: false } },
       scales: { x: { time: false } },
-      axes: [axis, { ...axis, size: 52, values: (u, vals) => vals.map(fmt) }],
+      hooks: { setCursor: [syncLegend], setSeries: [syncLegend] },
+      padding: [4, 6, 0, 0], // top, right, bottom, left: the axes already keep their own room
+      axes: [{ ...axis, size: 22 }, { ...axis, size: 40, values: (u, vals) => vals.map(fmt) }],
       series: [
         { label: "step" },
-        ...metrics.flatMap((metric, m) => attempts.map((a, i) => ({
+        ...plots.flatMap(({ metric, ...options }, m) => attempts.map((a, i) => ({
           label: metrics.length > 1 ? `${metric} ${a}` : `attempt ${a}`,
           stroke: ATTEMPT_COLORS[i % ATTEMPT_COLORS.length],
           dash: m > 0 ? [5, 4] : undefined,
-          // validation is measured every val_every steps, so its line has to
-          // cross the steps in between rather than break at each of them
-          spanGaps: m > 0,
           width: 1.2,
           value: (u, v) => (v == null ? "" : fmt(v)),
+          ...options,
         }))),
       ],
     },
     [steps, ...metrics.flatMap((metric) => ys[metric])],
     node,
   );
-  return node;
+  return { node, u, plots, syncLegend };
+}
+
+// Shows the lines whose metric is not in `hiddenMetrics` and whose attempt is
+// not in `hiddenAttempts`, and hides a whole chart once none of its metrics or
+// none of the attempts is left. A line goes through uPlot's own `setSeries`, so a zoom survives it.
+// Series 0 is the step, then each plot's `attempts` in order.
+function showLines(charts, attempts) {
+  for (const { node, u, plots, syncLegend } of charts) {
+    plots.forEach(({ metric }, m) => {
+      attempts.forEach((attempt, i) => {
+        const shown = !hiddenMetrics.has(metric) && !hiddenAttempts.has(attempt);
+        u.setSeries(1 + m * attempts.length + i, { show: shown });
+      });
+    });
+    syncLegend(u);
+    node.hidden = plots.every(({ metric }) => hiddenMetrics.has(metric)) || attempts.every((a) => hiddenAttempts.has(a));
+  }
 }
 
 // The charts last drawn and the rows they were drawn from. `page.train` is
@@ -199,11 +263,32 @@ let drawnTrain = null, drawnCurves = null;
 function curvesSection(train) {
   if (!train.length) return null;
   if (train !== drawnTrain) {
-    const data = columns(train);
+    const layout = layoutFor(train);
+    const metrics = layout.flat().map((plot) => plot.metric);
+    const data = columns(train, metrics);
+    const charts = layout.map((plots) => chart(plots, data));
+    // A checkbox that keeps `value` out of `hidden` while ticked.
+    const toggle = (hidden, value, text, style) =>
+      el("label", { class: "log-filter", style },
+        el("input", {
+          type: "checkbox",
+          checked: !hidden.has(value),
+          onchange: (event) => {
+            event.target.checked ? hidden.delete(value) : hidden.add(value);
+            showLines(charts, data.attempts);
+          },
+        }),
+        text,
+      );
+    showLines(charts, data.attempts);
     drawnTrain = train;
     drawnCurves = el("div", { class: "artifact-curves" },
-      el("div", { class: "summary-type", text: "training" }),
-      el("div", { class: "curve-row" }, ...CHARTS.map((metrics) => chart(metrics, data))),
+      el("div", { class: "summary-type", text: "training" }, ...metrics.map((m) => toggle(hiddenMetrics, m, m))),
+      el("div", { class: "summary-type", text: "attempts" },
+        ...data.attempts.map((a, i) =>
+          toggle(hiddenAttempts, a, a, "color:" + ATTEMPT_COLORS[i % ATTEMPT_COLORS.length])),
+      ),
+      el("div", { class: "curve-row" }, ...charts.map(({ node }) => node)),
     );
   }
   return drawnCurves;

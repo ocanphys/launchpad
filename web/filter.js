@@ -1,8 +1,9 @@
 // filter.js -- narrows the table level by level down an artifact's manifest,
 // as its JSON nests. The top level is the artifact's class (the state map's
-// `type`, the manifest's `artifact`). Once one is picked, every entry has the
-// same two filterable keys under it: `parameters`, the manifest's own tree,
-// and `dependencies`, every dependency's path (`depends_on`) as one set of
+// `type`, the manifest's `artifact`). Beside it, for every class or one, sits
+// `tags`, the manifest's, a level per tag key. Once a class is picked, every
+// entry has two more filterable keys under it: `parameters`, the manifest's own
+// tree, and `dependencies`, every dependency's path (`depends_on`) as one set of
 // choices. Every key is a level, closed until clicked: one holding an object
 // opens onto its keys, any other onto its values, a min/max range when every
 // one is a number and a checkbox apiece otherwise. Only an open level
@@ -26,13 +27,13 @@ let built = null;
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
 // The values `entry` holds at a dotted `path`: the one value there, or none,
-// and every dependency's path at "dependencies". A list anywhere else is one
-// value, not several (`betas`).
+// every dependency's path at "dependencies", and the values filed under a tag
+// key at "tags.<key>". A list anywhere else is one value, not several (`betas`).
 function held(entry, path) {
-  let value = { parameters: entry.parameters, dependencies: entry.depends_on };
+  let value = { parameters: entry.parameters, dependencies: entry.depends_on, tags: entry.tags };
   for (const key of path.split(".")) value = isObject(value) ? value[key] : undefined;
   if (value === undefined) return [];
-  return path === "dependencies" ? value : [value];
+  return path === "dependencies" || path.startsWith("tags.") ? value : [value];
 }
 
 // Every distinct value `entries` hold at `path`, numbers ascending and
@@ -47,8 +48,7 @@ function values(entries, path) {
 }
 
 function passes(entry) {
-  if (!artifact) return true;
-  if (entry.type !== artifact) return false;
+  if (artifact && entry.type !== artifact) return false;
   for (const [path, picked] of chosen) {
     if (!held(entry, path).some((v) => picked.has(JSON.stringify(v)))) return false;
   }
@@ -130,16 +130,19 @@ function node(entries, key, path, onChange) {
   return level(key, path, onChange, () => (numeric ? range : choices)(path, found, onChange), found.length);
 }
 
-// The class picker and, once a class is picked, its `parameters` and
-// `dependencies` levels. Hands back the node it built last time until the
+// The class picker, the `tags` level, and, once a class is picked, its
+// `parameters` and `dependencies` levels. Hands back the node it built last time until the
 // classes, the open levels or the manifests under them change, so a poll
 // never rebuilds an input under the reader's cursor: a caller mounts the
 // node only when it is a different one.
 export function filterBar(states, onChange) {
   const all = Object.values(states);
   const classes = [...new Set(all.map((e) => e.type).filter(Boolean))].sort();
-  const entries = artifact ? all.filter((e) => e.type === artifact) : [];
-  const key = JSON.stringify([artifact, classes, [...open], entries.map((e) => [e.parameters, e.depends_on])]);
+  const entries = artifact ? all.filter((e) => e.type === artifact) : all;
+  const key = JSON.stringify([
+    artifact, classes, [...open],
+    entries.map((e) => [...(artifact ? [e.parameters, e.depends_on] : []), e.tags]),
+  ]);
   if (built?.key === key) return built.node;
 
   const clear = () => { chosen.clear(); ranges.clear(); built = null; };
@@ -152,6 +155,7 @@ export function filterBar(states, onChange) {
       ),
       artifact ? el("button", { type: "button", text: "clear", onclick: () => { clear(); onChange(); } }) : null,
     ),
+    node(entries, "tags", "tags", onChange),
     artifact
       ? [
           node(entries, "parameters", "parameters", onChange),

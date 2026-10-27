@@ -127,7 +127,7 @@ function actionButton(path, state, ctx) {
 
 
 // One <tr> per declared artifact: status dot + type (its call and last beat
-// on hover), path, progress, and the button that launches or stops it.
+// on hover), path, tags, progress, and the button that launches or stops it.
 export function artifactRow(path, state, ctx) {
   return el("tr", { class: "artifact-row" },
     el("td", {},
@@ -140,8 +140,21 @@ export function artifactRow(path, state, ctx) {
     el("td", { class: "artifact-path dim" },
       el("a", { class: "artifact-link", href: "#/artifact/" + path, text: path, title: path }),
     ),
+    el("td", { class: "tags" },
+      Object.entries(state.tags).flatMap(([key, values]) =>
+        values.map((value) => el("span", { class: "tag-chip", text: value, title: key })),
+      ),
+    ),
     el("td", { class: "progress" }, progressCell(state)),
     el("td", {}, actionButton(path, state, ctx)),
+  );
+}
+
+// The <tr> that opens an experiment's group in the experiments view: its name
+// and how many artifacts follow, across all the table's columns.
+export function experimentRow(name, count) {
+  return el("tr", { class: "experiment-row" },
+    el("td", { colspan: 5 }, name, el("span", { class: "dim", text: "  " + count })),
   );
 }
 

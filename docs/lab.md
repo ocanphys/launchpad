@@ -78,16 +78,16 @@ the kernel is and ships them.
    commit declaring now, `lab._head()`, so declaring a new artifact over
    dependencies declared at an older commit reports drift on each of their
    rows. Drift blocks only with `strict_commit=True`; resource differences
-   never block. A node carrying `allocated_resources=None`, a dependency of a
-   loaded artifact, requests no resources: its row reports the stored ones,
-   and nothing is compared or written for them.
+   never block. A node carrying `allocated_resources=None` or `tags=None`, a
+   dependency of a loaded artifact, requests neither: its row reports the
+   stored ones, and nothing is compared or written for them.
 4. Collect one row per path with its state, drift and differences. A preview
    returns these in a report and writes nothing, not even a folder.
 5. With `commit=True`, refuse before writing if any row blocks. Otherwise write
    the manifests of `new` artifacts in dependency order, each stamped with
    `lab._head()` as its `declaring_commit` (and `Resources()` when it requests
-   none), and rewrite an existing matching manifest whose resources differ
-   with the requested resources, its definition and declaring commit kept. Against the mounted volume,
+   none, `{}` for tags), and rewrite an existing matching manifest whose resources
+   or tags differ with the requested ones, its definition and declaring commit kept. Against the mounted volume,
    reload before inspecting and commit after writing.
 6. Return a report recording created and updated manifests and the resulting
    states, reusing the resolved graph.
@@ -122,7 +122,7 @@ flowchart TD
   C -->|no| OUT["Print and return the report"]
   C -->|yes| BL{"Any blockers?<br/>conflict, undeclared, or drift under strict_commit"}
   BL -->|yes| ERR["raise DeclarationError(report)"]
-  BL -->|no| W["Write missing manifests, update changed resources<br/>storage.write_manifest(to_manifest())<br/>new: model_copy(update={declaring_commit: _head()})<br/>changed: model_copy(update={allocated_resources})"]
+  BL -->|no| W["Write missing manifests, update changed resources and tags<br/>storage.write_manifest(to_manifest())<br/>new: model_copy(update={declaring_commit: _head()})<br/>changed: model_copy(update={allocated_resources, tags})"]
   W --> RI["Re-inspect written rows<br/>_inspect()"]
   RI --> CP["Copy the notebook if it created a Training<br/>runs/run_id/declare-uid.ipynb"]
   CP --> SV["Commit the mount (inside a container only)<br/>save()"]

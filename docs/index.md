@@ -21,4 +21,4 @@ described.
 | [Artifact Repository](repository.md) | What lives where: the volume, the Dicts, the code. |
 
 Every Markdown file in `docs/` is a page here. `mkdocs serve` previews them
-locally; `modal deploy main.py` publishes them at `/guide/`.
+locally; `mkdocs build --strict && modal deploy main.py` publishes them at `/guide/`.

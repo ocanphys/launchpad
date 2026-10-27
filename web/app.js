@@ -1,5 +1,6 @@
 // app.js -- the runtime: app state, fetching, launching, and routing between
-// the artifact table and one artifact's own page. This is the only file that
+// the artifact table, the same artifacts grouped by experiment, and one
+// artifact's own page. This is the only file that
 // talks to the network. Rendering is delegated to
 // render.js, artifactview.js and logview.js, narrowing the table to
 // filter.js; DOM building to el.js.
@@ -10,7 +11,8 @@
 // and when the refresh button POSTs /refresh. The page just refetches the
 // current view on a clock and redraws what changed.
 
-import { artifactRow, problemRow } from "./render.js";
+import { el } from "./el.js";
+import { artifactRow, experimentRow, problemRow } from "./render.js";
 import { renderArtifactPending, renderArtifactView } from "./artifactview.js";
 import { logStream, union } from "./logview.js";
 import { filterBar, visible } from "./filter.js";
@@ -29,6 +31,8 @@ const refreshEl = document.getElementById("refresh");
 const metaEl = document.getElementById("meta");
 const dashboardEl = document.getElementById("dashboard");
 const filtersEl = document.getElementById("filters");
+const depsToggleEl = document.getElementById("depsToggle");
+const showDepsEl = document.getElementById("showDeps");
 const shownEl = document.getElementById("shown");
 const rowsEl = document.getElementById("rows");
 const emptyEl = document.getElementById("empty");
@@ -57,6 +61,17 @@ const pending = new Map();
 // pending marks, as text. A poll that matches it draws nothing, so an idle
 // table never rebuilds its rows under the reader.
 let drawn = null;
+
+// The tag key whose values name an experiment (`tags={"experiment": [...]}`).
+const EXPERIMENT = "experiment";
+
+// Which table is on screen: "experiments" lists the artifacts tagged with an
+// experiment under each of their experiments, so one in two experiments is in
+// two places, and "artifacts" lists every artifact once. Set by route().
+let mode = "experiments";
+
+// Whether each experiment also lists what its tagged artifacts are built from.
+let showDependencies = false;
 
 // The artifact page's disk image (`/artifact/<path>`: the manifest and step
 // log, a real file read on the server's mount) and the entry it was fetched
@@ -110,7 +125,10 @@ function stamp(states) {
 }
 
 // Every artifact on the volume that passes the filter bar, one row each, by
-// path. Full rebuild of the rows each time is correct and cheap at this
+// path; in the experiments view only those tagged with an experiment, under a
+// row naming each experiment, a row apiece for every experiment it is in, and
+// with `showDependencies` everything they depend on, once per experiment.
+// Full rebuild of the rows each time is correct and cheap at this
 // scale; the bar is the one thing focusable, and filterBar hands back the
 // same node until its fields change, so it is mounted only when it is a new
 // one. A poll that brings back the same map and finds the same pending marks
@@ -118,15 +136,36 @@ function stamp(states) {
 function draw(states) {
   const bar = filterBar(states, redraw);
   if (filtersEl.firstChild !== bar) filtersEl.replaceChildren(bar);
-  const all = Object.keys(states).sort();
-  const paths = visible(states);
+  const grouped = mode === "experiments";
+  const experiments = (path) => states[path].tags[EXPERIMENT] || [];
+  const all = Object.keys(states).filter((path) => !grouped || experiments(path).length).sort();
+  const paths = visible(states).filter((path) => all.includes(path));
   shownEl.textContent = paths.length < all.length ? `${paths.length} of ${all.length} shown` : "";
 
-  const key = JSON.stringify([paths, states, [...pending]]);
+  depsToggleEl.hidden = !grouped;
+  const key = JSON.stringify([mode, showDependencies, paths, states, [...pending]]);
   if (key === drawn) return;
   drawn = key;
-  rowsEl.replaceChildren(...paths.map((path) => artifactRow(path, states[path], ctx)));
-  emptyEl.textContent = all.length ? "nothing matches these filters." : "nothing declared on the volume yet.";
+  const row = (path) => artifactRow(path, states[path], ctx);
+  rowsEl.replaceChildren(...(grouped
+    ? [...new Set(paths.flatMap(experiments))].sort().flatMap((name) => {
+        const tagged = paths.filter((path) => experiments(path).includes(name));
+        const dependencies = new Set();
+        const collect = (path) => {
+          for (const dep of states[path].depends_on) {
+            if (!states[dep] || dependencies.has(dep)) continue;
+            dependencies.add(dep);
+            collect(dep);
+          }
+        };
+        if (showDependencies) tagged.forEach(collect);
+        const members = [...tagged, ...[...dependencies].filter((path) => !tagged.includes(path)).sort()];
+        return [experimentRow(name, members.length), ...members.map(row)];
+      })
+    : paths.map(row)));
+  emptyEl.textContent = all.length
+    ? "nothing matches these filters."
+    : grouped ? "no artifact is tagged with an experiment yet." : "nothing declared on the volume yet.";
   emptyEl.hidden = paths.length > 0;
 
   // Manifests state() could not read, whatever the filters say. Only touches
@@ -135,7 +174,7 @@ function draw(states) {
   const problems = all.filter((path) => states[path].error);
   problemRowsEl.replaceChildren(...problems.map((path) => problemRow(path, states[path])));
   problemCountEl.textContent = problems.length;
-  problemsEl.hidden = problems.length === 0;
+  problemsEl.hidden = grouped || problems.length === 0;
 }
 
 // Redraw from the last good payload (used after a local state change --
@@ -265,14 +304,15 @@ async function refresh() {
 
 // --- routing ------------------------------------------------------------------
 
-// Two routes, both client-side: "" (the table) and "artifact/<path>". No
+// Three routes, all client-side: "" and "experiments" (the table grouped by
+// experiment), "artifacts" (the table of every artifact) and "artifact/<path>". No
 // encodeURIComponent on the path when building or reading these -- an
 // artifact_path's /s are meant to stay literal, the same convention act()
 // already follows for the POST /launch and /cancel routes.
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, "");
   if (hash.startsWith("artifact/")) return { view: "artifact", id: hash.slice(9) };
-  return { view: "table", id: null };
+  return { view: hash === "artifacts" ? "artifacts" : "experiments", id: null };
 }
 
 // Re-entered on every hashchange, and once at load: switches the page over,
@@ -281,11 +321,16 @@ function parseRoute() {
 function route() {
   routeToken++;
   const r = parseRoute();
-  document.body.classList.toggle("dashboard-page", r.view === "table");
+  const table = r.view !== "artifact";
+  document.body.classList.toggle("dashboard-page", table);
   disk = null; // another artifact's manifest and step log are not this one's
 
-  if (r.view === "table") {
-    titleEl.textContent = "artifacts";
+  if (table) {
+    mode = r.view;
+    // The two tables, the open one bold: where the title was, since the table
+    // has no other name.
+    const tab = (name, href) => el("a", { href, class: name === mode ? "tab open" : "tab", text: name });
+    titleEl.replaceChildren(tab("artifacts", "#/artifacts"), el("span", { class: "dim", text: " | " }), tab("experiments", "#/experiments"));
     dashboardEl.hidden = false;
     artifactViewEl.hidden = true;
     // Draw the last payload now rather than waiting on a fresh fetch, so
@@ -334,6 +379,10 @@ splitEl.addEventListener("pointerdown", (event) => {
 });
 
 refreshEl.addEventListener("click", () => load(refresh));
+showDepsEl.addEventListener("change", () => {
+  showDependencies = showDepsEl.checked;
+  redraw();
+});
 window.addEventListener("hashchange", route);
 drawLauncherLogs([], "loading launcher logs…"); // the frame is there before the first answer
 route();

@@ -47,6 +47,7 @@ modal secret create launchpad-lab \
   DASHBOARD_PASSWORD='pick-one' \
   JUPYTER_TOKEN=$(openssl rand -hex 24)
 
+mkdocs build --strict        # the docs the dashboard serves at /guide/
 modal deploy main.py         # deploys the dashboard, launcher, workers and lab
 ```
 
@@ -162,6 +163,9 @@ of it):
   `allocated_resources=Resources(gpu_type="A100")`. With none, the job runs on
   the default CPU pool. Resources are not part of identity, so changing them
   does not create a new artifact.
+- **Tags.** Label an artifact with `tags={"project": ["language_modeling"]}` and
+  filter the dashboard by them. Like resources they are not identity, and a
+  later declaration with different tags rewrites them.
 - **Architectures.** `Transformer` and `Mamba` ship in `models/`, and one
   `Pretraining` class trains either ([Models](models.md)).
 - **Checkpoints and resume.** A job writes failsafe checkpoints every
