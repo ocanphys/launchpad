@@ -3,11 +3,14 @@
 NEVER USE EM DASHES ANYWHERE.
 
 Artifacts are folders on a Modal Volume, each owning a `manifest.json` that names what it
-is and what it's built from. The model — what an artifact and a job are, how
-declaration/resolution/launching fit together — is [artifacts/core/spec.md](artifacts/core/spec.md).
-The map of where things live and how traffic flows is [README.md](README.md).
+is and what it's built from. Everything that describes what the code does lives in
+[docs/](docs/), served with `mkdocs serve`: what an artifact and a job are, and how
+declaration, resolution and launching fit together, each described once, on one page.
+Start at [docs/framework.md](docs/framework.md). The map of where things live and how
+traffic flows is [README.md](README.md).
 
-Design rationale goes in `spec.md`. This file is how to write code here.
+Design rationale goes on the docs page of its subject, under a "Why" heading. This file is
+how to write code here.
 
 Subtleties learned the hard way go in [LESSONS.md](LESSONS.md): what is true,
 how it was found, what to do about it. Read it before touching checkpoints,
@@ -17,7 +20,7 @@ turns up something the code cannot say for itself.
 ## Abstraction
 
 **A helper needs two call sites, or it isn't a helper.** One caller means inline it. The
-exception is a name that replaces something genuinely opaque — a regex, a bit-twiddle — not
+exception is a name that replaces something genuinely opaque (a regex, a bit-twiddle), not
 a name that restates the three lines below it.
 
 **Never split one computation into functions that must be called in order.** If `f`'s
@@ -31,7 +34,7 @@ in one place.
 signatures to answer a question that has one right answer makes four signatures worse and
 nothing better.
 
-**One function, one return type.** Don't return a value on one branch and `None` on another —
+**One function, one return type.** Don't return a value on one branch and `None` on another:
 every caller then carries the branch too.
 
 **"Might be general later" is not a reason.** It reliably produces a helper with one caller
@@ -48,13 +51,19 @@ few lines, a seam is a boundary around a problem you may want to solve different
 ## Docstrings and comments
 
 **First line says what it returns, present tense.** Then at most one paragraph, for the single
-thing a caller can get wrong. Stop there.
+thing a caller can get wrong. A user-facing function (anything a notebook or a job calls)
+ends with one input/output example with real values; mkdocs renders it on its docs page.
+Stop there.
+
+**Code and its docs page change in the same commit.** A docs page describes the code once;
+any other text about the same subject is folded into the page and deleted, so no two texts
+can disagree.
 
 **Never describe what the code used to be.** No "used to," "no longer," "instead of the old."
 A reader cannot distinguish a description of the present from a description of the past, so
 history in a docstring makes the whole docstring untrustworthy. Git has the history.
 
-**Design rationale belongs in `spec.md`, not the docstring.** "Why this and not the other
+**Design rationale belongs on the docs page of its subject, not in the docstring.** "Why this and not the other
 design" is a document. A docstring that argues it makes the reader read an argument to find
 an API.
 
@@ -65,8 +74,8 @@ justification reads as settled and stops anyone re-examining it.
 **Docstrings are call sites.** Renaming an attribute means the docstrings that use it are now
 wrong, not just stale.
 
-**Removing a mechanism means grepping its name and clearing every mention in the same commit**
-— docstrings, comments, README, spec.
+**Removing a mechanism means grepping its name and clearing every mention in the same commit**:
+docstrings, comments, README, docs.
 
 ## Deleting
 

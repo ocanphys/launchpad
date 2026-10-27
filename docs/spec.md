@@ -1,6 +1,6 @@
 # Artifact Framework Backbone Spec
 
-The contract every artifact, job, and the code that declares, resolves, launches and binds them is written against. [README.md](../../README.md) is the map of where things live; [docs/workflows.md](../../docs/workflows.md) traces each flow function by function.
+The contract every artifact, job, and the code that declares, resolves, launches and binds them is written against. `README.md` is the map of where things live; `notes-scratch/workflows.md` traces each flow function by function.
 
 ## 1. Purpose
 
@@ -44,7 +44,7 @@ A parameter is encoded and decoded by pydantic against its field's annotation, s
 
 A manifest stores a record's fields and not its class, so the annotation is the schema: a record encodes as plain data, and its class can move or be renamed without migrating manifests. It follows that a record field holds exactly its annotated class, since a subclass would decode as the base, and that a union holds at most one record type, since nothing on disk tells two apart. The one exception is declared by the base class: a record class with `polymorphic = True`, such as `Model`, may stand in a field as any subclass, and that field's manifest carries the subclass's dotted path under `"class"`, beside its fields; `class` is a Python keyword, so no field collides with it. Decoding reads it and rebuilds the record as `locate(class)`. That is how one `Pretraining` class trains every architecture: `"model": {"class": "models.transformer.Transformer", "d_model": 64, ...}`.
 
-**A constructor keeps a value only if its manifest decodes back equal to it, field types included.** Every constructor runs each parameter through the codec, so an int in a float field becomes that float, `-0.0` becomes `0.0`, and records are rebuilt through their constructors; anything that would not come back exactly raises instead of being coerced. Coercion would let an artifact differ from what its manifest decodes to, breaking the `==` that declaration and `bind` depend on; normalizing means two equal artifacts encode, and so hash and land, identically. Decoding is equally strict and refuses unknown and missing fields. [LESSONS.md](../../LESSONS.md) records the pydantic settings this takes.
+**A constructor keeps a value only if its manifest decodes back equal to it, field types included.** Every constructor runs each parameter through the codec, so an int in a float field becomes that float, `-0.0` becomes `0.0`, and records are rebuilt through their constructors; anything that would not come back exactly raises instead of being coerced. Coercion would let an artifact differ from what its manifest decodes to, breaking the `==` that declaration and `bind` depend on; normalizing means two equal artifacts encode, and so hash and land, identically. Decoding is equally strict and refuses unknown and missing fields. `LESSONS.md` records the pydantic settings this takes.
 
 Conversion is separate from filesystem access:
 
@@ -234,13 +234,13 @@ A state result is an observation over a scan interval, not a transactional snaps
 
 The launcher recomputes the map, reloading the volume, only when something has changed what it would say: a call announced that it started or ended, the launcher granted or released a lease, or the page asked (a manifest declared from the lab is announced by no call). Between recomputes the map is the authority on the volume, lagged by one message but complete, because an artifact's files never leave the volume once they land. The live half of an entry (which call holds it, its last beat, its reported progress, and the verdict those imply) depends on a lease and a heartbeat alone, so it is reread on every request for the calls under way.
 
-A reload and a read on one mount must never overlap, which one lock in the launcher enforces; the [README](../../README.md#readwrite-traffic) and LESSONS.md ("A background thread makes the mount's reload race its readers") have why and how. One container owns the map. Nothing reaches the dashboard from a worker except what the worker committed under its lease, and the log rows and heartbeats it publishes to the Dicts; the launcher container writes nothing to the volume.
+A reload and a read on one mount must never overlap, which one lock in the launcher enforces; README.md ("Read/write traffic") and LESSONS.md ("A background thread makes the mount's reload race its readers") have why and how. One container owns the map. Nothing reaches the dashboard from a worker except what the worker committed under its lease, and the log rows and heartbeats it publishes to the Dicts; the launcher container writes nothing to the volume.
 
 ### Minimal execution contract
 
 A job is eligible when its declaration and dependency graph are valid, it has a producer, its state is `declared` or `partial`, every direct dependency is `done`, and no execution owns its exact path. Eligibility permits an attempt; the producer must validate any partial state before resuming. Virtual artifacts become complete through their inputs and are never launched.
 
-For an eligible artifact, the executor ([docs/workflows.md](../../docs/workflows.md) §6 and §8 trace each step):
+For an eligible artifact, the executor (`notes-scratch/workflows.md` §6 and §8 trace each step):
 
 1. Refuses while a call is active or starting on its path.
 2. Refreshes storage, checks readiness against the manifest at the path and each direct dependency's manifest and completion files, spawns a worker with resources from that manifest, and records the grant naming that call.

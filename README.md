@@ -1,13 +1,13 @@
 # launchpad
 
-New here? Start with the [user guide](docs/guide.md): setup, a first workflow,
+New here? Start with the [user guide](notes-scratch/guide.md): setup, a first workflow,
 and a training example. What follows is the internal map.
 
 Artifacts are folders on a Modal Volume, each owning a `manifest.json` that
 names what it is and what it's built from; state and orchestration are four
 Modal Dicts, one Queue, one web container and one scheduled function. The full model -- what an artifact and a
 job *are*, how declaration/resolution/launching fit together -- is
-[artifacts/core/spec.md](artifacts/core/spec.md); this file is the map of
+[docs/spec.md](docs/spec.md); this file is the map of
 where things live and how traffic flows between them.
 
 ## Where things live
@@ -16,7 +16,7 @@ where things live and how traffic flows between them.
   `manifest.json`, whatever files that artifact type declares, and a
   `logs/` folder with one `{call_id}.jsonl` per call ever launched for
   it -- appended by `persist_logs` out of the Dicts on its schedule, one
-  JSON row per log record (see [docs/LOGGING.md](docs/LOGGING.md)). At
+  JSON row per log record (see [notes-scratch/LOGGING.md](notes-scratch/LOGGING.md)). At
   the root, `call_history.json`: every grant ever made, per artifact_path,
   written on the same pass. A leg's `train.jsonl` is the worker's own
   file, one row per step, appended to as it trains rather than published
@@ -92,7 +92,7 @@ where things live and how traffic flows between them.
 
 The web app (`leasebook`) serves a small dashboard: one table, one row per
 artifact on the volume, a live launcher-log side panel, and a drill-down page per artifact. No build step,
-no framework. Full writeup: [docs/UI.md](docs/UI.md).
+no framework. Full writeup: [notes-scratch/UI.md](notes-scratch/UI.md).
 
 Both URLs are public, so both are behind the secret below. Every dashboard
 route but `/login` and `/guide/` wants a cookie; without one a navigation lands on a login
@@ -253,7 +253,7 @@ took one.
 
 ## Jobs
 
-The full model is [artifacts/core/spec.md](artifacts/core/spec.md); this is
+The full model is [docs/spec.md](docs/spec.md); this is
 the shape of it. Each artifact family (`artifacts/sources/`,
 `artifacts/tokenizers/bpe/`, `artifacts/tokenized/`, `artifacts/dataset/`,
 `artifacts/mappeddataset/`, `artifacts/stages/pretraining/`, ...) pairs an
