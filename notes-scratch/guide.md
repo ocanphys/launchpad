@@ -227,7 +227,7 @@ Launching and the dashboard need the deployment.
 | The model: artifacts, jobs, leases | [artifacts/core/spec.md](../artifacts/core/spec.md) |
 | Where code lives, how traffic flows | [README.md](../README.md) |
 | Every flow as a flowchart | [workflows.md](workflows.md) |
-| Training and checkpoints | [training.md](../artifacts/stages/pretraining/training.md) |
+| Training and checkpoints | [docs/training.md](../docs/training.md) |
 | Dashboard internals | [UI.md](UI.md) |
 | Log format | [LOGGING.md](LOGGING.md) |
 | Pitfalls found the hard way | [LESSONS.md](../LESSONS.md) |

@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from functools import cached_property
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from artifacts.core.artifact import Artifact, ParamConfig
 
@@ -139,20 +139,23 @@ class Training(Artifact):
     run_id: str
     training_parameters: TrainingParameters
     loop_config: LoopConfig
-    model: Model | None = None
+    model: Model  # filled in from starting_checkpoint when omitted
     starting_checkpoint: Training | None = None
 
-    def model_post_init(self, context: object) -> None:
-        super().model_post_init(context)
-        if self.starting_checkpoint is None:
-            if self.model is None:
-                raise ValueError("model is required without a starting_checkpoint")
-            return
-        inherited = self.starting_checkpoint.model
-        if self.model is None:
-            object.__setattr__(self, "model", inherited)
-        elif self.model != inherited:
+    @model_validator(mode="before")
+    @classmethod
+    def _inherit_model(cls, data: Any) -> Any:
+        """Returns `data` with the starting checkpoint's model when it names none,
+        so a leg continuing another states only what changes."""
+        if isinstance(data, dict) and data.get("model") is None and data.get("starting_checkpoint") is not None:
+            return {**data, "model": data["starting_checkpoint"].model}
+        return data
+
+    @model_validator(mode="after")
+    def _model_matches_checkpoint(self) -> Self:
+        if self.starting_checkpoint is not None and self.model != self.starting_checkpoint.model:
             raise ValueError("model must match starting_checkpoint.model")
+        return self
 
     @cached_property
     def start_step(self) -> int:

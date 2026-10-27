@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
+from pydantic import ValidationError
 
 from artifacts.core.artifact import Artifact
 from artifacts.core.SGD.lr_schedule import lr_cosine_schedule
@@ -354,6 +355,12 @@ class PretrainJobTests(unittest.TestCase):
         self.assertEqual(Artifact.from_manifest(leg.to_manifest()).model, mamba)
         with self.assertRaisesRegex(ValueError, "model must match starting_checkpoint.model"):
             Pretraining(model=mamba, starting_checkpoint=self.leg, **inputs)
+
+    def test_a_leg_states_its_model_or_inherits_it_from_its_starting_checkpoint(self):
+        inputs = {"run_id": "r", "dataset": self.dataset, "training_parameters": TRAINING, "loop_config": LOOP}
+        self.assertEqual(Pretraining(starting_checkpoint=self.leg, **inputs).model, self.leg.model)
+        with self.assertRaisesRegex(ValidationError, r"model\n  Field required"):
+            Pretraining(**inputs)
 
     def test_validation_scores_a_split_shorter_than_one_batch(self):
         # 2000 tokens hold 249 sequences of 8, all in one batch of up to 300

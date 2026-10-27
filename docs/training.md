@@ -5,6 +5,14 @@ dataset and a model description and trains for a fixed number of steps. This
 page covers what you declare, what the job does when it runs, how checkpoints
 make a run resumable, and how legs chain into a long run.
 
+The work is split in two layers. `Training` (`artifacts/core/SGD/training.py`)
+is what every leg shares: its param configs, `start_step` and `end_step`, and
+the model it trains. `TrainingJob` (`artifacts/core/SGD/job.py`) builds the
+model and optimizer a leg names, resumes, and writes failsafes. `Pretraining`
+(`artifacts/stages/pretraining/`) adds the dataset, reads its tokenizer there,
+names its job and decides its `uid`, `artifact_path` and `lineage_hash`;
+`PretrainJob` draws the batches and owns the loop.
+
 ## Declaring a run
 
 A leg is declared like any other artifact. Everything that decides the result
@@ -60,6 +68,18 @@ passed where a float is declared (`max_norm=1`) is stored as that float; any
 other conversion is refused. The model's fields are on [Models](models.md); the
 others are below.
 
+What the leg itself checks when it is built, each a validator on its class:
+
+- **The model.** A leg states its `model`, or omits it and inherits its
+  starting checkpoint's, filled in before validation
+  (`Training._inherit_model`). A leg with neither is refused: `model` is a
+  required field. A leg that states one different from its starting
+  checkpoint's is refused (`_model_matches_checkpoint`).
+- **One tokenizer for life.** The leg's tokenizer is its dataset's, since a
+  dataset holds sources tokenized with exactly one. `Pretraining` refuses a
+  model whose `vocab_size` differs from the tokenizer's, and a starting
+  checkpoint trained with another tokenizer (`_one_tokenizer_for_life`).
+
 ::: artifacts.core.SGD.training
     options:
       members: [TrainingParameters, LRSchedule, OptimizerParameters, LoopConfig]
@@ -86,15 +106,49 @@ flowchart TD
 ```
 
 In every case the optimizer settings come from this leg, not from the
-checkpoint it loaded. A leg that starts from another leg also checks that the
+checkpoint it loaded: `load_state_dict` restores the saved leg's, so the job
+overwrites them with `training_parameters.optimizer_parameters` after loading.
+If the starting checkpoint saved no optimizer state, the job warns and uses a
+fresh optimizer. A leg that starts from another leg also checks that the
 checkpoint's recorded step matches its own `start_step`, and refuses
 otherwise.
+
+Function by function:
+
+```mermaid
+flowchart TD
+  INIT["PretrainJob.__init__() -> TrainingJob.__init__()<br/>locate(lr_schedule_fn), torch.manual_seed(seed)"] --> R
+  R["PretrainJob.run(root, worker)"] --> DONE{"Already complete?<br/>status().complete"}
+  DONE -->|yes| SKIP["Log and return"]
+  DONE -->|no| RES["Build model and optimizer<br/>TrainingJob.resume(): Model.build(), locate(optimizer)"]
+  RES --> PICK{"Where to start from"}
+  PICK -->|"newest failsafe holding optimizer state"| FS["checkpoints/step.pt"]
+  PICK -->|"else the previous leg"| SCK["starting_checkpoint model.pt, step must equal start_step"]
+  PICK -->|else| FRESH["Fresh init, step 0"]
+  FS --> LR0
+  SCK --> LR0
+  FRESH --> LR0
+  LR0["Sync the rate to the step<br/>set_learning_rate() -> lr_cosine_schedule()"] --> SLG["Open the step log<br/>StepLog(): next attempt number from train.jsonl"]
+  SLG --> BD["Map the data<br/>dataset.bind(root): train_tokens, valid_tokens"]
+  BD --> LOOP{"step below end_step?"}
+  LOOP -->|yes| STEP["One step<br/>set_learning_rate(), get_train_batch(step) -> batch_loss()<br/>backward(), clip_grad_norm_(), optimizer.step()"]
+  STEP --> VAL{"Validation step?<br/>every val_every, and end_step"}
+  VAL -->|yes| EV["evaluate() -> valid_batches()<br/>worker.progress val_batch"]
+  VAL -->|no| REC
+  EV --> REC["Record the step<br/>StepLog.record(), worker.progress step<br/>StepLog.flush() after validation and before failsafes"]
+  REC --> CK{"Checkpoint step?<br/>every checkpoint_every"}
+  CK -->|yes| FSV["Write a failsafe<br/>failsafe(): worker.publishing(checkpoints/step.pt)<br/>latest policy: strip optimizer from older ones"]
+  CK -->|no| LOOP
+  FSV --> LOOP
+  LOOP -->|no| FIN["Finish<br/>StepLog.flush(), worker.publishing(model.pt)"]
+```
 
 ## One step
 
 `step` counts completed steps. Each iteration increments it first, so the step
 being taken is step number `step`, and its batch and learning rate are both
-functions of that number.
+functions of that number. After `optimizer.step()` the model is the result of
+`step`, which a failsafe written there records.
 
 ```mermaid
 flowchart TD
@@ -116,12 +170,30 @@ flowchart TD
   N -->|yes| M["Write model.pt"]
 ```
 
-The dataset draws the batch. For both `DataSet` and `MappedDataSet`, a step's
-batch is random windows of the token stream chosen by a generator seeded with
-`(seed, step)`. The batch therefore depends on the seed and the step number
-alone, so a resumed run sees exactly the batches the interrupted one would
-have, and no random state needs saving. Validation covers the validation split
-in order.
+**The optimizer holds the rate of the current step.** The loop sets it just
+before taking the step, and a checkpoint saves it with the model and optimizer,
+so a checkpoint at step N carries the rate step N was taken with, whichever
+attempt wrote it; `resume` sets it again after loading. The loop runs until
+`step` reaches `end_step`, then writes `model.pt` with `"step": end_step`, even
+after zero iterations (the last failsafe of an interrupted attempt landed on
+`end_step`).
+
+**The dataset decides how batches are drawn.** `run` asks it once for
+`dataset.train_batches(batch_size, sequence_length, seed)`, a function from step
+number to that step's (inputs, targets), and the loop only passes it the step.
+Batch size, sequence length and seed are fixed for the whole leg, so the
+recipe is settled before the first step; a different recipe (a curriculum,
+labeled batches) is a different dataset artifact, even when it reads the same
+token files. Validation reads the same way through
+`dataset.valid_batches(batch_size, sequence_length)`, the batch count and a
+function from batch id to batch, covering the validation split in order.
+
+For both `DataSet` and `MappedDataSet`, a step's batch is random windows of the
+token stream chosen by `default_rng((seed, step))`. The batch therefore depends
+on the seed and the step number alone, so a resumed run sees exactly the
+batches the interrupted one would have. No random state is checkpointed: the
+model has no dropout, and batch selection is the only randomness after
+initialization.
 
 ## Checkpoints
 
@@ -136,26 +208,42 @@ different things.
 | Who may depend on it | Other legs and artifacts | Nobody |
 | Optimizer state | Always | The newest only, by default |
 
-Both hold the model state, the optimizer state and the step the state is the
-result of. The recorded step in the file is the authority, not its name.
+Every checkpoint is one `.pt` file holding `{"model": ..., "optimizer": ...,
+"step": ...}`: the two `state_dict`s and the step the state is the result of.
+Step 0 is the initialized model. The recorded step in the file is the
+authority, not its name or the artifact's.
 
-Files are written to a temporary name and renamed into place, so a checkpoint
-exists whole or not at all. The rename is also the last point at which a
-cancelled call can be stopped from publishing.
+Loading builds the model and optimizer from this leg's parameters, then
+`load_state_dict`s into each. The optimizer is built over the live model's
+parameters, so the two stay linked; pickling whole objects would give the
+optimizer its own copy of the weights, and `step()` would update the wrong
+tensors.
 
-By default only the newest failsafe keeps its optimizer state
-(`optimizer_checkpoint_policy="latest"`), because recovery only needs the
-newest one. Setting `"all"` keeps it in every failsafe.
+Every file goes through `worker.publishing`: written to a temporary name and
+renamed into place, so a checkpoint exists whole or not at all. Between the two
+it confirms the lease, so the rename is the publication and the last point at
+which a cancelled call can be stopped. Nothing calls `volume.commit()` between
+failsafes, and nothing needs to: every volume mount runs with background
+commits.
+
+Failsafes are not artifacts: not in `files`, nothing waits on them, and no
+other artifact may reference them. They also record the trajectory inside the
+leg, as a side effect rather than a contract. By default only the newest keeps
+its optimizer state (`optimizer_checkpoint_policy="latest"`): after writing a
+new failsafe, every earlier one is rewritten without `"optimizer"`, the new
+file first, so at every instant at least one failsafe is resumable. Setting
+`"all"` keeps it in every failsafe.
 
 ## Interrupting and resuming
 
 If a leg is cancelled or dies, launch it again. It resumes from its newest
-usable failsafe and redoes at most `checkpoint_every` steps. Because batches
-depend only on `(seed, step)`, the redone steps train on the same data.
+failsafe that holds optimizer state and redoes at most `checkpoint_every`
+steps. Because batches depend only on `(seed, step)`, the redone steps train
+on the same data.
 
-A leg that has finished is never trained again. Later legs may already have
-started from its `model.pt`, and on CUDA a retrain would not reproduce it bit
-for bit.
+A leg that has finished is never trained again: `run` returns as soon as its
+`model.pt` exists. Later legs may already have started from it, and on CUDA a
+retrain would not reproduce it bit for bit.
 
 ## Long runs: chaining legs
 
@@ -172,7 +260,7 @@ flowchart LR
 leg2 = Pretraining(
     run_id="tinystories",
     dataset=dataset,
-    starting_checkpoint=leg,
+    starting_checkpoint=leg,          # no model: it is leg's
     training_parameters=TrainingParameters(total_steps=20000, ...),
     loop_config=loop_config,
 )
@@ -186,7 +274,8 @@ leg2 = Pretraining(
 - The learning rate schedule and optimizer parameters belong to each leg, so
   a later leg can change them.
 - Because the starting checkpoint is itself a leg, a leg carries its whole
-  ancestry, and resolving it resolves the chain behind it.
+  ancestry (every earlier leg, dataset, tokenizer, training parameters), and
+  resolving it resolves the chain behind it.
 
 ## Identity
 
@@ -197,19 +286,85 @@ leg's name carries a hash of its history:
 {run_id}-pretraining-{start_step}-{end_step}-{lineage_hash}
 ```
 
-The hash covers the starting checkpoint, dataset, tokenizer, model and
-training parameters, which is everything that can change the trajectory.
-Change any of them and you get a new leg beside the old one.
+`lineage_hash` digests everything that can change the trajectory: the
+starting checkpoint's uid (recursively, the whole chain), the dataset's and
+tokenizer's uids, the model (its package and fields) and the training
+parameters. `loop_config` and `run_id` stay out: the first controls
+observation, not the trajectory, and the second is already in the path. The
+steps are in the name for people to read. Change anything hashed and you get a
+new leg beside the old one.
+
+```text
+runs/
+└── run_001/
+    └── pretraining/
+        └── 10000-20000-a83f2c/
+            ├── manifest.json
+            ├── model.pt                declared: the artifact
+            ├── train.jsonl             undeclared: one row per step, per attempt
+            └── checkpoints/            undeclared: recovery only
+                ├── 12000.pt            model only
+                ├── 14000.pt            model only
+                └── 16000.pt            model + optimizer ("latest" policy)
+```
 
 ## What you can watch
 
-Each step appends a row to `train.jsonl` in the leg's folder: loss, gradient
-norm and learning rate on every step, validation loss on validation steps, and
-GPU memory peaks and MFU where measured. Every attempt appends, so a crash
-followed by a resume leaves the redone steps under a new attempt. The
+Each step appends a row to `train.jsonl` in the leg's folder through `StepLog`
+(`artifacts/core/SGD/steplog.py`), tagged with the attempt that took it: loss,
+gradient norm and learning rate on every step, validation loss and its
+variance on validation steps, and GPU memory peaks and MFU on the steps they
+are known. A metric a step did not record is absent from its row, and one that
+diverged to NaN or infinity is null, since JSON has neither.
+
+Tensor metrics stay on the device until the loop flushes: after each
+evaluation, before each failsafe and once after the loop, the loop's only
+CPU/GPU sync points. Flushing before each failsafe means every step up to the
+newest failsafe is on file before a crash can land past it, so the attempt
+that resumes there leaves no gap. Every attempt appends, so after a crash the
+steps redone from the last failsafe appear twice, under different attempts,
+which is what lets the file be split back into continuous executions. The
 dashboard draws these as loss curves on the leg's page, beside live logs and
 step progress.
 
 ## Models
 
 The architecture a leg trains, and how to add one, is on [Models](models.md).
+
+## Open recommendations
+
+None applied yet. The first changes what `model.dtype` means, and `dtype` is
+in the lineage hash, so decide it before the first real run.
+
+- **Mixed precision.** `dtype` sets the parameter dtype; bf16 gives pure-bf16
+  training, where AdamW updates lose small updates to rounding. Standard
+  practice is fp32 parameters with
+  `torch.autocast(device_type, dtype=torch.bfloat16)` around forward and loss;
+  `dtype` would then name the autocast dtype.
+- **Weight decay groups.** One param group, so embeddings, RMSNorm gains and
+  biases are decayed. The usual recipe decays `p.ndim >= 2` only. `resume`
+  re-applies `optimizer_parameters` to every group; with two groups it must
+  leave the no-decay group's `weight_decay` at 0.
+- **`mmap=True` on the volume mount.** Stripping optimizers maps each earlier
+  failsafe and renames over it. Whether Modal's FUSE mount supports the map
+  and the rename under it needs a check on the real mount. Fallback: plain
+  `torch.load` to CPU.
+- **Peak memory on resume.** State is loaded with `map_location` set to the
+  model's device while the fresh model and optimizer already sit there, so
+  resume briefly holds two copies of both. `map_location="cpu"` removes the
+  transient at the cost of a slower copy.
+- **`torch.compile(model)`** is usually a free 1.3 to 2x on this shape on CUDA.
+- **Optimizer flags outside `OptimizerParameters`** (`amsgrad`, `fused`,
+  `foreach`, `capturable`) come from the saved leg, since the re-apply covers
+  only `lr`, `betas`, `eps` and `weight_decay`. This bites when a torch
+  upgrade between legs changes a default.
+- **Sweeping stale `.tmp` files.** `worker.publishing` deletes its temporary
+  file whenever it does not publish, so an ordinary failure and a lost lease
+  both clean up after themselves. A hard kill (OOM, preemption, timeout) runs
+  no Python and leaves `{step}.pt.{call_id}.tmp` beside the failsafes, and
+  because the name carries a call id that never recurs, no later attempt
+  overwrites it: this litter accumulates, one checkpoint-sized file per killed
+  attempt. The `*.pt` glob ignores it, so it costs space and nothing else. A
+  sweep needs one decision first: a superseded call that is still alive may be
+  writing one of those files, so whoever sweeps must either hold the lease and
+  accept breaking that call's rename, or skip files younger than some age.

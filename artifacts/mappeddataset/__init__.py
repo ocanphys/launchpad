@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
+
+from pydantic import model_validator
 
 from artifacts.core.artifact import Artifact, _digest
 from artifacts.sources import Source
@@ -48,8 +50,8 @@ class MappedDataSet(Artifact):
     train_set: tuple[TokenizedSource, ...]
     valid_set: tuple[TokenizedSource, ...]
 
-    def model_post_init(self, context: object) -> None:
-        super().model_post_init(context)
+    @model_validator(mode="after")
+    def _sources_one_tokenizer_and_separators(self) -> Self:
         # Completion is borrowed from the sources, and every file of an empty
         # borrowing is present: with neither split filled this artifact would
         # read as done before anything existed. One split may still be empty.
@@ -63,6 +65,7 @@ class MappedDataSet(Artifact):
             raise ValueError(f"{type(self).__name__} mixes tokenizers {', '.join(tokenizers)}")
         require_separator("train_set", self.train_set)
         require_separator("valid_set", self.valid_set)
+        return self
 
     @classmethod
     def from_sources(

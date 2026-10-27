@@ -251,36 +251,7 @@ Moved to [docs/artifacts.md](../docs/artifacts.md#families).
 
 ## 13. Training a leg
 
-`PretrainJob` on top of the shared `TrainingJob` (`artifacts/stages/pretraining/jobs.py`,
-`artifacts/core/SGD/`).
-
-```mermaid
-flowchart TD
-  INIT["PretrainJob.__init__() -> TrainingJob.__init__()<br/>locate(lr_schedule_fn), torch.manual_seed(seed)"] --> R
-  R["PretrainJob.run(root, worker)"] --> DONE{"Already complete?<br/>status().complete"}
-  DONE -->|yes| SKIP["Log and return"]
-  DONE -->|no| RES["Build model and optimizer<br/>TrainingJob.resume(): Model.build(), locate(optimizer)"]
-  RES --> PICK{"Where to start from"}
-  PICK -->|"newest failsafe holding optimizer state"| FS["checkpoints/step.pt"]
-  PICK -->|"else the previous leg"| SCK["starting_checkpoint model.pt, step must equal start_step"]
-  PICK -->|else| FRESH["Fresh init, step 0"]
-  FS --> LR0
-  SCK --> LR0
-  FRESH --> LR0
-  LR0["Sync the rate to the step<br/>set_learning_rate() -> lr_cosine_schedule()"] --> SLG["Open the step log<br/>StepLog(): next attempt number from train.jsonl"]
-  SLG --> BD["Map the data<br/>dataset.bind(root): train_tokens, valid_tokens"]
-  BD --> LOOP{"step below end_step?"}
-  LOOP -->|yes| STEP["One step<br/>set_learning_rate(), get_train_batch(step) -> batch_loss()<br/>backward(), clip_grad_norm_(), optimizer.step()"]
-  STEP --> VAL{"Validation step?<br/>every val_every, and end_step"}
-  VAL -->|yes| EV["evaluate() -> valid_batches()<br/>worker.progress val_batch"]
-  VAL -->|no| REC
-  EV --> REC["Record the step<br/>StepLog.record(), worker.progress step<br/>StepLog.flush() after validation and before failsafes"]
-  REC --> CK{"Checkpoint step?<br/>every checkpoint_every"}
-  CK -->|yes| FSV["Write a failsafe<br/>failsafe(): worker.publishing(checkpoints/step.pt)<br/>latest policy: strip optimizer from older ones"]
-  CK -->|no| LOOP
-  FSV --> LOOP
-  LOOP -->|no| FIN["Finish<br/>StepLog.flush(), worker.publishing(model.pt)"]
-```
+Moved to [docs/training.md](../docs/training.md#what-the-job-does).
 
 ## 14. Dashboard front end
 

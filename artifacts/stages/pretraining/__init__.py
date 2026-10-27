@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from functools import cached_property
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Self
+
+from pydantic import model_validator
 
 from artifacts.core.artifact import _digest
 from artifacts.core.SGD.training import Training
@@ -25,10 +27,11 @@ class Pretraining(Training):
     dataset: DataSet | MappedDataSet
     starting_checkpoint: Pretraining | None = None
 
-    def model_post_init(self, context: object) -> None:
-        super().model_post_init(context)
-        # a model speaks one tokenizer for life: the one its dataset was
-        # tokenized with, and the one every earlier leg trained with
+    @model_validator(mode="after")
+    def _one_tokenizer_for_life(self) -> Self:
+        """Refuses a model that does not speak its dataset's tokenizer, or a
+        tokenizer that differs from the starting checkpoint's: a model speaks
+        one tokenizer for life."""
         if self.model.vocab_size != self.tokenizer.vocab_size:
             raise ValueError(
                 f"model.vocab_size ({self.model.vocab_size}) does not "
@@ -39,6 +42,7 @@ class Pretraining(Training):
                 f"tokenizer {self.tokenizer.uid} differs from starting_checkpoint's "
                 f"{self.starting_checkpoint.tokenizer.uid}"
             )
+        return self
 
     @property
     def tokenizer(self) -> Tokenizer:

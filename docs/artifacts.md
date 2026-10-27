@@ -73,11 +73,11 @@ Constructors take keywords only. Constructing an artifact runs, in order:
 
 ```mermaid
 flowchart TD
-  A["Call the constructor<br/>Cls(**fields)"] --> B["Any iterable given for a set-valued dependency becomes a frozenset<br/>Artifact._sets_from_iterables()"]
+  A["Call the constructor<br/>Cls(**fields)"] --> B["before validators: a set-valued dependency becomes a frozenset,<br/>a leg without a model takes its checkpoint's<br/>Artifact._sets_from_iterables(), Training._inherit_model()"]
   B --> V["Each field validated against its annotation, strictly,<br/>with the constraints declared on it (Field(gt=0))"]
-  V --> P["Family checks<br/>model_post_init(): DataSet's one tokenizer, Training's model inheritance"]
-  P --> R["The class sets producer; a set holds one definition per path<br/>Artifact._producer_is_set(), _one_definition_per_path()"]
-  R --> H["Frozen artifact"]
+  V --> R["after validators, the base's first: the class sets producer,<br/>a set holds one definition per path<br/>Artifact._producer_is_set(), _one_definition_per_path()"]
+  R --> P["then each family's: DataSet's one tokenizer,<br/>a leg's model matches its checkpoint's, one tokenizer for life"]
+  P --> H["Frozen artifact"]
 ```
 
 What strict validation does with a value:
