@@ -20,16 +20,18 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_div_format
 nav:
   - Overview: index.md
+  - Getting started: getting-started.md
   - Framework: framework.md
-  - Training a Model: training.md
-  - Experiments: experiments.md
-  - Lab: lab.md
   - Artifacts: artifacts.md
   - Manifests: manifests.md
-  - Jobs: jobs.md
-  - Launcher: launcher.md
-  - Workers: workers.md
+  - Lab: lab.md
+  - Training a Model: training.md
   - Models: models.md
+  - Experiments: experiments.md
+  - Jobs: jobs.md
+  - Workers: workers.md
+  - Launcher: launcher.md
+  - Dashboard: dashboard.md
+  - Logging: logging.md
   - Artifact Repository: repository.md
   - Profiling: profiling.md
-  - Spec: spec.md

@@ -2,7 +2,7 @@
 
 Every case here runs against a TemporaryDirectory passed as `root`, which is
 the same mechanism the volume is reached by -- an absolute path, and nothing
-that distinguishes one absolute path from another (spec.md section 4).
+that distinguishes one absolute path from another (docs/repository.md, Roots).
 """
 
 import json
@@ -42,7 +42,7 @@ class Virtual(Artifact):
 
 
 def declare(artifact: Artifact, root: Path) -> None:
-    """Write one manifest, the way declaration will (spec.md section 6)."""
+    """Write one manifest, the way declaration will (docs/lab.md, Declaration)."""
     write_manifest(root, artifact.artifact_path, artifact.to_manifest())
 
 

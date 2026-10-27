@@ -51,8 +51,9 @@ excluded from identity.
 - **`run_id`.** Training legs carry a `run_id`, and their folders sit under
   `runs/<run_id>/`. This groups the legs of one training run, but it names
   nothing above that level, and it applies to training artifacts only.
-- **The dashboard.** The table filters by artifact type and status. It has no
-  notion of a group.
+- **The dashboard.** The table filters by artifact type, then by any parameter
+  or dependency ([Dashboard](dashboard.md#filtering)). It has no notion of a
+  group.
 
 ## To be decided
 

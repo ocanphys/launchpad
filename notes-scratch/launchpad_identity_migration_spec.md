@@ -1,7 +1,7 @@
 # Launchpad: Identity Changes and Volume Migration
 
 **Date:** October 26, 2026
-**Status:** Design checkpoint. Starts only after the pydantic artifact spec (`notes-scratch/launchpad_unified_architecture_api_spec.md`, "the pydantic spec" below) has fully landed.
+**Status:** Design checkpoint. Starts after the pydantic artifact spec ("the pydantic spec" below) has landed. That spec was folded into `docs/` and deleted when it finished; it is in git history at commit `2acb192`.
 **Scope:** Three deliberate changes to artifact identity and to the manifest format, and the one-off script that migrates the volume to match.
 
 The pydantic spec changes how artifacts are written in code and leaves everything on the volume as it is: every path and every manifest byte stays identical, proven by golden fixtures and a volume scan. This spec does the opposite: it changes paths and manifest bytes on purpose, once, and moves the volume to match. Keeping the two apart means the refactor is checked against an unchanged volume, and this change is reviewed and rolled out on its own.

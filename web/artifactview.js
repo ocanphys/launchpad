@@ -10,7 +10,7 @@
 // in it, and `train`, the leg's step log, only what a worker committed)
 // and `calls` every call that has ever worked on it with its log in both
 // storages (`livedict`, `volume`) out of the `call_logs` Dict
-// (`/logs/<path>`, polled while the page is open; see docs/LOGGING.md).
+// (`/logs/<path>`, polled while the page is open; see docs/logging.md).
 
 import { el } from "./el.js";
 import { logStream, union } from "./logview.js";
@@ -194,7 +194,7 @@ function chart(metrics, { steps, attempts, ys }) {
 let drawnTrain = null, drawnCurves = null;
 
 // The leg's training curves, from the step log's rows (see
-// docs/LOGGING.md): one line per metric per attempt, grouped into charts by
+// docs/logging.md): one line per metric per attempt, grouped into charts by
 // CHARTS. Absent for anything whose job keeps no step log.
 function curvesSection(train) {
   if (!train.length) return null;

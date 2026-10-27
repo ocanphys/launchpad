@@ -6,8 +6,8 @@ Artifacts are folders on a Modal Volume, each owning a `manifest.json` that name
 is and what it's built from. Everything that describes what the code does lives in
 [docs/](docs/), served with `mkdocs serve`: what an artifact and a job are, and how
 declaration, resolution and launching fit together, each described once, on one page.
-Start at [docs/framework.md](docs/framework.md). The map of where things live and how
-traffic flows is [README.md](README.md).
+Start at [docs/framework.md](docs/framework.md). The map of where things live is
+[docs/repository.md](docs/repository.md), and how traffic flows [docs/launcher.md](docs/launcher.md).
 
 Design rationale goes on the docs page of its subject, under a "Why" heading. This file is
 how to write code here.

@@ -55,7 +55,12 @@ folder, so a scan can turn one bad manifest into one bad row.
 every output exists.** Call `.bind()` before using output-dependent methods.
 `bind` loads the stored artifact, refuses one that is not `==` to the
 request, requires every completion file, and then runs the family's `_load`
-hook to attach what it reads from its files:
+hook on that fresh copy to attach what it reads from its files; a failed check
+or hook raises, and the object `bind` was called on is never changed. A hook
+reads only the outputs its artifact or its direct dependencies name, validates
+the formats it consumes, and may bind those dependencies with the same root.
+What it attaches is runtime state, built fresh on every bind, and never enters
+the fields, identity or manifest:
 
 ```mermaid
 flowchart LR
