@@ -4,7 +4,7 @@ crashed attempt, and one leg continuing from another's final model."""
 import json
 import unittest
 from array import array
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -41,7 +41,7 @@ MODEL = Transformer(
 )
 TRAINING = TrainingParameters(
     total_steps=4, batch_size=4, max_norm=1,
-    lr_schedule=LRSchedule(1e-3, 1e-4, 1, 100),
+    lr_schedule=LRSchedule(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
     optimizer="torch.optim.AdamW",
     optimizer_parameters=OptimizerParameters(lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
 )
@@ -288,7 +288,7 @@ class PretrainJobTests(unittest.TestCase):
 
     def test_a_checkpoint_holds_the_rate_its_step_was_taken_with(self):
         PretrainJob(self.leg).run(self.root, worker())
-        rate_of_step_4 = lr_cosine_schedule(4, **asdict(TRAINING.lr_schedule))
+        rate_of_step_4 = lr_cosine_schedule(4, **TRAINING.lr_schedule.model_dump())
         self.assertNotEqual(rate_of_step_4, TRAINING.optimizer_parameters.lr)
         for state in (torch.load(self.folder / "checkpoints" / "4.pt"), self.final(self.leg)):
             self.assertEqual(state["optimizer"]["param_groups"][0]["lr"], rate_of_step_4)
@@ -306,7 +306,7 @@ class PretrainJobTests(unittest.TestCase):
             self.assertEqual(set(r), {"step", "attempt", "loss", "grad_norm", "learning_rate"} | validated)
 
     def test_a_crash_between_validations_leaves_no_gap_and_the_last_step_validates(self):
-        sparse = replace(self.leg, loop_config=replace(LOOP, val_every=3, checkpoint_every=2))
+        sparse = replace(self.leg, loop_config=LoopConfig.model_validate({**LOOP.model_dump(), "val_every": 3, "checkpoint_every": 2}))
         folder = self.root / sparse.artifact_path
         with crash_after_first_failsafe(), self.assertRaisesRegex(RuntimeError, "died"):
             PretrainJob(sparse).run(self.root, worker())
@@ -330,13 +330,13 @@ class PretrainJobTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "vocab_size"):
             Pretraining(
                 run_id="r", dataset=self.dataset, training_parameters=TRAINING,
-                loop_config=LOOP, model=replace(MODEL, vocab_size=65),
+                loop_config=LOOP, model=Transformer.model_validate({**MODEL.model_dump(), "vocab_size": 65}),
             )
 
     def test_a_manifest_names_the_model_class_beside_its_fields(self):
         second = leg(self.dataset, starting_checkpoint=self.leg)
         model = second.to_manifest()["parameters"]["model"]
-        self.assertEqual(model, {"class": "models.transformer.Transformer", **asdict(MODEL)})
+        self.assertEqual(model, {"class": "models.transformer.Transformer", **MODEL.model_dump()})
         rebuilt = Artifact.from_manifest(second.to_manifest())
         self.assertEqual(rebuilt, second)
         self.assertIsInstance(rebuilt.model, Transformer)
@@ -353,7 +353,7 @@ class PretrainJobTests(unittest.TestCase):
 
     def test_validation_scores_a_split_shorter_than_one_batch(self):
         # 2000 tokens hold 249 sequences of 8, all in one batch of up to 300
-        wide = replace(self.leg, training_parameters=replace(TRAINING, batch_size=300))
+        wide = replace(self.leg, training_parameters=TrainingParameters.model_validate({**TRAINING.model_dump(), "batch_size": 300}))
         metrics = PretrainJob(wide).evaluate(MODEL.build(), self.dataset.bind(self.root), worker())
         self.assertTrue(torch.isfinite(metrics["val_loss"]))
         self.assertEqual(metrics["val_loss_var"].item(), 0.0)  # one batch: no spread, and never NaN

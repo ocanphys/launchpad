@@ -88,7 +88,7 @@ class Real(Artifact):
 
     @property
     def uid(self) -> str:
-        return _digest(asdict(self.training), asdict(self.loop), asdict(self.transformer), asdict(self.mamba))
+        return _digest(self.training.model_dump(), self.loop.model_dump(), self.transformer.model_dump(), self.mamba.model_dump())
 
     @property
     def artifact_path(self) -> Path:

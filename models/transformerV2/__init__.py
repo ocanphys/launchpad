@@ -5,29 +5,32 @@ import so declaring an artifact never pays for it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import Self
+
+from pydantic import Field, model_validator
 
 from artifacts.core.SGD import training
 
 
-@dataclass(frozen=True)
 class Transformer(training.Model):
-    vocab_size: int
-    sequence_length: int
-    num_layers: int
-    d_model: int
-    d_ff: int
-    num_heads: int
-    rope_theta: int
-    dtype: str = (
-        "torch.float32"  # resolved worker-side via artifacts.core.locate.locate
-    )
+    """A decoder-only transformer LM: the fields are its shapes, and `build` makes it.
 
-    def __post_init__(self) -> None:
-        if self.d_model <= 0 or self.num_heads <= 0 or self.d_model % self.num_heads:
-            raise ValueError(
-                "d_model must be positive and divisible by positive num_heads"
-            )
+    Transformer(vocab_size=1000, sequence_length=32, num_layers=4, d_model=128, d_ff=256, num_heads=16,
+                rope_theta=10000)
+    Transformer(..., d_model=100, num_heads=16) -> ValidationError (d_model must be divisible by num_heads)
+    """
+
+    num_layers: int = Field(gt=0)
+    d_model: int = Field(gt=0)
+    d_ff: int = Field(gt=0)
+    num_heads: int = Field(gt=0)
+    rope_theta: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _heads_divide_d_model(self) -> Self:
+        if self.d_model % self.num_heads:
+            raise ValueError("d_model must be divisible by num_heads")
+        return self
 
     def build(self):
         """Returns a freshly initialized TransformerLM on this model's device."""

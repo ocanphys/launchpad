@@ -4,7 +4,6 @@ failsafes. A stage's jobs.py subclasses TrainingJob and writes its own run()
 around them.
 """
 
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,7 +35,7 @@ class TrainingJob(Job):
         self.device = torch.device(artifact.model.device)
         # saved as dotted paths in the config - resolved to the python objects
         self.schedule_fn = locate(self.training_parameters.lr_schedule_fn)
-        self.schedule_parameters = asdict(self.training_parameters.lr_schedule)
+        self.schedule_parameters = self.training_parameters.lr_schedule.model_dump()
         # seeds every RNG that model initialization draws from, CPU and CUDA
         torch.manual_seed(self.training_parameters.seed)
         if torch.cuda.is_available():
@@ -70,7 +69,7 @@ class TrainingJob(Job):
         # keeps that link, which pickled whole objects would not.
         model = self.artifact.model.build()
         optimizer = locate(self.training_parameters.optimizer)(
-            model.parameters(), **asdict(self.training_parameters.optimizer_parameters)
+            model.parameters(), **self.training_parameters.optimizer_parameters.model_dump()
         )
         device = self.device
 
@@ -118,7 +117,7 @@ class TrainingJob(Job):
                 # load_state_dict also restores the saved leg's betas/
                 # weight_decay; this leg's are the ones in its lineage hash
                 for group in optimizer.param_groups:
-                    group.update(asdict(self.training_parameters.optimizer_parameters))
+                    group.update(self.training_parameters.optimizer_parameters.model_dump())
             else:
                 # only reachable from a starting checkpoint: failsafes without
                 # an optimizer were skipped above

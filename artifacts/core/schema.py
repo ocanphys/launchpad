@@ -17,6 +17,8 @@ from functools import cache
 from types import UnionType
 from typing import Literal, Union, get_args, get_origin, get_type_hints
 
+from pydantic import BaseModel
+
 
 @cache
 def is_artifact(cls: object) -> bool:
@@ -77,17 +79,26 @@ def polymorphic(annotation: object) -> tuple[type, ...]:
     """Returns the record class in `annotation` that declares `polymorphic = True`,
     as a one-tuple, or () if it names none: a field so annotated may hold any
     subclass of it."""
-    return tuple(arm for arm in arms(annotation) if is_dataclass(arm) and getattr(arm, "polymorphic", False))
+    return tuple(arm for arm in arms(annotation) if isinstance(arm, type) and getattr(arm, "polymorphic", False))
+
+
+def _is_record(annotation: object) -> bool:
+    """Returns whether `annotation` is a parameter record: a frozen dataclass
+    or a frozen pydantic model."""
+    if is_dataclass(annotation):
+        return annotation.__dataclass_params__.frozen
+    return isinstance(annotation, type) and issubclass(annotation, BaseModel) and bool(annotation.model_config.get("frozen"))
 
 
 def _check_parameter(annotation: object, where: str) -> None:
     """Raises unless `annotation` is a scalar, a Literal, a tuple with item
-    types, a frozen dataclass of these, or a union with at most one dataclass."""
+    types, a frozen dataclass or frozen pydantic model, or a union with at
+    most one of those."""
     origin, args = get_origin(annotation), get_args(annotation)
     if annotation in (bool, int, float, str, type(None)) or origin is Literal:
         return
     if len(arms(annotation)) > 1:
-        if sum(map(is_dataclass, args)) > 1:
+        if sum(map(_is_record, args)) > 1:
             raise TypeError(
                 f"{where}: a union holds at most one record type; a manifest "
                 f"stores a union's record as its fields alone"
@@ -105,10 +116,11 @@ def _check_parameter(annotation: object, where: str) -> None:
             f"{where}: artifact hidden in a parameter; a dependency is annotated "
             f"A, A | B | None, tuple[A, ...] or frozenset[A]"
         )
-    if is_dataclass(annotation) and annotation.__dataclass_params__.frozen:
-        annotations(annotation)
+    if _is_record(annotation):
+        if is_dataclass(annotation):  # a pydantic model checks its own fields
+            annotations(annotation)
         return
     raise TypeError(
         f"{where}: annotated {annotation}, but the codec needs a concrete type: "
-        f"a scalar, Literal, tuple[T, ...], union, or frozen dataclass"
+        f"a scalar, Literal, tuple[T, ...], union, frozen dataclass or frozen pydantic model"
     )

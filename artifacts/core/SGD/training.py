@@ -8,50 +8,73 @@ stays free of torch so declaring an artifact never imports it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import ClassVar, Literal
 
-from artifacts.core.artifact import Artifact
+from pydantic import Field
+
+from artifacts.core.artifact import Artifact, ParamConfig
 
 
-@dataclass(frozen=True)
-class Model:
+class Model(ParamConfig):
     """The base of every architecture under models/: a subclass's fields are
-    what a leg declares, and `build` makes the network they describe.
+    what a leg declares, and `build` makes the network they describe. The
+    fields declared here are the ones stages and jobs read off any model.
 
     A field annotated `Model` holds any subclass, and its manifest names that
     subclass under "class" (`polymorphic`).
+
+    Transformer(vocab_size=1000, sequence_length=32, num_layers=4, d_model=128, d_ff=256, num_heads=16,
+                rope_theta=10000).sequence_length -> 32
     """
 
     polymorphic: ClassVar[bool] = True
 
-    device: str = field(default="cuda", kw_only=True)
+    vocab_size: int = Field(gt=0)
+    sequence_length: int = Field(gt=0)
+    dtype: str = "torch.float32"  # resolved worker-side via artifacts.core.locate.locate
+    device: str = "cuda"
 
     def build(self):
-        """Returns a freshly initialized torch module on this model's device."""
+        """Returns a freshly initialized torch module on this model's device.
+
+        Transformer(...).build() -> TransformerLM(...) on torch.device("cuda")
+        """
         raise NotImplementedError
 
     def step_flops(self, batch_size: int) -> int:
         """Returns the FLOPs of one forward and backward pass over batch_size sequences: an analytic
-        estimate from this architecture's shapes, not a measurement."""
+        estimate from this architecture's shapes, not a measurement.
+
+        Transformer(vocab_size=1000, sequence_length=8, num_layers=1, d_model=16, d_ff=32, num_heads=2,
+                    rope_theta=10000).step_flops(4) -> 3612672
+        """
         raise NotImplementedError
 
 
-@dataclass(frozen=True)
-class OptimizerParameters:
+class OptimizerParameters(ParamConfig):
+    """Exactly the keyword arguments the optimizer is built with, after its
+    parameters; torch checks their values when it builds it.
+
+    OptimizerParameters(lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8).model_dump()
+      -> {"lr": 0.0003, "betas": (0.9, 0.95), "weight_decay": 0.1, "eps": 1e-08}
+    """
+
     lr: float  # fallback: what the optimizer runs with when no lr_schedule overrides it
     betas: tuple[float, ...]
     weight_decay: float
     eps: float
 
 
-@dataclass(frozen=True)
-class LRSchedule:
-    """Independent of OptimizerParameters -- any schedule can drive any
-    optimizer, so this isn't nested under it (mirrors how torch.optim's own
-    lr_scheduler wraps an optimizer from outside rather than living in it).
+class LRSchedule(ParamConfig):
+    """The keyword arguments of the learning-rate schedule function. Independent
+    of OptimizerParameters: any schedule can drive any optimizer, so this is
+    not nested under it, as torch.optim's own lr_scheduler wraps an optimizer
+    from outside.
+
+    LRSchedule(max_learning_rate=3e-4, min_learning_rate=3e-5, warmup_iters=200, cosine_cycle_iters=5000)
     """
 
     max_learning_rate: float
@@ -60,31 +83,31 @@ class LRSchedule:
     cosine_cycle_iters: int
 
 
-@dataclass(frozen=True)
-class TrainingParameters:
+class TrainingParameters(ParamConfig):
     """What changes the optimization trajectory, including its seed and
-    duration -- as opposed to LoopConfig, which controls observation and
+    duration, as opposed to LoopConfig, which controls observation and
     recovery cadence.
 
     ``optimizer`` and ``lr_schedule_fn`` are dotted paths, resolved worker-side
     via artifacts.core.locate.locate; ``optimizer_parameters`` and
     ``lr_schedule`` are exactly the keyword arguments each is called with.
+
+    TrainingParameters(total_steps=1000, batch_size=64, max_norm=1, lr_schedule=LRSchedule(...),
+                       optimizer="torch.optim.AdamW", optimizer_parameters=OptimizerParameters(...)).max_norm
+      -> 1.0
     """
 
-    total_steps: int
-    batch_size: int
+    total_steps: int = Field(gt=0)
+    batch_size: int = Field(gt=0)
     max_norm: float
     lr_schedule: LRSchedule
     optimizer: str  # a torch.optim.Optimizer subclass
     optimizer_parameters: OptimizerParameters
-    lr_schedule_fn: str = (
-        "artifacts.core.SGD.lr_schedule.lr_cosine_schedule"
-    )
+    lr_schedule_fn: str = "artifacts.core.SGD.lr_schedule.lr_cosine_schedule"
     seed: int = 0
 
 
-@dataclass(frozen=True)
-class LoopConfig:
+class LoopConfig(ParamConfig):
     """Operational settings for validation, failsafe checkpoints, and health checks.
 
     Every ``checkpoint_every`` steps, the training job writes a failsafe model
@@ -93,18 +116,15 @@ class LoopConfig:
     On CUDA, it reports the MFU and the peak allocated and reserved memory
     over each window of ``gpu_check_every`` steps, validation and checkpoints
     included, a few steps after the window closes.
+
+    LoopConfig(val_every=200, gpu_check_every=200)
+      -> LoopConfig(val_every=200, gpu_check_every=200, checkpoint_every=100, optimizer_checkpoint_policy='latest')
     """
 
-    val_every: int
-    gpu_check_every: int
-    checkpoint_every: int = 100
+    val_every: int = Field(gt=0)
+    gpu_check_every: int = Field(gt=0)
+    checkpoint_every: int = Field(default=100, gt=0)
     optimizer_checkpoint_policy: Literal["all", "latest"] = "latest"
-
-    def __post_init__(self) -> None:
-        if self.checkpoint_every <= 0:
-            raise ValueError("checkpoint_every must be positive")
-        if self.gpu_check_every <= 0:
-            raise ValueError("gpu_check_every must be positive")
 
 
 # kw_only here and on every subclass, so their fields never have to be
@@ -130,8 +150,6 @@ class Training(Artifact):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.training_parameters.total_steps <= 0:
-            raise ValueError("training_parameters.total_steps must be positive")
         if self.starting_checkpoint is None:
             if self.model is None:
                 raise ValueError("model is required without a starting_checkpoint")

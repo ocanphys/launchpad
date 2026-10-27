@@ -26,7 +26,7 @@ import logging
 import os
 import tempfile
 from collections import Counter
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import modal
@@ -152,7 +152,7 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
         "created": False,
         "updated": False,
         "commit": [None, artifact.commit],
-        "resources": [None, asdict(artifact.allocated_resources)],
+        "resources": [None, artifact.allocated_resources.model_dump()],
     }
     if not footprint.manifest:
         present = [desc for desc, there in footprint.outputs.items() if there]
@@ -168,7 +168,7 @@ def _inspect(artifact: Artifact, root: Path, memo: dict[str, Artifact]) -> dict:
         return row
     row["commit"] = [stored.commit, artifact.commit]
     row["drift"] = stored.commit != artifact.commit
-    row["resources"] = [asdict(stored.allocated_resources), asdict(artifact.allocated_resources)]
+    row["resources"] = [stored.allocated_resources.model_dump(), artifact.allocated_resources.model_dump()]
     if stored != artifact:
         row["state"] = "conflict"
         on_disk, wanted = _leaves(stored.to_manifest()), _leaves(artifact.to_manifest())

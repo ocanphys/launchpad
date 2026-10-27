@@ -28,6 +28,8 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self, get_args
 
+from pydantic import BaseModel, ConfigDict
+
 from artifacts.core import manifest, schema
 from artifacts.core.locate import locate
 
@@ -85,12 +87,29 @@ def _root(root: Path | None) -> Path:
     return resolved
 
 
-@dataclass(frozen=True)
-class Resources:
+# Strict: no str as int, bool as int or list as tuple, though an int in a float
+# field becomes a float. Each base sets it, since a config does not reach the
+# models nested in a field.
+STRICT = ConfigDict(frozen=True, extra="forbid", strict=True, allow_inf_nan=False)
+
+
+class ParamConfig(BaseModel):
+    """A validated, frozen parameter of an artifact: never a dependency, and
+    never a folder or manifest of its own. Subclasses declare their fields and
+    the constraints on them; construction refuses a value that breaks one.
+
+    LoopConfig(val_every=0, gpu_check_every=200) -> ValidationError (val_every: greater than 0)
+    """
+
+    model_config = STRICT
+
+
+class Resources(ParamConfig):
     """What a job should be given to run this artifact; None means Modal's
     platform default for that dimension. Never identity.
 
-    Resources(gpu_type="A100", gpu_count=2)
+    Resources(gpu_type="A100", gpu_count=2, cpu=4)
+      -> Resources(cpu=4.0, gpu_type='A100', gpu_count=2)
     """
 
     cpu: float | None = None

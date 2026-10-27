@@ -52,6 +52,19 @@ Declaring writes the manifest and nothing else. The GPU is requested on the
 artifact with `allocated_resources=Resources(gpu_type="A100")`. Resources are
 not part of identity, so changing them does not create a new leg.
 
+`model`, `training_parameters` and `loop_config` are param configs: each is
+validated when it is built, so a value outside its constraint (a zero
+`batch_size`, a `d_model` that `num_heads` does not divide) raises a
+`ValidationError` naming the field at that line, not when the leg runs. An int
+passed where a float is declared (`max_norm=1`) is stored as that float; any
+other conversion is refused. The model's fields are on [Models](models.md); the
+others are below.
+
+::: artifacts.core.SGD.training
+    options:
+      members: [TrainingParameters, LRSchedule, OptimizerParameters, LoopConfig]
+      heading_level: 3
+
 ## What the job does
 
 When the leg is launched, `PretrainJob` runs it. The first decision is where
@@ -199,8 +212,4 @@ step progress.
 
 ## Models
 
-Models are not artifacts. Each architecture is a package under `models/`
-(`transformer`, `transformerV2`, `mamba`) whose class declares its parameters
-and builds the network. The package imports no torch until `build()` runs, so
-declaring a leg stays cheap. Adding an architecture means adding a package
-there; `Pretraining` needs no change.
+The architecture a leg trains, and how to add one, is on [Models](models.md).

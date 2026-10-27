@@ -1,7 +1,6 @@
 """The profiling run: `profile` trains a model under the profiler, and `phase` is what the step
 it is passed is built from. `run_profile` runs `profile` on a Modal GPU through main.profile."""
 
-import dataclasses
 import time
 from contextlib import contextmanager, nullcontext
 
@@ -89,7 +88,7 @@ def profile(
 
     model.train()
     optimizer = locate(training_parameters.optimizer)(
-        model.parameters(), **dataclasses.asdict(training_parameters.optimizer_parameters))
+        model.parameters(), **training_parameters.optimizer_parameters.model_dump())
     spans = {}  # name: (start, end) of the latest step's phases, in us on the unix clock
 
     def size_of(tensors):
@@ -147,6 +146,6 @@ def profile(
             "module_scopes": module_scopes, "peak": peak_memory, "trace": trace_memory,
         },
         "model_class": type(model_declaration).__name__,
-        "model_parameters": dataclasses.asdict(model_declaration),
+        "model_parameters": model_declaration.model_dump(),
         "optimizer": type(optimizer).__name__,
     }

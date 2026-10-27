@@ -5,7 +5,6 @@ import io
 import os
 import unittest
 from contextlib import redirect_stdout
-from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -39,7 +38,7 @@ PRETRAINING = Pretraining(
     ),
     training_parameters=TrainingParameters(
         total_steps=4, batch_size=4, max_norm=1,
-        lr_schedule=LRSchedule(1e-3, 1e-4, 1, 100),
+        lr_schedule=LRSchedule(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
         optimizer="torch.optim.AdamW",
         optimizer_parameters=OptimizerParameters(lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
     ),
@@ -168,7 +167,7 @@ class DeclareTests(unittest.TestCase):
 
         report = declare(wanted, self.root, commit=True)  # settled: nothing to write
         self.assertFalse(report.rows[0]["updated"])
-        self.assertEqual(report.rows[0]["resources"], [asdict(Resources(cpu=4.0))] * 2)
+        self.assertEqual(report.rows[0]["resources"], [Resources(cpu=4.0).model_dump()] * 2)
 
     def test_an_interrupted_declaration_is_completed_by_repeating_it(self):
         declare(TOKENS, self.root, commit=True)

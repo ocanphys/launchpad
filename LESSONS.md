@@ -17,7 +17,7 @@ change".
 
 ## The optimizer holds the learning rate of the current step
 
-`TrainingJob.resume` does `group.update(asdict(optimizer_parameters))` after
+`TrainingJob.resume` does `group.update(optimizer_parameters.model_dump())` after
 `load_state_dict`, so a new leg trains with its own betas and weight decay.
 That dict also carries `lr`, the fallback, which overwrote the scheduled
 rate the failsafe had saved. With the rate set at the top of each iteration

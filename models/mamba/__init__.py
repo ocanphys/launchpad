@@ -5,23 +5,25 @@ artifact never pays for it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from pydantic import Field
 
 from artifacts.core.SGD import training
 
 
-@dataclass(frozen=True)
 class Mamba(training.Model):
-    vocab_size: int
-    sequence_length: int  # batch shape only: the recurrence has no context limit
-    num_layers: int
-    d_model: int
-    d_state: int = 16
-    d_conv: int = 4
-    expand: int = 2
-    dtype: str = (
-        "torch.float32"  # resolved worker-side via artifacts.core.locate.locate
-    )
+    """A Mamba LM: the fields are its shapes, and `build` makes it. Its
+    `sequence_length` is the batch shape only, since the recurrence has no
+    context limit.
+
+    Mamba(vocab_size=1000, sequence_length=32, num_layers=2, d_model=64)
+      -> Mamba(vocab_size=1000, sequence_length=32, ..., d_state=16, d_conv=4, expand=2)
+    """
+
+    num_layers: int = Field(gt=0)
+    d_model: int = Field(gt=0)
+    d_state: int = Field(default=16, gt=0)
+    d_conv: int = Field(default=4, gt=0)
+    expand: int = Field(default=2, gt=0)
 
     def build(self):
         """Returns a freshly initialized MambaLM on this model's device."""

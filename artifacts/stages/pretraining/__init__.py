@@ -5,7 +5,7 @@ package under models/.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import ClassVar
@@ -58,8 +58,8 @@ class Pretraining(Training):
             self.dataset.uid,
             self.tokenizer.uid,
             type(self.model).__module__,
-            asdict(self.model),
-            asdict(self.training_parameters),
+            self.model.model_dump(),
+            self.training_parameters.model_dump(),
         )
 
     @property

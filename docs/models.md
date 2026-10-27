@@ -1,3 +1,72 @@
 # Models
 
-*Draft.* The model families under models/ and how a training artifact uses them.
+A model is not an artifact. It is a param config of the leg that trains it:
+validated and frozen like the rest of the leg's parameters, part of the leg's
+identity, and with no folder, manifest or job of its own. Each architecture is
+a package under `models/` (`transformer`, `transformerV2`, `mamba`) holding one
+`Model` subclass, which declares the architecture's shapes and builds the
+network from them. The package imports no torch until `build()` runs, so
+declaring a leg stays cheap.
+
+## The contract
+
+`Model` declares the fields every stage and job reads off any model:
+
+| Field | Read by |
+| --- | --- |
+| `vocab_size` | `Pretraining`, which refuses a model whose vocabulary is not its tokenizer's. |
+| `sequence_length` | The pretraining job, for the shape of every batch it draws. |
+| `dtype` | `build()`, as a dotted torch dtype (`"torch.float32"`) resolved on the worker; profiling reports it. |
+| `device` | The training job, which builds the model there and moves batches to it. |
+
+A subclass adds its own shapes as fields, with their constraints written on
+the fields (`num_layers: int = Field(gt=0)`), and implements two methods:
+`build()` returns the freshly initialized torch module, and `step_flops()`
+returns an analytic count of one step's FLOPs, which `gpus/monitor.py` turns
+into MFU and the profiler reports. A value that breaks a constraint is refused
+when the model is built, at that line, with a `ValidationError` naming the
+field.
+
+## Which class a manifest names
+
+A leg's `model` field is annotated `Model` and holds a subclass. JSON carries
+field values, not types, so the leg's manifest records the subclass's import
+path under `"class"`, beside its fields:
+
+```json
+"model": {"class": "models.transformer.Transformer", "d_model": 128, "num_heads": 16, ...}
+```
+
+`Model` declares `polymorphic = True`, which is what tells the codec to write
+and read that key. The import path is part of the stored format: moving or
+renaming an architecture class leaves every manifest that names it unreadable
+until a migration rewrites it.
+
+## Adding an architecture
+
+Add a package under `models/` whose `__init__.py` defines a `Model` subclass:
+its fields and their constraints, `build()` importing torch inside it, and
+`step_flops()`. `Pretraining` needs no change, since it reads only the fields
+`Model` declares.
+
+## Why a subclass per architecture
+
+Each architecture owns three things: its fields; how they map onto its
+module's constructor (`sequence_length` becomes `context_length`, the `dtype`
+string becomes a torch dtype, `Mamba` ignores `sequence_length`); and its FLOP
+count. A class per architecture keeps all three in one place. A single
+`ModelSpec` holding a class reference and a config would separate the fields
+from the class, and the mapping and the FLOP count would still need a home per
+architecture. A union of the architectures annotated on the leg would make the
+stage import and list every architecture, and could not tell apart two with
+the same fields, as the two `Transformer` classes have.
+
+## Reference
+
+::: artifacts.core.SGD.training.Model
+
+::: models.transformer.Transformer
+
+::: models.transformerV2.Transformer
+
+::: models.mamba.Mamba
