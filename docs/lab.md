@@ -146,7 +146,7 @@ flowchart TD
   LAP["Laptop<br/>local.declare_on_volume()<br/>current_notebook() shipped along"] -->|"_declare.remote() in an ephemeral app"| S
   S["lab.declare(artifact, commit, strict_commit)"] --> R["Resolve the graph, dependencies first<br/>resolve(): one node per artifact_path,<br/>raise on conflicting definitions or cycles"]
   R --> NBK["Read the declaring notebook (commit only)<br/>current_notebook()"]
-  NBK --> RF["Reload the mount (inside a container only)<br/>refresh()"]
+  NBK --> RF["Reload the mount (root is STORAGE)<br/>refresh()"]
   RF --> I["Compare each node with what the disk holds<br/>_inspect(): Artifact.status(), Artifact.load(), _leaves()"]
   I --> REP["Build the report<br/>DeclarationReport: blockers, render()"]
   REP --> C{"commit?"}
@@ -156,8 +156,9 @@ flowchart TD
   BL -->|no| W["Write missing manifests, add missing tags<br/>storage.write_manifest(to_manifest())<br/>new: model_copy(update={declaring_commit: _head()})<br/>existing: model_copy(update={tags: stored and added})"]
   W --> RI["Re-inspect written rows<br/>_inspect()"]
   RI --> CP["Copy the notebook to each created root<br/>artifact_path/declaring.ipynb"]
-  CP --> SV["Commit the mount (inside a container only)<br/>save()"]
-  SV --> OUT
+  CP --> SV["Commit the mount (root is STORAGE)<br/>save()"]
+  SV --> AN["Tell the launcher (root is STORAGE)<br/>refreshes.put(declared)"]
+  AN --> OUT
 ```
 
 Example: `sources/odyssey` and `tokenizers/bpe-1000-feeeeefa90` were declared

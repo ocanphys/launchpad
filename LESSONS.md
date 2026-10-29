@@ -42,6 +42,28 @@ result is not bit-identical, and a later leg that already trained from the
 old `model.pt` now has a starting checkpoint that changed under it. The step
 check in `resume` cannot catch this, since the step is still `end_step`.
 
+## One seed gives different initial weights on different GPU models
+
+`TrainingJob` seeds the CPU and CUDA generators, then builds the model on
+`self.device`, so `trunc_normal_` and `normal_` draw from the CUDA generator.
+Its output for a seed is not the same across GPU models: PyTorch promises no
+reproducibility across platforms, and how a random fill is spread over
+thread blocks follows the device. Found when one leg (`seed=0`, fp32, no
+dropout) ran on a T4 and then an A10 and the losses differed. The batches
+were identical (NumPy on the CPU, seeded by `(seed, step)`), and the gap was
+already 4.5e-3 at step 1 (7.01200 against 7.01645), where kernel-level
+float differences would be about 1e-6. So the two attempts started from
+different weights.
+
+Read the step-1 loss to tell the two causes apart. A gap there means the
+initial weights differ. A step 1 that matches and then drifts is cuBLAS
+choosing different kernels per architecture, with a different summation
+order; that is small in fp32 with TF32 off, and it never goes to zero.
+Building on the CPU and then moving the model,
+`model.build(torch.device("cpu")).to(device)`, makes the start the same on
+every machine. It also changes the start of every fresh leg, compared with
+a leg built on the GPU before.
+
 ## Interruption testing: patch a method, compare against a straight run
 
 The idempotence of the loop was checked by patching `set_learning_rate` to
@@ -123,6 +145,23 @@ library is captured, check the whole family, not the top name:
     [(n, l.propagate, bool(l.handlers)) for n, l in
      logging.root.manager.loggerDict.items() if isinstance(l, logging.Logger)]
 
+## A log handler that calls Modal breaks Modal's own heartbeat
+
+A handler's `emit` runs on the thread that logged, and the Modal client logs
+from its own event loop: "Received a cancellation signal while processing
+input" is a `logger.warning` inside the heartbeat coroutine. `BufferHandler`
+once read `call_logs` the first time a channel appeared, and on a worker that
+warning was the first `ambient` row. The blocking `Dict.get` from Modal's loop
+raised `Deadlock detected: calling a sync function from the synchronizer
+loop`, `emit` let it out, and it surfaced in the coroutine that called
+`logger.warning` -- the log read "Heartbeat attempt failed" with that error,
+in the middle of the heartbeat delivering a cancel.
+
+So `emit` touches memory and nothing else, and every Modal call a handler
+needs happens on the publisher's own thread. The same goes for any handler,
+filter or formatter added later: a record from `modal.*` can arrive on
+Modal's loop at any time, and a cancellation is when it does.
+
 ## A traceback keeps the volume's files mapped after the call
 
 A memmap over a tokens.bin is a local in `PretrainJob.run` and in every
@@ -184,6 +223,36 @@ touches the mount, so the reload runs inside the same `try` as the job and
 its failure is the call's first container row. The worker holds no log
 file at all; `persist_logs` appends the Dict's rows to the file on its
 schedule.
+
+## `modal.is_local()` is True in a notebook kernel on Modal
+
+`modal.is_local()` is False only in the process running a Modal Function.
+A JupyterLab kernel is a child process of the `jupyter` Function, so in a
+lab notebook it says True, on Modal hardware with the volume mounted.
+`lab.declare`, `create_experiment` and `load_experiment` used it to decide
+whether `root` was the mounted volume, so from the lab they never reloaded
+before inspecting, never committed after writing, and never put their
+`refreshes` message. The commit went unnoticed because every mount has
+background commits; the missing message did not, because the dashboard
+never showed a created experiment.
+
+`lab._on_volume` reads `MODAL_IS_REMOTE` instead: Modal sets it in the
+container's environment, and every process there inherits it, kernels
+included (`lab_server` starts JupyterLab with a plain `Popen`). Anything
+else that asks "am I on Modal" from code a notebook runs needs the same
+answer.
+
+## `modal.is_local()` is True in a notebook kernel on Modal
+
+It is False only in the process running a Modal Function, and a JupyterLab
+kernel is a child process of the `jupyter` Function. `lab.declare` and
+`create_experiment` once gated their reload, commit and `refreshes` message
+on it, so from the lab none of the three happened; background commits hid
+the missing commit, and a created experiment that never reached the
+dashboard showed the missing message. Both only ever run in a Modal
+container, so they ask nothing about where they run: `root == STORAGE` is
+the whole test, and a test's temporary root is what keeps it off the volume
+and the queue.
 
 ## Encoding line by line is not the same token sequence as encoding whole
 

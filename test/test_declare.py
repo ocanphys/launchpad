@@ -71,14 +71,6 @@ class DeclareTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
-    def test_outside_a_container_the_mount_path_is_a_plain_folder(self):
-        # STORAGE on a laptop is a path with no volume behind it: no reload,
-        # no commit, and a preview simply reports what is (not) there.
-        from config import STORAGE
-
-        report = declare(ODYSSEY, STORAGE)
-        self.assertEqual(states(report), {"sources/odyssey": "new"})
-
     def test_preview_against_empty_storage_writes_nothing(self):
         report = declare(TOKENS, self.root)
         self.assertEqual(set(states(report).values()), {"new"})

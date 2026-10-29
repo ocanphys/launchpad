@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chat</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%230969da'/></svg>">
+<style>
+  :root { color-scheme: light dark; --line: rgba(128,128,128,.3); --accent: #0969da; }
+  html, body { height: 100%; }
+  body {
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+  header, #log, form { width: 100%; max-width: 48rem; margin: 0 auto; padding: 0 1rem; box-sizing: border-box; }
+  header { display: flex; align-items: baseline; gap: .75rem; padding-top: 1rem; padding-bottom: .5rem; }
+  h1 { font-size: 13px; font-weight: 600; margin: 0; }
+  #uid { opacity: .55; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  details { padding: 0; }
+  summary { cursor: pointer; opacity: .7; }
+  #log { overflow-y: auto; padding-top: 1rem; padding-bottom: 1rem; }
+  .msg { white-space: pre-wrap; overflow-wrap: break-word; margin: 0 0 1rem; }
+  .user { margin-left: auto; width: fit-content; max-width: 85%; padding: .5rem .75rem; border-radius: 10px; background: rgba(9,105,218,.12); }
+  .assistant:empty::after { content: "..."; opacity: .5; }
+  .dropped { text-align: center; opacity: .45; font-size: 11px; margin: 0 0 1rem; }
+  .error { color: #cf222e; }
+  form { display: grid; gap: .5rem; padding-bottom: 1rem; }
+  textarea, button, input { font: inherit; color: inherit; }
+  textarea {
+    resize: none; padding: .6rem .75rem; border-radius: 10px; box-sizing: border-box; width: 100%;
+    border: 1px solid var(--line); background: transparent;
+  }
+  #system { margin-top: .5rem; }
+  .row { display: flex; align-items: center; gap: .75rem; }
+  .row label { display: flex; align-items: center; gap: .4rem; opacity: .7; }
+  .row .spacer { flex: 1; }
+  button { padding: .35rem .8rem; border-radius: 6px; border: 1px solid var(--line); background: transparent; cursor: pointer; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  button:hover { background: rgba(128,128,128,.12); }
+  button[hidden] { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>chat</h1>
+  <span id="uid"></span>
+  <button id="new" type="button">new chat</button>
+</header>
+<div id="log"></div>
+<form id="form">
+  <details>
+    <summary>system prompt</summary>
+    <textarea id="system" rows="3" placeholder="optional: pinned at the start of every prompt"></textarea>
+  </details>
+  <textarea id="input" rows="3" placeholder="message (enter sends, shift+enter for a new line)" autofocus></textarea>
+  <div class="row">
+    <label>temperature <input id="temperature" type="range" min="0.05" max="1.5" step="0.05" value="0.8"> <span id="temperatureValue">0.8</span></label>
+    <span class="spacer"></span>
+    <button id="stop" type="button" hidden>stop</button>
+    <button id="send" class="primary" type="submit">send</button>
+  </div>
+</form>
+<script>
+  // The conversation lives here, not on the server: every turn sends all of it,
+  // and the server keeps the part that fits in the model's window.
+  const $ = (id) => document.getElementById(id);
+  const log = $("log"), input = $("input");
+  const leg = new URLSearchParams(location.search).get("leg");
+  let messages = [];
+  let controller = null;
+
+  // Loads the leg onto the GPU, so a cold container shows it loading here rather than on the first reply.
+  $("uid").textContent = leg ? `loading ${leg}` : "no leg in the URL: open this from a leg's serve button";
+  if (leg) fetch(`/info?leg=${encodeURIComponent(leg)}`).then(async (r) => {
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    const info = await r.json();
+    $("uid").textContent = `${info.uid} | ${info.sequence_length} tokens`;
+  }).catch((error) => { $("uid").textContent = `${leg}: ${error}`; });
+
+  $("temperature").oninput = (e) => { $("temperatureValue").textContent = e.target.value; };
+
+  function bubble(cls, text = "") {
+    const el = Object.assign(document.createElement("div"), { className: cls, textContent: text });
+    log.append(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  async function send() {
+    const content = input.value.trim();
+    if (!content || controller) return;
+    input.value = "";
+    const turn = messages;  // "new chat" mid-reply starts another list; this reply belongs to this one
+    turn.push({ role: "user", content });
+    bubble("msg user", content);
+    controller = new AbortController();
+    $("send").hidden = true;
+    $("stop").hidden = false;
+    let reply = "", out = null;
+    try {
+      const response = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leg, system: $("system").value, messages: turn, temperature: Number($("temperature").value) }),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+      const dropped = Number(response.headers.get("X-Window-Dropped"));
+      if (dropped) bubble("dropped", `older messages are outside the context window (${dropped} tokens)`);
+      out = bubble("msg assistant");
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let events = "";
+      for (let chunk; !(chunk = await reader.read()).done; ) {
+        events += chunk.value;
+        const whole = events.split("\n\n");
+        events = whole.pop();  // an event not finished yet waits for the next chunk
+        for (const event of whole) reply += JSON.parse(event.slice("data: ".length));
+        // A word shows once the space after it arrives, as a terminal printing word by word would.
+        out.textContent = reply.slice(0, reply.search(/\S*$/)).trimStart();
+        log.scrollTop = log.scrollHeight;
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") bubble("msg error", String(error));
+    }
+    if (out) out.textContent = reply.trimStart();
+    if (reply.trim()) turn.push({ role: "assistant", content: reply });
+    controller = null;
+    $("send").hidden = false;
+    $("stop").hidden = true;
+    input.focus();
+  }
+
+  $("form").onsubmit = (e) => { e.preventDefault(); send(); };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  };
+  $("stop").onclick = () => controller?.abort();
+  $("new").onclick = () => { controller?.abort(); messages = []; log.replaceChildren(); input.focus(); };
+</script>
+</body>
+</html>

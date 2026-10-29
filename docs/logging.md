@@ -1,61 +1,33 @@
 # Logging
 
 Every log row any container files has one shape, is published live to a Modal
-Dict, and is persisted beside its artifact on the volume. `system/logs.py` is
-the only module that writes a row.
+Dict, and is persisted to a file on the volume by one scheduled pass.
+`system/logs.py` is the only module that writes a row.
 
-## One shape
+## The row
 
 ```json
 {"ts": 1757260800.1, "call_id": "fc-01JQ8W", "source": "worker",
  "level": "INFO", "logger": "job", "msg": "..."}
 ```
 
-A traceback is folded into `msg`. The `call_logs` key a row lives under is
-built from two of its own fields plus where it is kept:
+A traceback is folded into `msg`. Rows are kept in lists, one per **channel**,
+and a channel is one key of the `call_logs` Dict:
 
     {call_id}:{storage}:{source}
 
-- **`storage`** is `livedict` for what a container has published to the Dict,
-  and `volume` for the rows its file holds: the same rows, one trailing the
-  other by a persist pass. A reader unions them and counts a row once.
-- **`source`** is who wrote it: `worker` (the call's own account of itself),
-  `launcher` (what the launcher did to that call), or `ambient` (what the
-  container logged around it that no logger of ours stamped, such as a
-  library's warning).
 - **`call_id`** is the call the row is about. The launcher's own rows use the
   call id `launcher`, so its log is a call's log in every other way, with no
-  `worker` source, no grant and no heartbeat, and its file is
-  `logs/launcher.jsonl` at the volume root rather than in an artifact's folder.
+  `worker` source, no grant and no heartbeat.
+- **`storage`** is `livedict` for what a container has published, and `volume`
+  for what its file holds: the same rows, the second trailing the first by a
+  persist pass.
+- **`source`** is who wrote it: `worker` (the call's account of itself),
+  `launcher` (what the launcher did to that call), `profiler` (a profiling
+  run), or `ambient` (a record no logger of ours stamped, such as a library's
+  warning).
 
-## One way in
-
-Two names, and nothing else writes a row:
-
-- **`start_logging(call_id)`**, once per container: points logging at stdout
-  (what `modal app logs` reads back), attaches the `BufferHandler` that keeps
-  every record in the channel its stamp names, and starts the thread that
-  publishes each channel whole every `HEARTBEAT_SECONDS`. `call_id` is whose the
-  container's unstamped records are (`launcher` for the launcher, its own call
-  id for a worker); those are its `ambient` source.
-- **`call_logger(name, source, call_id)`**, which stamps the rest. A job gets
-  one as `worker.log` (source `worker`); the launcher binds the two it needs at
-  the top of `launcher/leasebook.py`: `log_launcher` for its own doings and
-  `log_call(call_id)` for a call it manages.
-
-Which channel a row lands in is the logger it was written with. What the
-launcher does to a call (the grant, the cancel, a stale lease dropped, a
-refusal naming the call under way, a worker's start and end messages) is
-stamped with that call's id, and the handler files it under the container's
-own call id as well, so it reads on the artifact's page and in the dashboard's
-panel alike. What the container does for itself (starting, the startup sync,
-every recompute and what prompted it, a request that raised) is stamped
-`launcher` and reads in the panel only. A worker stamps no call but its own, so
-the fan-out is the launcher's alone.
-
-The stamp rides on the record, so any thread a call or a container starts files
-under the right call without inheriting anything (LESSONS.md, "Ask the record
-which call it is, never the thread").
+## How a row travels
 
 ```mermaid
 flowchart TD
@@ -67,7 +39,7 @@ flowchart TD
   WL --> BH
   LL --> BH
   AL --> BH
-  BH["Buffer the row per channel<br/>BufferHandler.emit(): row(), channel()<br/>first row of a channel: continued()"] --> PT["Publish every HEARTBEAT_SECONDS<br/>start_logging() thread -> BufferHandler.publish() -> try_publish()"]
+  BH["Buffer the row per channel, in memory only<br/>BufferHandler.emit(): row(), channel()"] --> PT["Publish every HEARTBEAT_SECONDS<br/>start_logging() thread -> BufferHandler.publish()<br/>new channel: continued(), then try_publish()"]
   PT --> LIVE[("call_logs<br/>call_id:livedict:source")]
 
   subgraph persist ["persist_logs, every PERSIST_LOGS_EVERY"]
@@ -83,35 +55,129 @@ flowchart TD
   RD --> UI["Dedupe and draw<br/>logview.union() -> logStream() -> logLine()"]
 ```
 
-## The two storages
-
-`{call_id}:livedict:{source}` is what a container has published: the whole
-list, republished on each pass, so a page polling the Dict sees a call's log
-grow while it runs. A container starting a channel continues the longer of what
-the Dict holds and what the file's rows say, so a launcher that restarts
-mid-call extends the list rather than truncating it.
-
-`{call_id}:volume:{source}` is the file's rows: `{artifact_path}/logs/{call_id}.jsonl`,
-or `logs/launcher.jsonl` for the launcher. **`persist_snapshot` is the only thing
-that writes one**, on the schedule `persist_logs` runs it (`PERSIST_LOGS_EVERY`
-seconds, in its own container). Each pass is stateless:
-`load_snapshot_from_volume` walks `**/logs/*.jsonl`, publishes each file's rows
-as that call's `volume` channels, and merges `call_history.json` into the
-`call_history` Dict (a union per artifact, so a wiped Dict comes back from the
-file; a log file no grant names gets a grant with no `granted_ts`). Then the
-pass appends every live row past its file's count to that file and to the
-`volume` channel, writes `call_history.json` and commits. The launcher runs the
-same `load_snapshot_from_volume` once at startup, so a dashboard that comes back
-after any gap agrees with the files.
+1. **Stamp.** Code logs through `call_logger(name, source, call_id)`, which
+   puts `source` and `call_id` on the record itself. A job's is `worker.log`
+   (`job`, `worker`); the launcher's are `log_launcher` for its own doings and
+   `log_call(call_id)` for a call it manages (`leasebook`, `launcher`); a
+   profiling run's is `profile`, `profiler`.
+2. **Buffer.** `start_logging(call_id)`, once per container, attaches a
+   `BufferHandler` to the root logger. `emit` turns each record into a row and
+   appends it to the live channel its stamp names; an unstamped record is
+   filed under the container's own `call_id` as `ambient`. A row the launcher
+   stamps with another call's id is appended to the launcher's own channel as
+   well, so a grant or a cancel reads on the artifact's page and in the
+   dashboard's panel alike. `emit` never leaves memory: it runs on whatever
+   thread logged, Modal's own event loop included, where a blocking Modal
+   call raises.
+3. **Publish.** A thread `start_logging` starts puts every channel the
+   container holds, whole, every `HEARTBEAT_SECONDS`. A channel new since the
+   last pass is first started from `continued()`: the longer of the Dict's
+   live and volume lists, so a container that restarts mid-call extends a
+   channel rather than truncating it. One whose read fails is held back to the
+   next pass rather than put without its start. Stopping publishes once more,
+   so the rows logged on the way out land.
+4. **Persist.** `persist_logs` runs `persist_snapshot` every
+   `PERSIST_LOGS_EVERY` seconds in its own container. It reloads the volume,
+   runs `load_snapshot_from_volume` (every `**/logs/*.jsonl` read and put as
+   that call's `volume` channels, `call_history.json` merged into the
+   `call_history` Dict), appends each call's live rows past its file's row
+   count to the file and to its `volume` channel, writes `call_history.json`
+   and commits. The calls it visits are those `call_history` names, plus
+   `launcher`. Reading the files first is also what brings a wiped Dict back,
+   within one pass.
+5. **Read.** `/logs/<path>` returns, for every call `call_history` lists under
+   the artifact, both storages from the Dict (`artifact_calls`);
+   `/launcher-logs` returns both for the call id `launcher` (`stream`). Neither
+   touches the volume.
+6. **Draw.** The page unions the two storages, counting a row once by `ts`,
+   `level`, `logger` and `msg`, sorts newest first and draws every line. DEBUG
+   is hidden until the reader turns it on.
 
 **Which calls belong to an artifact is the `call_history` Dict's to say.**
-`attempt_launch` appends the grant right after it spawns, and `artifact_calls`
-joins that list with `beats` on every request for an artifact's page. Nothing is
-inferred from a beat or a filename.
+`attempt_launch` appends the grant right after it spawns, before the call has
+said anything; nothing is inferred from a beat or a filename. A log file no
+grant names gets a grant with no `granted_ts` when the files are read, so
+nothing on the volume goes unlisted.
 
-`/logs/<path>` hands back, per call, `livedict` and `volume` straight from the
-Dict, and `/launcher-logs` the same two for the call id `launcher`; neither
-reloads the volume or recomputes the map ([Dashboard](dashboard.md)).
+## Where it lives
+
+### The `call_logs` Dict
+
+`launchpad-call-logs`, served from us-east, holds every channel. A `livedict`
+channel is written by the container that logged its rows, through its
+`BufferHandler`, and read by both log routes, by `continued()` when a container
+starts the channel again, by `persist_snapshot` for the rows to file, and by
+`run_profile` to print a profiling run as it goes. A `volume` channel is a copy
+of the file's rows, written by `load_snapshot_from_volume` and
+`persist_snapshot`, and read by both log routes and `continued()`.
+
+### The `call_history` Dict
+
+`launchpad-call-history` holds every grant, keyed by artifact path. It is
+written by `attempt_launch` at grant time and by `load_snapshot_from_volume`'s
+merge of `call_history.json`, and read by `artifact_calls` to list an
+artifact's calls and by `persist_snapshot` to find each call's file.
+
+### The volume
+
+`{artifact_path}/logs/{call_id}.jsonl` for a call, `logs/launcher.jsonl` at the
+root for the launcher, and `call_history.json` at the root are the durable
+record. `persist_snapshot` is the only thing that writes them;
+`load_snapshot_from_volume` reads them back.
+
+### stdout
+
+`start_logging` points `basicConfig` at stdout, so every record is also a
+formatted line in `modal app logs`. Our loggers log at DEBUG, libraries at
+INFO, and `modal`, `grpc`, `urllib3` and `uvicorn.access` at WARNING, so the
+publisher's own requests stay out of the log.
+
+### Regions
+
+The launcher and `persist_logs` run in `REGION`, beside the Dicts, so each Dict
+read is a short round trip; a worker runs wherever its GPU is.
+
+## Why
+
+- **Live rows go to a Dict, not a file.** A file a worker writes reaches the
+  volume on a background commit, at no moment anyone can wait on, and the
+  launcher sees it only after its next reload. A Dict put is visible to every
+  reader at once, so a page polling it watches a call's log grow while it runs.
+- **One scheduled pass writes the files, not each container.** The launcher
+  writes nothing to the volume, and no container has to commit its own log: the
+  pass files whatever the Dict holds, whoever published it, a container killed
+  hard included. It is stateless: the count it appends from is the file's own,
+  so a pass that never ran costs lag and nothing else.
+- **A channel is put whole.** A Dict has no append. Every key has one writer
+  (a container for its live channels, the file readers for `volume` ones), so a
+  whole put needs no read back and loses no update.
+- **Two storages under separate keys.** Keeping the file's rows apart from the
+  container's keeps each key to one writer, and lets a wiped Dict come back
+  from the files. The reader pays for it by unioning two lists.
+- **The stamp rides on the record.** Any thread a call or a container starts
+  files under the right call without inheriting anything (LESSONS.md, "Ask the
+  record which call it is, never the thread").
+- **The launcher is a call id.** Its log takes the same routes, the same file
+  layout and the same renderer as any call's.
+- **A grant is recorded at grant time.** A call whose container never ran is
+  still listed under its artifact, with the launcher's rows about it (LESSONS.md,
+  "A call the container never spoke for was invisible").
+
+## What it costs
+
+Each of these grows with history, and nothing trims it:
+
+- **Publishing.** Every `HEARTBEAT_SECONDS`, a container puts every channel it
+  holds, changed or not. The launcher's own channel holds every row it has ever
+  logged, continued from the file, and the launcher also holds a channel for
+  every call it has logged about since it started.
+- **Reading.** `/launcher-logs` returns the launcher's whole log twice, once
+  per storage, on every poll of the dashboard, and the page dedupes and redraws
+  all of it.
+- **Persisting.** Each pass reads every log file back and puts each as its
+  `volume` channel, one at a time, gets and puts `call_history` per artifact,
+  and gets every listed call's live channels. It runs in its own container, so
+  the launcher never waits on it.
 
 ## The step log
 
@@ -124,44 +190,38 @@ before that commit.
 
 ## Levels
 
-- **DEBUG**: protocol chatter only useful when debugging: lease confirms and
-  retries, per-step or per-batch detail, cache hits, anything high-frequency.
-  What was asked of a call (the spawn request and its resources, a cancel
-  request) is DEBUG too; what became of it is INFO, and the page hides DEBUG
-  until a reader turns it on, so a call reads as its outcomes first. For
-  example, `Lease.confirm` logs every successful confirm and every
-  indeterminate retry at DEBUG.
-- **INFO**: one line per meaningful lifecycle event, not per iteration: job
-  started, its milestones, checkpoint progress, job completed. `runtime.py`
-  logs `"done"` once a call's writes are committed, and a line naming the
-  ending it is about to announce.
-- **WARNING**: a recoverable problem that loses no work: a failed heartbeat
-  write, a lease read retried before it succeeds. `try_publish` logs a failed
-  `beats.put` or `call_logs.put` at WARNING and keeps going.
-- **ERROR**: the call's work is lost or it crashed. `runtime.py` logs a
-  `LeaseLost` at ERROR in one line without a traceback (a cancel arrives this
-  way too), and any other exception with its traceback before re-raising.
+- **DEBUG**: protocol chatter: lease confirms and retries, per-step detail,
+  every recompute. What was asked of a call (the spawn request and its
+  resources, a cancel request) is DEBUG too; what became of it is INFO, so a
+  call reads as its outcomes first.
+- **INFO**: one line per lifecycle event, not per iteration: job started, its
+  milestones, checkpoint progress, `"done"` once a call's writes are committed.
+- **WARNING**: a recoverable problem that loses no work: a failed heartbeat or
+  log put (`try_publish`), a lease read retried before it succeeds.
+- **ERROR**: the call's work is lost or it crashed. A `LeaseLost` (a cancel
+  arrives this way too) is one line without a traceback; any other exception
+  is logged with its traceback before it is re-raised.
 - **CRITICAL**: reserved for failures that abort more than one call. Unused.
 
-There is no separate "training" or "system" logger: a call has one (`job`), the
-launcher one (`leasebook`), and every line from anything they do lands in that
-channel. A category split, if ever worth having, is another
-`call_logger("job.lease", ...)`, whose rows carry their own `logger` name and
-land in the same channel.
+There is one logger per role, `job`, `leasebook` and `profile`, not one per
+category. A split, if ever worth having, is another `call_logger("job.lease",
+...)`, whose rows carry their own `logger` name and land in the same channel.
 
 ## Not captured
 
 - Output that bypasses `logging` (a bare `print`, tqdm on stderr) reaches only
   Modal's own capture and expires there.
 - A library that gives itself a handler and sets `propagate = False` never
-  reaches ours, so its lines are Modal's only (LESSONS.md, "A library that keeps
-  its own handler never reaches ours").
+  reaches ours (LESSONS.md, "A library that keeps its own handler never reaches
+  ours").
 - The lab's output reaches only `modal app logs`.
-- A live channel is the whole of its file plus what came after, republished every
-  `HEARTBEAT_SECONDS`; nothing trims it.
+- A profiling run's rows are live only: `run_profile` prints them as they are
+  published, and no grant names the call, so no file is written.
+- Under `modal serve` no schedule fires, so nothing is persisted; the Dict is
+  the only copy.
 - A container killed hard (out of memory, evicted) or one that never starts
-  (image build failure, no GPU available) is listed with what it published up to
-  its last beat, beside the launcher's own rows about it; Modal's line saying
+  (image build failure, no GPU available) is listed with what it published up
+  to its last beat, beside the launcher's rows about it; Modal's line saying
   why stays in Modal.
 
 ## Reference

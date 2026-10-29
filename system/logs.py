@@ -130,12 +130,14 @@ class BufferHandler(logging.Handler):
     """Keeps every record as a row in the live channel its own `call_id` and
     `source` name -- and in this container's own, when the row is about
     another call -- and publishes each of those channels whole. Touches no
-    file."""
+    file, and `emit` touches nothing but memory: a record can be logged on
+    Modal's own event loop, where a blocking Modal call raises."""
 
     def __init__(self, call_id: str):
         super().__init__()
         self.call_id = call_id
         self.channels: dict[str, list[dict]] = {}
+        self.unread: dict[str, tuple[str, str]] = {}  # a channel not yet continued: its call_id and source
 
     def emit(self, record: logging.LogRecord) -> None:
         entry = row(record, self.call_id)
@@ -146,17 +148,27 @@ class BufferHandler(logging.Handler):
         for call_id in {entry["call_id"], self.call_id}:
             key = channel(call_id, LIVE, entry["source"])
             if key not in self.channels:
-                # Claimed before the read, which reaches the Dict and can log
-                # on this thread; whatever it logs stays behind what it reads.
                 self.channels[key] = []
-                self.channels[key][:0] = continued(call_id, entry["source"])
+                self.unread[key] = (call_id, entry["source"])
             self.channels[key].append(entry)
 
     def publish(self) -> None:
-        """Puts every channel whole. This container is the only writer of each
-        key it holds, so nothing is read back first."""
+        """Starts each new channel from `continued()`, then puts every channel
+        whole. A channel whose earlier rows can't be read waits for the next
+        pass, since putting it without them would truncate it."""
         with self.lock:
-            channels = {key: list(rows) for key, rows in self.channels.items()}
+            unread = dict(self.unread)
+        for key, (call_id, source) in unread.items():
+            try:
+                earlier = continued(call_id, source)
+            except Exception as exc:
+                _log.warning(f"{key} not continued ({exc})")
+                continue
+            with self.lock:
+                self.channels[key][:0] = earlier
+                del self.unread[key]
+        with self.lock:
+            channels = {key: list(rows) for key, rows in self.channels.items() if key not in self.unread}
         for key, rows in channels.items():
             try_publish(key, partial(call_logs.put, key, rows), _log)
 

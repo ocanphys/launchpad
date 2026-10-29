@@ -1,14 +1,11 @@
 # launchpad
 
-Launchpad runs ML pipelines on Modal. You describe what should exist (a
-dataset, a tokenizer, a trained model), Launchpad works out what has to be
-built first, runs each piece as its own job, and shows progress on the
-dashboard.
+Launchpad enables rapid experimentation with hyperparameters and model architectures through reproducible ML pipelines running on Modal. Any stage of the model training pipeline can be described as a parameterized artifact, from data preparation and tokenization to pre-training, post-training, and model serving. Launchpad automatically resolves the full dependency graph, executes jobs across distributed workers, reuses existing artifacts, and tracks progress through a dashboard.
 
-New here? Start with [Getting started](getting-started.md): setup, a first
-workflow, and a training example. [Framework](framework.md) explains the idea;
-each other page describes one part, and is the only place that part is
-described.
+New here? Start with [Framework](framework.md), which explains the idea, then
+[Getting started](getting-started.md): setup, a first workflow, and a training
+example. Each other page describes one part, and is the only place that part
+is described.
 
 | Page | What it covers |
 | --- | --- |

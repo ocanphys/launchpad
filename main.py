@@ -1,4 +1,4 @@
-"""The deployment: one app, three images, five containers.
+"""The deployment: one app, four images, six containers.
 
 What each container runs is `launcher/`; nothing here but the resources they
 get and the Modal names they answer to.
@@ -29,10 +29,10 @@ from system.runtime import initialize_worker
 app = modal.App(APP_NAME)
 
 
-def locked_image(group: str) -> modal.Image:
-    """Returns an image with the project's dependencies and `group`'s, at their `uv.lock` versions."""
+def locked_image(*groups: str) -> modal.Image:
+    """Returns an image with the project's dependencies and `groups`', at their `uv.lock` versions."""
     return modal.Image.debian_slim(python_version="3.12").uv_sync(
-        str(Path(__file__).parent), groups=[group], extra_options="--no-default-groups"
+        str(Path(__file__).parent), groups=list(groups), extra_options="--no-default-groups"
     )
 
 
@@ -58,6 +58,13 @@ web_image = (
 )
 
 worker_image = locked_image("worker").add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "profiling", "gpus")
+
+# torch to run a model, fastapi to serve it, and web/ for the page and its login form.
+chat_image = (
+    locked_image("worker", "web")
+    .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
+    .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
+)
 
 lab_image = (
     locked_image("lab")
@@ -89,7 +96,7 @@ def leasebook():
     # to reach its own function.
     from launcher.leasebook import build_api
 
-    return build_api(run_job, jupyter, WEB_DIR, GUIDE_DIR, TEMPLATES)
+    return build_api(run_job, jupyter, chat, WEB_DIR, GUIDE_DIR, TEMPLATES)
 
 
 @app.function(image=web_image, volumes={STORAGE.as_posix(): volume}, region=REGION, schedule=modal.Period(seconds=PERSIST_LOGS_EVERY))
@@ -177,3 +184,23 @@ def jupyter():
     Its settings and its process are `launcher.lab_server`.
     """
     start_jupyterlab()
+
+
+@app.function(
+    image=chat_image,
+    gpu="T4",
+    volumes={STORAGE.as_posix(): volume},
+    secrets=[modal.Secret.from_name(LAB_SECRET)],
+    scaledown_window=300,
+)
+@modal.concurrent(max_inputs=4)
+@modal.asgi_app()
+def chat():
+    """A chat page over a finished pretraining leg, on its own GPU: where a done
+    leg's serve button on the dashboard redirects, with the leg in the URL.
+
+    It reads the volume and writes nothing. What it serves is `launcher.chat`.
+    """
+    from launcher.chat import build_chat
+
+    return build_chat(WEB_DIR)

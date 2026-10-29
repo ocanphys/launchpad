@@ -14,7 +14,14 @@ containers mount and neither starts without.
   a navigation lands on the login page (one field, `web/login.html`), which
   takes `DASHBOARD_PASSWORD`, yours to pick since it is the one a person types,
   and leaves a cookie holding its digest; neither the password nor a session
-  list is stored anywhere. A request other than a navigation gets a 401.
+  list is stored anywhere. The login page is sent the URL it was reached from
+  as `?next=` and goes back there, only ever to a path on the same site. A
+  request other than a navigation gets a 401.
+- The chat ([Chat](chat.md)) is behind the same password on its own domain,
+  where the dashboard's cookie does not reach. **serve** carries a `ticket()`
+  instead: the expiry, a minute away, signed with the password's digest. The
+  chat's gate checks it, leaves the same cookie, and redirects to the same URL
+  without it.
 - JupyterLab takes `JUPYTER_TOKEN` instead, which nobody types: the header's
   **new experiment**, **new artifact** and **lab** links and an experiment's
   **declaration** and **notebook** links carry it, and since it travels in a URL it stays a random
@@ -28,7 +35,9 @@ containers mount and neither starts without.
 flowchart TD
   REQ["Any request"] --> G["require_password middleware, from gate()"]
   G --> C{"Path is /login or /guide/,<br/>or cookie equals sha256(DASHBOARD_PASSWORD)?"}
-  C -->|"no, GET"| RED["303 to /login<br/>login_page()"]
+  C -->|"no, GET with a live ticket"| TK["303 to the same URL without it<br/>set_cookie()"]
+  TK --> REQ
+  C -->|"no, GET"| RED["303 to /login?next=<br/>login_page()"]
   C -->|"no, other method"| U401["401"]
   RED --> POST["POST /login: login()<br/>hmac.compare_digest(), set_cookie()"]
   POST --> REQ
@@ -186,8 +195,9 @@ view every `POLL_MS` (2 seconds) and redraws what changed, so a row walks
   the old loop stops itself. Coming back from an artifact's page redraws at once
   from the last payload, then fetches.
 
-The header's refresh button is the manual reload, for what nothing announces: a
-manifest declared from the lab. It POSTs `/refresh` and refetches; it shows
+The header's refresh button is the manual reload, for what nothing announces:
+a file written on the volume by hand. A committed `lab.declare` or
+`lab.create_experiment` announces itself. It POSTs `/refresh` and refetches; it shows
 green after a good answer, and the error in red after a bad one.
 
 ## Row buttons
@@ -197,11 +207,15 @@ in this order:
 
 | The artifact | Button | Route |
 | --- | --- | --- |
+| is a done `Pretraining` leg | **serve** | `GET /serve/<path>` |
 | is done | *run*, frozen | |
 | has a call running | **stop** | `POST /cancel/<path>` |
 | has verdict `starting` | *starting*, blue and disabled | |
 | is ready | **run** | `POST /launch/<path>` |
 | is blocked | *run*, frozen | |
+
+**serve** is a link rather than a request: `/serve/<path>` redirects, in a new
+tab, to the `chat` function with that leg ([Chat](chat.md)).
 
 `done` is asked first because it is the one answer that cannot be undone;
 everything after it is a claim about now, and a claim can lag. The button

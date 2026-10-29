@@ -13,4 +13,4 @@ mkdocs serve        # http://127.0.0.1:8000
 ```
 
 A deployed app (`mkdocs build --strict && modal deploy main.py`) also serves them at `/guide/`. Start
-with [docs/getting-started.md](docs/getting-started.md).
+with [docs/framework.md](docs/framework.md), then [docs/getting-started.md](docs/getting-started.md).

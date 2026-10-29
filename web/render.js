@@ -91,6 +91,7 @@ function progressCell(state) {
 // One square button per artifact, offering the one thing worth doing to it.
 // Asked in this order:
 //
+//   done, a Pretraining leg -> serve
 //   done                    -> run, frozen
 //   a call is running       -> stop
 //   a call is starting      -> starting, blue and frozen
@@ -118,6 +119,10 @@ function actionButton(path, state, ctx) {
       onclick: pending || !handler ? undefined : () => handler(path),
     });
 
+  // A finished leg can be talked to: /serve redirects to the chat function with it.
+  if (state.done && state.type === "Pretraining") {
+    return el("a", { class: "launch-btn serve", href: "/serve/" + path, target: "_blank", rel: "noopener", text: "serve" });
+  }
   if (state.done) return act("run", "run", "already done", null);
   if (state.active) return act("cancel", "stop", "cancel this running job", ctx.onCancel);
   if (state.verdict === "starting") return act("starting", "starting", "waiting for first heartbeat", null);

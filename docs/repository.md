@@ -122,9 +122,12 @@ What is happening now lives outside the volume, in Modal Dicts and one Queue:
 - **Queue `launchpad-refreshes`**: two messages per call,
   `{artifact_path, call_id, event}`: `started`, after its first heartbeat, and
   one naming how it ended (`done`, `failed`, `lease lost`), after its
-  `volume.commit()` and its last beat. The worker is the only writer and the
-  launcher the only reader. Nothing is computed from a message: it only says
-  the volume and the Dicts are worth reading again.
+  `volume.commit()` and its last beat; one per committed `lab.declare`,
+  `declared`, under the call id `launcher`; and one per committed
+  `lab.create_experiment`, `{experiment_uid, artifact_paths, event: "experiment
+  created"}`. Workers and the lab write it, and the launcher is the only
+  reader. Nothing is computed from a
+  message: it only says the volume and the Dicts are worth reading again.
 
 ## Where the code lives
 
@@ -135,9 +138,9 @@ What is happening now lives outside the volume, in Modal Dicts and one Queue:
 - **`lab.py`**, **`local.py`**: the notebook API, and the laptop's bridge to the
   volume ([Lab](lab.md)).
 - **`main.py`**: the deployment and nothing else: the app, the volume, the
-  three images (`web_image`, `worker_image`, `lab_image`) and the five
-  functions (`leasebook`, `persist_logs`, `run_job`, `jupyter`, `profile`) with
-  the resources each gets. What they run is `launcher/`:
+  four images (`web_image`, `worker_image`, `lab_image`, `chat_image`) and the
+  six functions (`leasebook`, `persist_logs`, `run_job`, `jupyter`, `profile`,
+  `chat`) with the resources each gets. What they run is `launcher/`:
   - `launcher/state.py` reads the volume and the Dicts into the state map, and
     owns `volume`, `mount_lock` and the decoded manifests.
   - `launcher/leasebook.py` is the launcher and its dashboard API:
@@ -145,6 +148,7 @@ What is happening now lives outside the volume, in Modal Dicts and one Queue:
     callers ([Launcher](launcher.md)).
   - `launcher/gate.py` is the password in front of those routes, and
     `launcher/lab_server.py` JupyterLab's setup ([Dashboard](dashboard.md)).
+  - `launcher/chat.py` is the chat page over a finished leg ([Chat](chat.md)).
 - **`system/`**: the plumbing under all of that, artifact-agnostic by
   construction: the Dicts and the Queue (`lease_protocol.py`), the log
   channels (`logs.py`), and what a worker does around a job (`runtime.py`,

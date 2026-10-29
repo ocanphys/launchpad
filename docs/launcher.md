@@ -110,8 +110,8 @@ Only when something changed what it would say, never on a clock:
 
 ```mermaid
 flowchart TD
-  T4["Container start<br/>build_api(): start_logging(LAUNCHER), load_snapshot_from_volume()"] --> RC
-  T1["A worker started or ended<br/>listen(): refreshes.get_many()"] --> RC
+  T4["Container start<br/>build_api(): start_logging(LAUNCHER)"] --> RC
+  T1["A worker started or ended, or the lab declared<br/>listen(): refreshes.get_many()"] --> RC
   T2["Accepted launch or cancel<br/>launch_endpoint(), cancel_endpoint()"] --> RC
   T3["Refresh button<br/>POST /refresh: refresh_route()"] --> RC
   RC["recompute(reason)"] --> ST["Snapshot under mount_lock<br/>state(): volume.reload(), beats.items(), leases.items()"]
@@ -121,8 +121,12 @@ flowchart TD
   LV --> LAT[("latest map in memory")]
 ```
 
-A manifest declared from the lab is announced by no call, which is what the
-refresh button is for. Between recomputes the map is the authority on the
+The lab announces itself on the same queue, after its commit: a committed
+`lab.declare` as `declared` on its artifact's path under the call id
+`launcher`, and a committed `lab.create_experiment` as `experiment created`,
+naming the experiment and every artifact path it asked for. A file written on
+the volume by hand is announced by nothing, which is what the refresh button
+is for. Between recomputes the map is the authority on the
 volume, lagged by one message but complete, since an artifact's files never
 leave the volume once they land; a row walks `runnable`, `starting`, `running`,
 `done` on its own.
@@ -135,8 +139,7 @@ refresh and a request reading a manifest take turns. The lock is never held
 across the listener's blocking queue read, and the routes that take it are sync
 `def`, so blocking on it never stalls the event loop (LESSONS.md, "A background
 thread makes the mount's reload race its readers"). The launcher container
-writes nothing to the volume; at startup it reads the log files back once, so
-the Dicts and the files agree after any gap. It runs in `REGION`, next to
+writes nothing to the volume. It runs in `REGION`, next to
 Modal's Dicts, so a Dict read is a short round trip.
 
 ## Routes

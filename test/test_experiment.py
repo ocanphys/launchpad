@@ -209,6 +209,23 @@ class ExperimentTests(unittest.TestCase):
                 self.create(commit=True, notebook=None)
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_a_commit_on_the_volume_tells_the_launcher(self):
+        """One message for the experiment, and one per declare."""
+        sent = []
+        with (
+            patch.object(lab, "STORAGE", self.root),
+            patch.object(lab, "refresh"),
+            patch.object(lab, "save"),
+            patch.object(lab, "refreshes", SimpleNamespace(put=sent.append)),
+        ):
+            self.create(commit=True)
+            with redirect_stdout(io.StringIO()):
+                lab.declare(ODYSSEY, root=self.root, commit=True, notebook=NOTEBOOK)
+        self.assertEqual(sent, [
+            {"experiment_uid": UID, "artifact_paths": [r.artifact_path.as_posix() for r in RUNS], "event": "experiment created"},
+            {"artifact_path": ODYSSEY.artifact_path.as_posix(), "call_id": "launcher", "event": "declared"},
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

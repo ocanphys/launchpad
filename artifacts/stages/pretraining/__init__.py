@@ -55,7 +55,7 @@ class Pretraining(Training):
         before it, its data, and its model and training parameters exactly as
         its manifest writes them, the model's class included.
 
-            FIRST_LEG.lineage_hash -> "69f057c312"  # the first leg in test/test_golden.py
+            Artifact.load("runs/my-run/pretraining/0-20000-da2a0676ca").lineage_hash -> "da2a0676ca"
         """
         params = self.parameters()
         return self.digest(

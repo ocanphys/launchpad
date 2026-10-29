@@ -43,6 +43,8 @@ from artifacts.core.artifact import Artifact, Resources
 from artifacts.core.resolve import resolve
 from artifacts.core.storage import MANIFEST, read_manifest, write_manifest
 from config import LAB_COMMIT_ENV, LAB_WORKSPACE, STORAGE, VOLUME_NAME, get_git_commit
+from system.lease_protocol import refreshes
+from system.logs import LAUNCHER, try_publish
 from system.runtime import Worker
 
 # States a person has to look at before anything is written.
@@ -358,10 +360,11 @@ def declare(
     any blocker -- a conflict, an undeclared folder, or drift under
     `strict_commit` -- and raises DeclarationError with the report attached
     before touching disk. `root` is
-    for tests and scripts; a notebook gets STORAGE. The volume is reloaded
-    before inspection and committed after writes only when this runs inside
-    a container and `root` is its mount: anywhere else `/storage` is a plain
-    folder with nothing behind it to reload.
+    for tests; a notebook gets STORAGE. With STORAGE, the volume is reloaded
+    before inspection and committed after writes, and the commit announced on
+    `refreshes` so the dashboard shows it: this runs only in a Modal
+    container, a lab kernel or `local.declare_on_volume`'s, where STORAGE is
+    the volume's mount.
 
     A commit that creates `artifact` also writes the declaring notebook to
     `<artifact_path>/declaring.ipynb` under a heading naming that path, which
@@ -373,18 +376,20 @@ def declare(
         -> ... declared on artifact path:
            tokenizers/bpe-1000-d44bf6191c
     """
-    on_volume = root == STORAGE and not modal.is_local()
     graph = resolve(artifact)
     if commit and notebook is None:
         notebook = current_notebook()
-    if on_volume:
+    if root == STORAGE:
         refresh()
     report = _declare(
         graph, [artifact.artifact_path.as_posix()], root,
         commit=commit, strict_commit=strict_commit, verbose=verbose, notebook=notebook,
     )
-    if commit and on_volume:
+    if commit and root == STORAGE:
         save()
+        # After the commit, so the launcher's reload finds what it announces.
+        message = {"artifact_path": artifact.artifact_path.as_posix(), "call_id": LAUNCHER, "event": "declared"}
+        try_publish("declared", lambda: refreshes.put(message), _log)
     print(report.render(verbose))
     return report
 
@@ -404,7 +409,8 @@ def create_experiment(
     printed; with `commit`, declares the graph as `declare` does, each path
     once, and creates `experiments/<experiment_uid>/` holding
     `declaration.ipynb`, the notebook declaring it, and `notebook.ipynb`,
-    which calls `load_experiment`.
+    which calls `load_experiment`. The launcher is told once, for the whole
+    experiment, on `refreshes`.
 
     Each artifact asked for is tagged `{"experiment": [experiment_uid]}`, on
     top of its own tags and, when it is already declared, the stored ones;
@@ -426,8 +432,7 @@ def create_experiment(
         raise ValueError(f"experiment_uid must be letters, digits, '.', '_' and '-', got {experiment_uid!r}")
     if not artifacts:
         raise ValueError("an experiment needs at least one artifact")
-    on_volume = root == STORAGE and not modal.is_local()
-    if on_volume:
+    if root == STORAGE:
         refresh()
     experiments = root / "experiments"
     final = experiments / experiment_uid
@@ -474,8 +479,10 @@ def create_experiment(
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        if on_volume:
+        if root == STORAGE:
             save()
+            message = {"experiment_uid": experiment_uid, "artifact_paths": roots, "event": "experiment created"}
+            try_publish("experiment created", lambda: refreshes.put(message), _log)
     else:
         report = _declare(graph, roots, root, **options)
     print(report.render(verbose))
@@ -496,7 +503,7 @@ def load_experiment(experiment_uid: str, root: Path = STORAGE) -> list[Artifact]
             Pretraining(run_id='batch-size-study-bs32', ...),
             Pretraining(run_id='batch-size-study-bs64', ...)]
     """
-    if root == STORAGE and not modal.is_local():
+    if root == STORAGE:
         refresh()
     memo: dict[str, Artifact] = {}
     paths = sorted(manifest.parent.relative_to(root) for manifest in root.rglob(MANIFEST))

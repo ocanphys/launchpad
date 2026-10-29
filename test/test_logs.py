@@ -127,6 +127,18 @@ class LoggingTests(unittest.TestCase):
                     ["a", "b", "started"],
                 )
 
+    def test_logging_a_record_reads_nothing(self):
+        """A record can be logged on Modal's own event loop (its cancellation
+        warning is), where a blocking Dict read raises "Deadlock detected";
+        the read that continues a new channel waits for the publisher."""
+        self.store["fc-a:livedict:ambient"] = [row("before", source=AMBIENT)]
+        stop = self.start("fc-a")
+        with patch.object(self.store, "get", side_effect=AssertionError("read while logging")):
+            logging.getLogger("a_library").warning("cancellation signal")
+        stop()
+
+        self.assertEqual([r["msg"] for r in self.store["fc-a:livedict:ambient"]], ["before", "cancellation signal"])
+
     def test_a_publish_that_fails_is_a_warning_the_next_one_carries(self):
         failures = [RuntimeError("Dict unavailable")]
 

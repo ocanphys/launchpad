@@ -21,11 +21,14 @@ call_history = modal.Dict.from_name(f"{APP_NAME}-call-history", create_if_missin
 
 # One Queue, two messages per call -- "started", once its first beat is
 # readable, and one naming how it ended, after its `volume.commit()` -- put
-# by the worker and taken by the one leasebook container, whose listener
-# thread recomputes its state map when it finds one. A message is
+# by the worker, and one per committed `lab.declare` or `create_experiment`;
+# taken by the one leasebook container, whose listener thread recomputes its
+# state map when it finds one. A call's or a declaration's message is
 # `{"artifact_path", "call_id", "event"}`, where event is "started", "done",
-# "failed" or "lease lost": what to say in the launcher's log, not something
-# the map is computed from -- that is read off the volume, as ever.
+# "failed", "lease lost" or "declared" (call id `launcher`); an experiment's
+# is `{"experiment_uid", "artifact_paths", "event": "experiment created"}`.
+# Either is what to say in the launcher's log, not something the map is
+# computed from -- that is read off the volume, as ever.
 refreshes = modal.Queue.from_name(f"{APP_NAME}-refreshes", create_if_missing=True)
 
 LEASE_RETRIES = 5  # how many times an indeterminate lease read is worth re-asking

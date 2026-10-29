@@ -20,6 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlencode
 
 import httpx
 import modal
@@ -30,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from artifacts.core.artifact import Artifact
 from artifacts.core.storage import MANIFEST
 from config import REFRESH_BATCH, REFRESH_WAIT_SECONDS, STORAGE, TRAIN_LOG
-from launcher.gate import gate
+from launcher.gate import TICKET, gate, ticket
 from launcher.resources import resource_options
 from launcher.state import (
     artifact_calls,
@@ -55,7 +56,6 @@ from system.logs import (
     LIVE,
     VOLUME,
     launcher_logger,
-    load_snapshot_from_volume,
     open_json,
     open_jsonl,
     start_logging,
@@ -197,12 +197,13 @@ def cancel_call(artifact_path: str) -> tuple[bool, str]:
     return True, message
 
 
-def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path, templates: Path) -> FastAPI:
+def build_api(run_job, jupyter, chat, web_dir: Path, guide_dir: Path, templates: Path) -> FastAPI:
     """The whole web app: every route, and the listener thread behind them.
 
-    `run_job` is the Modal function `/launch` spawns and `jupyter` the one
-    `/lab`, `/new/<kind>` and an experiment's notebook link redirect to, both
-    handed in because their decorators are in main.py. `web_dir` is where that
+    `run_job` is the Modal function `/launch` spawns, `jupyter` the one
+    `/lab`, `/new/<kind>` and an experiment's notebook link redirect to, and
+    `chat` the one `/serve/<path>` redirects to, all handed in because their
+    decorators are in main.py. `web_dir` is where that
     image mounted the `web/` folder, `guide_dir` where it built the docs site,
     served at GUIDE without the password, and `templates` the folder holding
     the notebooks `/new/<kind>` starts from, `<kind>_template.ipynb`.
@@ -247,17 +248,14 @@ def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path, templates: Path)
         # it travels in a URL (see launcher/gate.py).
         token = os.environ["JUPYTER_TOKEN"]
 
-        # The files on the volume and the Dicts reconciled once, so a
-        # dashboard that comes back after any gap lists what was filed.
         root = STORAGE
-        volume.reload()
-        log_launcher.info(f"synced {len(load_snapshot_from_volume(root))} log channels off the volume")
 
         # This container's picture of the volume: the `state` map, and the
         # authority on it -- lagged, but complete, since an artifact's files
         # never leave the volume once they land. Recomputed when a worker's
-        # message says its call has started or committed, when this container
-        # itself grants or releases a lease, and when the page asks. No
+        # message says its call has started or committed, when the lab says
+        # it declared, when this container itself grants or releases a
+        # lease, and when the page asks. No
         # clock: a volume nothing wrote to is a volume worth no reload.
         # Everything a request reads off the mount in between is the last
         # recompute's image of it.
@@ -282,9 +280,12 @@ def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path, templates: Path)
                 try:
                     messages = refreshes.get_many(REFRESH_BATCH, timeout=REFRESH_WAIT_SECONDS)
                     for message in messages:
-                        # The call's row, not the container's: what a call did
-                        # reads on that call's page.
-                        log_call(message["call_id"]).info(f"{message['artifact_path']}: {message['event']}")
+                        if message["event"] == "experiment created":
+                            log_launcher.info(f"experiments/{message['experiment_uid']}: created over {message['artifact_paths']}")
+                        else:
+                            # The call's row, not the container's: what a call
+                            # did reads on that call's page.
+                            log_call(message["call_id"]).info(f"{message['artifact_path']}: {message['event']}")
                     recompute("worker")
                 except queue.Empty:
                     continue
@@ -294,8 +295,8 @@ def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path, templates: Path)
 
         threading.Thread(target=listen, daemon=True).start()
 
-        # The manual reload: a manifest declared from the lab lands on the
-        # volume without a call, so nothing tells this container about it.
+        # The manual reload, for what lands on the volume unannounced:
+        # anything written there by hand.
         @api.post("/refresh")
         def refresh_route() -> dict:
             recompute("page")
@@ -373,6 +374,14 @@ def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path, templates: Path)
         def experiment_notebook(experiment_uid: str, notebook: Literal["declaration", "notebook"]) -> RedirectResponse:
             path = f"storage/experiments/{experiment_uid}/{notebook}.ipynb"
             return RedirectResponse(f"{jupyter.get_web_url()}/lab/tree/{path}?token={token}")
+
+        # A done Pretraining row's "serve" button: the chat page over that leg,
+        # in the chat function's own container, started by the visit. The
+        # chat is its own domain, so the ticket is what logs the browser in
+        # there without asking for the password again.
+        @api.get("/serve/{artifact_path:path}")
+        def serve_redirect(artifact_path: str) -> RedirectResponse:
+            return RedirectResponse(f"{chat.get_web_url()}/?{urlencode({'leg': artifact_path, TICKET: ticket()})}")
 
         # :path, not a plain path segment -- an artifact_path contains its own
         # /s (runs/my-run/pretraining), which a plain segment can't match.

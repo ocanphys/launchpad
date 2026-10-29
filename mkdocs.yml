@@ -10,9 +10,13 @@ plugins:
           options:
             filters: ["!^_"]
 extra_javascript:
-  - https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js
+  - https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js
+  - path: js/mermaid-elk.js
+    type: module
 markdown_extensions:
   - tables
+  - pymdownx.highlight:
+      use_pygments: false
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -20,8 +24,8 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_div_format
 nav:
   - Overview: index.md
-  - Getting started: getting-started.md
   - Framework: framework.md
+  - Getting started: getting-started.md
   - Artifacts: artifacts.md
   - Manifests: manifests.md
   - Lab: lab.md
@@ -35,3 +39,4 @@ nav:
   - Logging: logging.md
   - Artifact Repository: repository.md
   - Profiling: profiling.md
+  - Chat: chat.md

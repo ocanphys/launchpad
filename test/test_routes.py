@@ -11,7 +11,7 @@ Nothing here talks to Modal. The app is built through `leasebook`'s raw
 function, so what is under test is the wiring main.py hands `build_api` too.
 The stubs go into the namespace each name is read from: `state`,
 `attempt_launch` and the Dicts are `launcher.leasebook`'s, `artifact_calls`
-reads `launcher.state`'s, and `run_job`/`jupyter`/`WEB_DIR` are main's own,
+reads `launcher.state`'s, and `run_job`/`jupyter`/`chat`/`WEB_DIR` are main's own,
 since those reach `build_api` as arguments.
 
 Plain functions named test_*, plain assert -- `python test/test_routes.py`,
@@ -32,6 +32,7 @@ from pathlib import Path
 from tempfile import mkdtemp
 from unittest import TestCase
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 
@@ -173,12 +174,12 @@ def client(**overrides):
         calls["cancelled"].append(path) or (overrides.get("cancelled", True), f"cancelled {path}")
     )
     main.jupyter = type("Stub", (), {"get_web_url": staticmethod(lambda: "https://lab.test")})()
-    # The startup sync: nothing to reload, no log files to read.
+    main.chat = type("Stub", (), {"get_web_url": staticmethod(lambda: "https://chat.test")})()
+    # Counted, so a test can say a route never reloaded the volume.
     def reload():
         calls["reload"] += 1
 
     leasebook.volume = type("Stub", (), {"reload": staticmethod(reload)})()
-    leasebook.load_snapshot_from_volume = lambda root: {}
     # A plain dict answers `.get()`/`.items()` the same way the Dict does.
     # Every call the launcher ever granted, per artifact, oldest first: fc-9
     # is a grant made up for a log file, fc-0 never beat, fc-1 is running.
@@ -249,6 +250,7 @@ def test_every_route_is_registered():
         "/cancel/{artifact_path:path}",
         "/artifact/{artifact_path:path}",
         "/logs/{artifact_path:path}",
+        "/serve/{artifact_path:path}",
     ):
         assert expected in paths, f"{expected} is not registered: {sorted(paths)}"
 
@@ -300,7 +302,7 @@ def test_state_reads_a_running_calls_progress_on_every_request():
     # The volume's half of the entry is the map's, untouched by any of it.
     assert {key: second[key] for key in DURABLE} == {key: RUNNING[key] for key in DURABLE}
     assert calls["state"] == 1, "the map was recomputed"
-    assert calls["reload"] == 1, "the volume was reloaded after startup"
+    assert calls["reload"] == 0, "the volume was reloaded"
 
 
 def test_state_reads_nothing_for_artifacts_no_call_is_working_on():
@@ -350,7 +352,7 @@ def test_launcher_logs_are_live_and_do_not_refresh_state_or_storage():
     leasebook.call_logs["launcher:livedict:ambient"] = [noise]
     assert api.get("/launcher-logs").json() == {"livedict": [first, second, noise], "volume": [first]}
     assert calls["state"] == 1
-    assert calls["reload"] == 1
+    assert calls["reload"] == 0
     assert "launcher" not in leasebook.call_history
 
 
@@ -500,6 +502,29 @@ def test_the_lab_link_carries_the_token():
     assert root.status_code == 307 and root.headers["location"] == f"https://lab.test/lab?token={TOKEN}"
 
 
+def test_serve_opens_the_chat_with_the_leg_already_logged_in():
+    """The chat is its own domain, so the dashboard's cookie does not reach it:
+    the ticket in the redirect is what keeps the password from being asked
+    for again. Any app behind the gate takes it, so the dashboard's own stands
+    in for the chat's here."""
+    from fastapi.testclient import TestClient
+
+    api, _ = client()
+    opened = urlsplit(api.get("/serve/runs/toy/pretraining").headers["location"])
+    query = parse_qs(opened.query)
+    assert (opened.netloc, opened.path, query["leg"]) == ("chat.test", "/", ["runs/toy/pretraining"])
+
+    anonymous = TestClient(api.app, follow_redirects=False)
+    arrived = anonymous.get("/?" + opened.query)
+    assert arrived.status_code == 303 and arrived.headers["location"] == "/?" + urlencode({"leg": "runs/toy/pretraining"})
+    assert SESSION["Cookie"] in arrived.headers["set-cookie"]
+
+    expires, _, signature = query["ticket"][0].partition(".")
+    for refused in (f"{expires}.{'0' * 64}", f"{int(time.time()) - 1}.{signature}", "garbage"):
+        answer = TestClient(api.app, follow_redirects=False).get("/?" + urlencode({"leg": "x", "ticket": refused}))
+        assert answer.status_code == 303 and answer.headers["location"].startswith("/login?"), refused
+
+
 def test_a_new_notebook_is_its_kinds_template_written_into_the_lab_and_opened(monkeypatch):
     api, _ = client()
     put = Mock()
@@ -538,7 +563,9 @@ def test_every_route_is_behind_the_password():
     anonymous = TestClient(api.app, follow_redirects=False)
     for path in ("/", "/state", "/lab", "/artifact/runs/toy/pretraining"):
         answer = anonymous.get(path)
-        assert answer.status_code == 303 and answer.headers["location"] == "/login", f"{path}: {answer.status_code}"
+        assert answer.status_code == 303 and answer.headers["location"] == "/login?" + urlencode({"next": path}), (
+            f"{path}: {answer.status_code}"
+        )
     assert anonymous.post("/launch/runs/toy/pretraining").status_code == 401
     assert calls["launched"] == [], "a logged-out POST reached the launcher"
     stale = {"Cookie": "launchpad=" + hashlib.sha256(b"wrong").hexdigest()}
@@ -577,6 +604,21 @@ def test_the_login_form_takes_the_password_and_nothing_else():
     assert SESSION["Cookie"] in cookie, cookie
     # The password is what the browser posted, never what it stores or resends.
     assert PASSWORD not in cookie and "HttpOnly" in cookie and "Secure" in cookie
+
+
+def test_logging_in_returns_to_where_the_browser_was_going_and_nowhere_else():
+    """The serve button lands on the chat's own domain with `?leg=` in the
+    URL, logged out; logging in has to keep it."""
+    from fastapi.testclient import TestClient
+
+    api, _ = client()
+    anonymous = TestClient(api.app, follow_redirects=False)
+    sent = anonymous.get("/artifact/runs/toy/pretraining?view=logs").headers["location"]
+    back = anonymous.post(sent, data={"password": PASSWORD})
+    assert back.status_code == 303 and back.headers["location"] == "/artifact/runs/toy/pretraining?view=logs"
+    for elsewhere in ("//evil.test", "/\\evil.test", "https://evil.test"):
+        login = "/login?" + urlencode({"next": elsewhere})
+        assert anonymous.post(login, data={"password": PASSWORD}).headers["location"] == "/", elsewhere
 
 
 def test_artifact_logs_aggregate_every_call_oldest_first():

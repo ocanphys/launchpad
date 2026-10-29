@@ -1,38 +1,7 @@
 # Getting started
 
-Launchpad runs ML pipelines on [Modal](https://modal.com). You describe what
-should exist (a dataset, a tokenizer, a trained model), Launchpad works out
-what has to be built first, runs each piece as its own job, and shows progress
-on a dashboard. This page is for using it; [Framework](framework.md) explains
-the idea, and the other pages how each part works.
-
-## The idea in one minute
-
-- An **artifact** is a thing that should exist: a text source, a tokenizer, a
-  tokenized dataset, a training run. You describe it with a small Python
-  object, and its fields fully define it.
-- An artifact can name other artifacts as **dependencies**. A training run
-  names a dataset, the dataset names a tokenizer, the tokenizer names its
-  sources.
-- Each artifact lives in a folder on a shared Modal Volume. The folder holds a
-  `manifest.json` (what it is) and its output files (what it produced). An
-  artifact is **done** when its output files exist.
-- A **job** is the code that builds one artifact. One job per artifact.
-- You **declare** artifacts (write their manifests), then **launch** them from
-  the dashboard, dependencies first.
-
-```mermaid
-flowchart LR
-  A["Describe<br/>in a notebook"] --> B["Declare<br/>lab.declare(..., commit=True)"]
-  B --> C["Launch<br/>dashboard button"]
-  C --> D["Job runs on Modal<br/>(GPU if you ask)"]
-  D --> E["Outputs on the Volume"]
-  E --> F["Bind and use<br/>artifact.bind()"]
-```
-
-Because identity comes from the fields, the same description always lands in
-the same folder. Declare something twice and nothing is rebuilt. Share a
-tokenizer between ten runs and it is built once.
+Launchpad runs ML pipelines on [Modal](https://modal.com), a cloud platform that
+runs your Python code on CPUs and GPUs on demand and gives it shared storage. You will need a Modal account and an IDE such as [VS Code](https://code.visualstudio.com) to create your own artifacts and models.
 
 ## Setup
 
@@ -44,123 +13,151 @@ modal setup                  # log in to Modal (once)
 
 # One secret per Modal workspace: the dashboard password and the JupyterLab token
 modal secret create launchpad-lab \
-  DASHBOARD_PASSWORD='pick-one' \
+  DASHBOARD_PASSWORD='<YOUR-PASSWORD>' \
   JUPYTER_TOKEN=$(openssl rand -hex 24)
 
-mkdocs build --strict        # the docs the dashboard serves at /guide/
 modal deploy main.py         # deploys the dashboard, launcher, workers and lab
 ```
 
-Use `modal deploy`, not `modal serve`: the scheduled log writer only runs on a
-deployed app. Re-run `modal deploy main.py` after code changes, since workers
-run the deployed code. `--force` on `modal secret create` replaces an existing
-secret, which is how the password is changed; both containers pick it up on the
-next deploy.
-
-`modal deploy` prints the dashboard URL. Open it and log in with
-`DASHBOARD_PASSWORD`. The header's **new experiment** link opens a new
-notebook in JupyterLab from a template that sweeps a pretraining run over
-batch sizes, and **new artifact** one that declares and benchmarks a single
-run ([Lab](lab.md#starting-from-a-template)); its **lab** link opens
-JupyterLab itself, with the volume under `storage/`.
-
 ## Your first workflow
 
-All of this runs in a notebook, in the lab or on your laptop.
+This creates the whole pipeline for a small language model at once, from raw
+text to a trained pretraining leg, with the app deployed as in [Setup](#setup).
 
-### 1. Describe a pipeline
+### 1. Create a new artifact from the dashboard
+
+The dashboard header's **new artifact** link opens JupyterLab. The copy lives on the lab container's own disk, and nothing is written to the volume yet.
+
+### 2. Describe the artifacts
+
+The template's second code cell already describes the full pipeline, one
+artifact at a time. Edit it to what you want to train.
+
+**Sources.** Each `SourceURL` downloads one text file to
+`sources/<name>/body.txt`. These are three books from Project Gutenberg:
 
 ```python
 from artifacts.sources import SourceURL
-from artifacts.tokenizers.bpe import Tokenizer
-from artifacts.tokenized import TokenizedSource
 
-source = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
-tokenizer = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(source,))
-tokens = TokenizedSource(tokenizer=tokenizer, source=source)
+mobydick = SourceURL(name="mobydick", url="https://www.gutenberg.org/cache/epub/2701/pg2701.txt")
+montecristo = SourceURL(name="montecristo", url="https://www.gutenberg.org/cache/epub/1184/pg1184.txt")
+romeojuliet = SourceURL(name="romeojuliet", url="https://www.gutenberg.org/cache/epub/1513/pg1513.txt")
 ```
 
-Nothing has run. These are only definitions, validated as they are built: a
-wrong type or an out-of-range value raises at that line.
-
-### 2. See the plan
+**Tokenizer.** A BPE tokenizer learns its merges from the two training books.
+`<|endoftext|>` is the separator the dataset puts between books, so no sequence
+runs from one into the next. Learning merges is CPU work, so it asks for four
+CPUs:
 
 ```python
-from artifacts.core.resolve import resolve
+from artifacts.core.artifact import Resources
+from artifacts.tokenizers.bpe import Tokenizer as BPETokenizer
 
-for artifact in resolve(tokens):
-    print(type(artifact).__name__, artifact.artifact_path)
+tokenizer = BPETokenizer(vocab_size=10000, special_tokens=("<|endoftext|>",),
+                         sources=(mobydick, montecristo),
+                         allocated_resources=Resources(cpu=4))
 ```
 
-You get every artifact that has to exist, in the order it has to be built:
-source, tokenizer, tokenized source. Since one job builds one artifact, this
-list is the work.
+**Dataset.** Every book is tokenized with that tokenizer, and the token files
+are read in place. Two books train the model and the third validates it:
 
-### 3. Preview, then declare
+```python
+from artifacts.mappeddataset import MappedDataSet
+
+dataset = MappedDataSet.from_sources(tokenizer=tokenizer,
+                                     train_sources=(mobydick, montecristo),
+                                     valid_sources=(romeojuliet,))
+```
+
+**Pretraining.** The leg names the dataset, the model and how it is trained.
+`run_id` groups legs of one run, and `allocated_resources` picks the GPU:
+
+```python
+from artifacts.core.SGD.training import LoopConfig, TrainingParameters
+from artifacts.stages.pretraining import Pretraining
+from models.transformer import Transformer
+
+pretraining = Pretraining(
+    run_id="my-run",
+    dataset=dataset,
+    model=Transformer(vocab_size=tokenizer.vocab_size, d_model=64, d_ff=128,
+                      sequence_length=32, num_layers=4, num_heads=16,
+                      rope_theta=10000),
+    training_parameters=TrainingParameters(total_steps=20000, batch_size=64, ...),
+    loop_config=LoopConfig(checkpoint_every=5000, val_every=200, ...),
+    allocated_resources=Resources(gpu_type="T4", gpu_count=1),
+    tags={"experiment": ["my-experiment"]},
+)
+```
+
+Naming `dataset` is enough: `pretraining` already carries the dataset, the
+tokenizer and the sources beneath it, so you never list them separately.
+Nothing has run. These are only definitions, validated as they are built: a
+wrong type or an out-of-range value raises at that line.
+`pretraining.pprint()` prints the one you made.
+
+### 3. Declare
 
 ```python
 import lab
 
-lab.declare(tokens)                  # preview: compares with the volume, writes nothing
-lab.declare(tokens, commit=True)     # writes the missing manifests
+report = lab.declare(pretraining, verbose=True)                # preview: writes nothing
+report = lab.declare(pretraining, verbose=True, commit=True)   # writes the manifests
 ```
 
-The report has one row per artifact, with a state ([Lab](lab.md#declaration)
+The preview has one row per artifact with a state ([Lab](lab.md#declaration)
 has the full table): `new` artifacts are written on commit, while `conflict`
 and `undeclared` block it. A commit with a blocker raises `DeclarationError`
-and writes nothing.
+and writes nothing. Save the notebook first: a commit copies it to the
+artifact's folder as `declaring.ipynb`, so the recipe outlives the lab's
+temporary disk.
 
-From a laptop, use `local.declare_on_volume(tokens, commit=True)`. It is the
-same call, run inside a container that has the volume.
+From a laptop, use `local.declare_on_volume(pretraining, commit=True)`. It is
+the same call, run inside a container that has the volume.
 
-### 4. Launch from the dashboard
+### 4. Run the jobs from the dashboard
 
-The new artifacts appear in the table. Each row walks
-`blocked` (a dependency is not done) -> `runnable` -> `starting` -> `running`
--> `done`. A `failed` row can be launched again.
+Go back to the dashboard. If the new rows are missing, press the refresh
+button. Each artifact is one row, and each row walks `blocked` (a dependency is
+not done) -> `runnable` -> `starting` -> `running` -> `done`. A `failed` row can
+be run again.
 
-Press the button on a `runnable` row to start its job. Build dependencies
-first: the sources, then the tokenizer, and so on. The row's page shows
-parameters, dependencies, live logs and, for training, loss curves. Press stop
-to cancel a job. [Dashboard](dashboard.md) has the details.
+Press **run** on a `runnable` row to start that job, and work up the graph:
 
-### 5. Use the result
+1. The three sources are runnable at once. Run them.
+2. Then the tokenizer, then the tokenized sources, which wait on the tokenizer.
+3. The mapped dataset has no job. It is done when its inputs are.
+4. Last, the `Pretraining` row. It runs on the GPU it asked for.
+
+Press **stop** on a running row to cancel its job.
+
+### 5. Watch a run
+
+Click an artifact's path in the table to open its page. It shows the
+parameters it was declared with, links to its dependencies (click one to jump
+to it), and the job's live logs. For the pretraining leg it also draws the
+run's metrics: training and validation loss, and the GPU memory and MFU, one
+line per attempt. Cancelling a job and running it again resumes from its newest
+checkpoint ([Dashboard](dashboard.md#the-artifact-page) has the details).
+
+### 6. Use the result
+
+When the leg is `done`, its row also offers **serve**, which opens the model in
+the chat app. In a notebook, a finished artifact loads back from the volume:
 
 ```python
 tokenizer = tokenizer.bind()    # loads the built files onto a copy
 tokenizer.encode("hello")
 ```
 
-`Artifact.load("tokenizers/<uid>")` reads a declared artifact back from the
-volume without building anything. `.bind()` additionally requires that it is
-done and loads its files.
+`Artifact.load("tokenizers/<uid>")` reads a declared artifact back without
+building anything. `.bind()` additionally requires that it is done and loads
+its files. [Lab](lab.md#inspecting-a-trained-model) shows how to rebuild a
+trained model from its leg.
 
-## Example: train a model end to end
+## Things worth knowing about training
 
-`declarations/tinystories.ipynb` declares a full pretraining run: two text
-sources, a BPE tokenizer, a mapped dataset, and a transformer.
-
-```python
-pretraining = Pretraining(
-    run_id="TINYSTORIES",
-    dataset=dataset,
-    model=Transformer(vocab_size=tokenizer.vocab_size, d_model=512, d_ff=1344,
-                      sequence_length=256, num_layers=4, num_heads=16,
-                      rope_theta=10000),
-    training_parameters=TrainingParameters(
-        total_steps=20000, batch_size=64, ...
-    ),
-    loop_config=LoopConfig(checkpoint_every=5000, val_every=200, ...),
-)
-
-declare_on_volume(pretraining, commit=True)
-```
-
-Then launch the sources, tokenizer and tokenized sources, and the run, from
-the dashboard, and watch the loss curves and logs on the run's page.
-
-Things worth knowing about training ([Training a Model](training.md) has all
-of it):
+[Training a Model](training.md) has all of it.
 
 - **GPUs.** Ask for one on the artifact:
   `allocated_resources=Resources(gpu_type="A100")`. With none, the job runs on
@@ -177,14 +174,12 @@ of it):
   resumes from the newest one.
 - **Legs.** A long run can be split into legs. A leg names the previous one as
   `starting_checkpoint` and continues from its `model.pt`.
-- **Check a result.** [Lab](lab.md#inspecting-a-trained-model) shows how to
-  rebuild a trained model from its leg in a notebook.
 
 ## Common questions
 
 **Declaring did nothing visible.** Declaring only writes manifests. Launch from
-the dashboard to run jobs. If a manifest you wrote from the lab is not in the
-table, press the dashboard's refresh button.
+the dashboard to run jobs. A committed declaration shows up in the table on
+its own; if it is not there, press the dashboard's refresh button.
 
 **A row is `blocked`.** A dependency is not done. The row's page lists which.
 

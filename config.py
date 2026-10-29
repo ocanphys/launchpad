@@ -6,7 +6,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 # --- the app and where it runs -----------------------------------------------
 
 APP_NAME = "launchpad"
-VOLUME_NAME = "trainvols"
+VOLUME_NAME = "nlp"
 STORAGE = Path("/storage")  # where the volume is mounted in the container
 CONTAINER_LIFETIME = 3600  # seconds; no container lives beyond this
 # Where the launcher-side containers run, not the GPU worker, which goes
