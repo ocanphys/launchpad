@@ -1973,6 +1973,7 @@ source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
     { name = "regex" },
+    { name = "rich" },
     { name = "tqdm" },
 ]
 
@@ -2017,6 +2018,7 @@ worker = [
 requires-dist = [
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "regex", specifier = ">=2026.8.31" },
+    { name = "rich", specifier = ">=15.0.0" },
     { name = "tqdm", specifier = ">=4.70.0" },
 ]
 

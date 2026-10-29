@@ -222,6 +222,7 @@ def client(**overrides):
     # The image mounts the docs site at GUIDE_DIR; here a one-page stand-in.
     main.GUIDE_DIR = Path(mkdtemp())
     (main.GUIDE_DIR / "index.html").write_text("<h1>guide</h1>")
+    main.TEMPLATES = Path(__file__).resolve().parents[1] / "declarations"
     # What LAB_SECRET puts in the container's environment. Every client below
     # arrives logged in, so the tests exercise the routes rather than the
     # middleware in front of them.
@@ -242,6 +243,8 @@ def test_every_route_is_registered():
         "/state",
         "/launcher-logs",
         "/lab",
+        "/new/{kind}",
+        "/experiment/{experiment_uid}/{notebook}",
         "/launch/{artifact_path:path}",
         "/cancel/{artifact_path:path}",
         "/artifact/{artifact_path:path}",
@@ -495,6 +498,33 @@ def test_the_lab_link_carries_the_token():
     api, _ = client()
     root = api.get("/lab")
     assert root.status_code == 307 and root.headers["location"] == f"https://lab.test/lab?token={TOKEN}"
+
+
+def test_a_new_notebook_is_its_kinds_template_written_into_the_lab_and_opened(monkeypatch):
+    api, _ = client()
+    put = Mock()
+    monkeypatch.setattr(leasebook.httpx, "put", put)
+    names = []
+    for kind in ("artifact", "experiment", "experiment"):
+        opened = api.get(f"/new/{kind}")
+        url, body = put.call_args.args[0], put.call_args.kwargs["json"]
+        name = url.removeprefix("https://lab.test/api/contents/")
+        assert name.startswith(f"new-{kind}-") and name.endswith(".ipynb"), url
+        assert put.call_args.kwargs["headers"] == {"Authorization": f"token {TOKEN}"}
+        assert body["content"] == json.loads((main.TEMPLATES / f"{kind}_template.ipynb").read_text())
+        assert opened.status_code == 307 and opened.headers["location"] == f"https://lab.test/lab/tree/{name}?token={TOKEN}"
+        names.append(name)
+    assert len(set(names)) == 3, "two clicks in one second would share a file"
+    assert api.get("/new/other").status_code == 422 and put.call_count == 3
+
+
+def test_an_experiments_links_open_its_notebooks_in_the_lab():
+    api, _ = client()
+    for notebook in ("declaration", "notebook"):
+        opened = api.get(f"/experiment/study/{notebook}")
+        path = f"storage/experiments/study/{notebook}.ipynb"
+        assert opened.status_code == 307 and opened.headers["location"] == f"https://lab.test/lab/tree/{path}?token={TOKEN}"
+    assert api.get("/experiment/study/other").status_code == 422
 
 
 def test_every_route_is_behind_the_password():

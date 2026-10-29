@@ -211,10 +211,10 @@ class StateTests(unittest.TestCase):
         tagged = SourceURL(name="odyssey", url=ODYSSEY.url, tags={"project": ["language_modeling"]})
         declare(ODYSSEY, self.root)
         self.assertEqual(self.state()["sources/odyssey"]["tags"], {})
-        declare(tagged, self.root)  # a matching redeclaration takes the new tags
+        declare(tagged, self.root)  # a matching redeclaration adds the new tags
         self.assertEqual(self.state()["sources/odyssey"]["tags"], {"project": ["language_modeling"]})
-        declare(ODYSSEY, self.root)
-        self.assertEqual(self.state()["sources/odyssey"]["tags"], {})
+        declare(SourceURL(name="odyssey", url=ODYSSEY.url, tags={"project": ["sweep"]}), self.root)
+        self.assertEqual(self.state()["sources/odyssey"]["tags"], {"project": ["language_modeling", "sweep"]})
 
     # --- leases and beats --------------------------------------------------------
 

@@ -150,11 +150,25 @@ export function artifactRow(path, state, ctx) {
   );
 }
 
-// The <tr> that opens an experiment's group in the experiments view: its name
-// and how many artifacts follow, across all the table's columns.
-export function experimentRow(name, count) {
+// The <tr> that opens an experiment's group in the experiments view, across
+// all the table's columns: the arrow that lists its dependencies too, its
+// name, how many artifacts are tagged with it and, in parentheses, how many
+// other artifacts they are built from, the notebook that created it and the
+// one listing every artifact tagged with it.
+export function experimentRow(name, tagged, dependencies, open, onToggle) {
   return el("tr", { class: "experiment-row" },
-    el("td", { colspan: 5 }, name, el("span", { class: "dim", text: "  " + count })),
+    el("td", { colspan: 5 },
+      el("button", {
+        type: "button", class: "deps-arrow", onclick: onToggle,
+        text: open ? "▾" : "▸", title: open ? "hide dependencies" : "show dependencies",
+      }),
+      name,
+      el("span", { class: "dim", text: `  ${tagged} (${dependencies})  ` }),
+      ["declaration", "notebook"].map((notebook) => el("a", {
+        class: "experiment-notebook", href: `/experiment/${encodeURIComponent(name)}/${notebook}`,
+        target: "_blank", rel: "noopener", text: `${notebook} ↗`,
+      })),
+    ),
   );
 }
 

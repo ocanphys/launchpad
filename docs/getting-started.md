@@ -58,8 +58,11 @@ secret, which is how the password is changed; both containers pick it up on the
 next deploy.
 
 `modal deploy` prints the dashboard URL. Open it and log in with
-`DASHBOARD_PASSWORD`. The header has a `/lab` link to JupyterLab, already
-mounted on the volume.
+`DASHBOARD_PASSWORD`. The header's **new experiment** link opens a new
+notebook in JupyterLab from a template that sweeps a pretraining run over
+batch sizes, and **new artifact** one that declares and benchmarks a single
+run ([Lab](lab.md#starting-from-a-template)); its **lab** link opens
+JupyterLab itself, with the volume under `storage/`.
 
 ## Your first workflow
 
@@ -162,10 +165,11 @@ of it):
 - **GPUs.** Ask for one on the artifact:
   `allocated_resources=Resources(gpu_type="A100")`. With none, the job runs on
   the default CPU pool. Resources are not part of identity, so changing them
-  does not create a new artifact.
+  does not create a new artifact, and a declared artifact keeps the resources
+  it was declared with.
 - **Tags.** Label an artifact with `tags={"project": ["language_modeling"]}` and
   filter the dashboard by them. Like resources they are not identity, and a
-  later declaration with different tags rewrites them.
+  later declaration adds the tags it asks for and removes none.
 - **Architectures.** `Transformer` and `Mamba` ship in `models/`, and one
   `Pretraining` class trains either ([Models](models.md)).
 - **Checkpoints and resume.** A job writes failsafe checkpoints every

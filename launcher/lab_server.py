@@ -8,16 +8,18 @@ import json
 import subprocess
 from pathlib import Path
 
-from config import LAB_PORT, STORAGE
+from config import LAB_PORT, LAB_WORKSPACE, STORAGE
 
 
 def start_jupyterlab() -> None:
     """Writes the settings overrides, then starts `jupyter lab` on LAB_PORT,
-    rooted at the volume.
+    rooted at LAB_WORKSPACE.
 
-    `root_dir` is the volume itself, not a notebooks folder -- pointing at an
-    artifact path is the whole point, and the file browser is where you find
-    out what the paths are (`runs/`, `sources/`, `tokenizers/`).
+    The workspace is this container's own disk, where the dashboard's
+    `/new/<kind>` writes each new notebook, so an experiment nobody declares
+    leaves nothing on the volume. Its `storage` link is the volume, and the file browser is
+    where you find out what the artifact paths are (`storage/runs/`,
+    `storage/sources/`, `storage/tokenizers/`).
 
     No `--IdentityProvider.token`: jupyter_server reads JUPYTER_TOKEN out of
     the environment, which LAB_SECRET puts there, and keeping it out of the
@@ -63,6 +65,9 @@ def start_jupyterlab() -> None:
         )
     )
 
+    LAB_WORKSPACE.mkdir()
+    (LAB_WORKSPACE / "storage").symlink_to(STORAGE)
+
     subprocess.Popen(
         [
             "jupyter",
@@ -71,7 +76,7 @@ def start_jupyterlab() -> None:
             f"--port={LAB_PORT}",
             "--no-browser",
             "--allow-root",
-            f"--ServerApp.root_dir={STORAGE}",
+            f"--ServerApp.root_dir={LAB_WORKSPACE}",
             # Modal terminates TLS and forwards to this container under a
             # different host than the browser typed, which jupyter_server reads
             # as a remote/cross-origin access and blocks by default.

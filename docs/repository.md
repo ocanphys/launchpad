@@ -18,6 +18,7 @@ tokenizers/<uid>/                 trained tokenizer
 tokenized/<tokenizer>/<source>/   one source through one tokenizer
 datasets/, mappeddatasets/        training data
 runs/<run_id>/pretraining/...     training legs, their checkpoints and step logs
+experiments/<experiment_uid>/     declaration.ipynb and notebook.ipynb: what created the experiment, what lists it
 logs/launcher.jsonl               the launcher's own log
 call_history.json                 every grant ever made, per artifact path
 ```
@@ -35,6 +36,11 @@ call_history.json                 every grant ever made, per artifact path
   `pretraining/` legs. Everything a run depends on that is not run-scoped (its
   tokenizer, its dataset, the sources behind them) lives under a shared root,
   found by walking the dependency tree embedded in the run's manifest.
+- **`experiments/{experiment_uid}/`** is not an artifact: no manifest, only
+  `declaration.ipynb`, the notebook that created the experiment, and
+  `notebook.ipynb`, which lists the artifacts tagged with it
+  ([Experiments](experiments.md)). An artifact declared from a notebook keeps
+  its own copy beside its manifest, `declaring.ipynb`.
 - A leg's `train.jsonl` is the worker's own file, one row per step, appended to
   as it trains rather than published like an output: it completes nothing.
 

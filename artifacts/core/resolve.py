@@ -9,13 +9,18 @@ from pathlib import Path
 from artifacts.core.artifact import Artifact
 
 
-def resolve(artifact: Artifact) -> list[Artifact]:
-    """Every artifact `artifact` is built from and then itself, dependencies
-    before dependents, each path once.
+def resolve(*roots: Artifact) -> list[Artifact]:
+    """Every artifact the roots are built from and then each root, in one
+    graph: dependencies before dependents, each path once.
 
-    A path reached twice must hold an agreeing definition, and `==` compares
-    the whole subtree, so a shared path cannot hide a conflicting leaf. The
-    first object reaching a path is the one kept, recorded fields and all.
+    A path reached twice, from one root or from two, must hold an agreeing
+    definition, and `==` compares the whole subtree, so a shared path cannot
+    hide a conflicting leaf. The first object reaching a path is the one kept,
+    recorded fields and all.
+
+        tokens = TokenizedSource(tokenizer=tokenizer, source=odyssey)
+        resolve(tokens) -> [odyssey, tokenizer, tokens]
+        resolve(tokens, tokenizer) -> [odyssey, tokenizer, tokens]
     """
     visited: dict[Path, Artifact] = {}
     active: list[Path] = []  # the current descent, for cycle detection
@@ -35,5 +40,6 @@ def resolve(artifact: Artifact) -> list[Artifact]:
         active.pop()
         visited[path] = node
 
-    visit(artifact)
+    for root in roots:
+        visit(root)
     return list(visited.values())

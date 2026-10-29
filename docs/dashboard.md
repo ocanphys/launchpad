@@ -16,7 +16,8 @@ containers mount and neither starts without.
   and leaves a cookie holding its digest; neither the password nor a session
   list is stored anywhere. A request other than a navigation gets a 401.
 - JupyterLab takes `JUPYTER_TOKEN` instead, which nobody types: the header's
-  `/lab` link carries it, and since it travels in a URL it stays a random
+  **new experiment**, **new artifact** and **lab** links and an experiment's
+  **declaration** and **notebook** links carry it, and since it travels in a URL it stays a random
   string.
 - `/guide/` is these docs, built by `mkdocs build --strict` on the deploying
   machine into `site/`, which `web_image` mounts, and linked from the header.
@@ -34,7 +35,11 @@ flowchart TD
   C -->|yes| MW["log_request_errors middleware"]
   MW --> ROUTE["Route handler"]
   ROUTE -->|"GET /lab"| LR["lab_redirect()<br/>jupyter.get_web_url() + JUPYTER_TOKEN"]
-  LR --> JUP["jupyter container<br/>start_jupyterlab(): jupyter lab rooted at STORAGE"]
+  ROUTE -->|"GET /new/kind"| NR["new_notebook()<br/>PUT kind_template.ipynb to Jupyter's contents API"]
+  NR --> JUP
+  ROUTE -->|"GET /experiment/uid/declaration or /notebook"| ER["experiment_notebook()<br/>storage/experiments/uid/declaration.ipynb or notebook.ipynb"]
+  ER --> JUP
+  LR --> JUP["jupyter container<br/>start_jupyterlab(): jupyter lab rooted at LAB_WORKSPACE"]
 ```
 
 ## Files
@@ -116,22 +121,29 @@ noise around the launcher (uvicorn, grpc) is its `ambient` source, under an
 ### Experiments
 
 The title is two links, `artifacts | experiments`, the open one bold, and the
-page opens on experiments. The experiments view is the same table, fetch and filter bar, restricted to
+page opens on experiments. The experiments view is the same table and fetch, without the filter bar, restricted to
 artifacts whose `experiment` tag has a value, under a row per experiment
-(sorted by name, with its count) holding the artifacts tagged with it. An
+(sorted by name) holding the artifacts tagged with it. An
 artifact tagged with two experiments is listed under both, and one with no
 `experiment` tag is not listed at all. The unreadable-manifests list belongs to
 the artifacts view.
 
-The **show dependencies** checkbox, off by default and present only in this
-view, adds under each experiment everything its tagged artifacts are built from,
-transitively, after the tagged ones. An artifact appears once per experiment
-however many of its members depend on it. The filter bar picks the tagged
-artifacts; their dependencies come along whatever it says.
+An experiment's row reads `name  3 (5)`: three artifacts tagged with it, built
+from five other artifacts, counted transitively and once each however many of
+its members depend on them. Its arrow, closed by default, lists those
+dependencies under it after the tagged ones, and stays open across polls. Its
+**declaration ↗** link opens `experiments/<experiment_uid>/declaration.ipynb`
+in the lab, the notebook that created it, and **notebook ↗** opens
+`notebook.ipynb` beside it, which lists every artifact tagged with the
+experiment through `lab.load_experiment` ([Experiments](experiments.md)). An experiment only tagged, never
+created, has neither, and the lab says so.
+
+The search box above the table, present only in this view, keeps the
+experiments whose name holds its text, ignoring case.
 
 ### Filtering
 
-Above the table, the filter bar walks an artifact's manifest one level of its
+Above the artifacts view's table, the filter bar walks an artifact's manifest one level of its
 JSON at a time, read off the `/state` map with no request of its own. The top
 level is the artifact's class, "every artifact" to begin with. Beside it, for
 whichever class is picked, is **tags**: the manifest's tags, one level per tag

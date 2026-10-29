@@ -39,6 +39,9 @@ PERSIST_LOGS_EVERY = 60  # seconds between the passes appending the Dicts' log r
 LAB_PORT = 8888
 LAB_SECRET = "launchpad-lab"  # supplies JUPYTER_TOKEN to both the lab and the dashboard
 LAB_IDLE_SECONDS = 900  # scale the lab container down after this much idle
+# Where JupyterLab is rooted: the lab container's own disk, gone when it scales
+# down, holding the notebooks `/new` starts and a `storage` link to the volume.
+LAB_WORKSPACE = Path("/workspace")
 # The lab ships named source files, not the repo, so it has no `git` to answer
 # `get_git_commit()` with. main.py bakes the answer in under this name while
 # building lab_image; `lab._head()` reads it when it is set.

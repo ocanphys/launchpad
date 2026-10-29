@@ -201,7 +201,7 @@ What these guarantee in practice:
 | Manifest round trip | The same definition and field types, and the root's recorded fields; the same manifest text; the result unbound. |
 | Equal definitions written differently (`1` and `1.0` in a float field) | One artifact, one path, one manifest. |
 | Preview against empty storage | A report only; no folders or files created. |
-| Redeclare from a later commit, or with different resources | The existing manifest kept; drift on every node declared at an older commit, blocking only in strict mode; new resources written on commit. |
+| Redeclare from a later commit, with different resources or more tags | The existing manifest kept; drift on every node declared at an older commit, blocking only in strict mode; resources never rewritten; missing tags added on commit, none removed. |
 | Redeclaring an already-published path | The existing manifest is read, not overwritten; a different definition is a conflict. |
 | Interrupted declaration | A retry completes the missing manifests without rewriting existing ones. |
 | Interrupted output write | Temporary files do not make an artifact complete; partial outputs are reused only after the job validates them. |

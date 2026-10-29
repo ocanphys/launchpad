@@ -46,7 +46,7 @@ def declare_on_volume(
 ) -> DeclarationReport:
     """`lab.declare(artifact, ...)` against the volume, from anywhere.
 
-    The notebook copy a committed run declaration writes is read here, where
+    The notebook copy a committed declaration writes is read here, where
     the kernel is, and shipped along, and so is this process's commit, which
     every manifest written is stamped with: the container has neither.
     """

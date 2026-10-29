@@ -31,8 +31,7 @@ const refreshEl = document.getElementById("refresh");
 const metaEl = document.getElementById("meta");
 const dashboardEl = document.getElementById("dashboard");
 const filtersEl = document.getElementById("filters");
-const depsToggleEl = document.getElementById("depsToggle");
-const showDepsEl = document.getElementById("showDeps");
+const experimentSearchEl = document.getElementById("experimentSearch");
 const shownEl = document.getElementById("shown");
 const rowsEl = document.getElementById("rows");
 const emptyEl = document.getElementById("empty");
@@ -70,8 +69,9 @@ const EXPERIMENT = "experiment";
 // two places, and "artifacts" lists every artifact once. Set by route().
 let mode = "experiments";
 
-// Whether each experiment also lists what its tagged artifacts are built from.
-let showDependencies = false;
+// The experiments whose rows also list what their tagged artifacts are built
+// from, opened by each one's arrow.
+const expanded = new Set();
 
 // The artifact page's disk image (`/artifact/<path>`: the manifest and step
 // log, a real file read on the server's mount) and the entry it was fetched
@@ -124,31 +124,39 @@ function stamp(states) {
   metaEl.textContent = n + (n === 1 ? " artifact" : " artifacts") + " · fetched " + new Date().toLocaleTimeString();
 }
 
-// Every artifact on the volume that passes the filter bar, one row each, by
-// path; in the experiments view only those tagged with an experiment, under a
-// row naming each experiment, a row apiece for every experiment it is in, and
-// with `showDependencies` everything they depend on, once per experiment.
+// In the artifacts view, every artifact on the volume that passes the filter
+// bar, one row each, by path; in the experiments view, unfiltered, only those
+// tagged with an experiment whose name holds the search text, under a row naming each experiment, a row apiece
+// for every experiment it is in, and for an `expanded` experiment everything
+// they depend on, once per experiment.
 // Full rebuild of the rows each time is correct and cheap at this
 // scale; the bar is the one thing focusable, and filterBar hands back the
 // same node until its fields change, so it is mounted only when it is a new
 // one. A poll that brings back the same map and finds the same pending marks
 // and the same rows passing returns without touching the rows at all.
 function draw(states) {
+  const grouped = mode === "experiments";
   const bar = filterBar(states, redraw);
   if (filtersEl.firstChild !== bar) filtersEl.replaceChildren(bar);
-  const grouped = mode === "experiments";
+  filtersEl.hidden = shownEl.hidden = grouped;
   const experiments = (path) => states[path].tags[EXPERIMENT] || [];
   const all = Object.keys(states).filter((path) => !grouped || experiments(path).length).sort();
-  const paths = visible(states).filter((path) => all.includes(path));
+  const paths = grouped ? all : visible(states);
   shownEl.textContent = paths.length < all.length ? `${paths.length} of ${all.length} shown` : "";
 
-  depsToggleEl.hidden = !grouped;
-  const key = JSON.stringify([mode, showDependencies, paths, states, [...pending]]);
+  experimentSearchEl.hidden = !grouped;
+  const search = experimentSearchEl.value.trim().toLowerCase();
+  const names = [...new Set(paths.flatMap(experiments))].filter((name) => name.toLowerCase().includes(search)).sort();
+  const key = JSON.stringify([mode, [...expanded], names, paths, states, [...pending]]);
   if (key === drawn) return;
   drawn = key;
   const row = (path) => artifactRow(path, states[path], ctx);
+  const toggle = (name) => {
+    expanded.has(name) ? expanded.delete(name) : expanded.add(name);
+    redraw();
+  };
   rowsEl.replaceChildren(...(grouped
-    ? [...new Set(paths.flatMap(experiments))].sort().flatMap((name) => {
+    ? names.flatMap((name) => {
         const tagged = paths.filter((path) => experiments(path).includes(name));
         const dependencies = new Set();
         const collect = (path) => {
@@ -158,15 +166,20 @@ function draw(states) {
             collect(dep);
           }
         };
-        if (showDependencies) tagged.forEach(collect);
-        const members = [...tagged, ...[...dependencies].filter((path) => !tagged.includes(path)).sort()];
-        return [experimentRow(name, members.length), ...members.map(row)];
+        tagged.forEach(collect);
+        const untagged = [...dependencies].filter((path) => !tagged.includes(path)).sort();
+        const open = expanded.has(name);
+        return [
+          experimentRow(name, tagged.length, untagged.length, open, () => toggle(name)),
+          ...(open ? [...tagged, ...untagged] : tagged).map(row),
+        ];
       })
     : paths.map(row)));
-  emptyEl.textContent = all.length
-    ? "nothing matches these filters."
-    : grouped ? "no artifact is tagged with an experiment yet." : "nothing declared on the volume yet.";
-  emptyEl.hidden = paths.length > 0;
+  const shown = grouped ? names.length : paths.length;
+  emptyEl.textContent = !all.length
+    ? grouped ? "no artifact is tagged with an experiment yet." : "nothing declared on the volume yet."
+    : grouped ? "no experiment's name holds that text." : "nothing matches these filters.";
+  emptyEl.hidden = shown > 0;
 
   // Manifests state() could not read, whatever the filters say. Only touches
   // #problemRows' children and the count text -- never recreates <details
@@ -379,10 +392,7 @@ splitEl.addEventListener("pointerdown", (event) => {
 });
 
 refreshEl.addEventListener("click", () => load(refresh));
-showDepsEl.addEventListener("change", () => {
-  showDependencies = showDepsEl.checked;
-  redraw();
-});
+experimentSearchEl.addEventListener("input", redraw);
 window.addEventListener("hashchange", route);
 drawLauncherLogs([], "loading launcher logs…"); // the frame is there before the first answer
 route();

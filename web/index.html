@@ -47,9 +47,10 @@
   h1 a.tab.open { opacity: 1; }
   tr.experiment-row td { padding-top: .9rem; font-weight: 600; }
 
-  /* Leaves the SPA entirely: a redirect to the lab's own subdomain. */
-  #labLink, #guideLink { font-size: 12px; color: inherit; opacity: .55; text-decoration: none; }
-  #labLink:hover, #guideLink:hover { opacity: .85; }
+  /* Leave the SPA entirely: redirects to the lab's own subdomain, and the
+     guide. The experiment row's notebook link reads the same. */
+  header > a, a.experiment-notebook { margin-right: .6rem; font-size: 12px; font-weight: normal; color: inherit; opacity: .55; text-decoration: none; }
+  header > a:hover, a.experiment-notebook:hover { opacity: .85; }
 
   /* The one way the page asks the server again (app.js's refresh): green
      after a good answer, red with the error after a bad one. */
@@ -147,7 +148,9 @@
      levels of its manifest, each indented under the one it opened from. */
   #filterRow { display: flex; align-items: flex-start; gap: .8rem; margin-bottom: .6rem; font-size: 11px; line-height: 1.45; }
   #shown { opacity: .55; }
-  #depsToggle { margin-left: auto; cursor: pointer; }
+  #experimentSearch { font: inherit; width: 14rem; padding: .1rem .4rem; }
+  .deps-arrow { font: inherit; color: inherit; background: none; border: none; padding: 0 .4rem 0 0; cursor: pointer; opacity: .7; }
+  .deps-arrow:hover { opacity: 1; }
   .filters select, .filters button, .filter-bound { font: inherit; }
   .filter-field { display: flex; align-items: baseline; gap: .5rem; margin-bottom: .1rem; }
   .filter-key { opacity: .55; }
@@ -274,16 +277,19 @@
 
 <header>
   <h1 id="title">artifacts</h1>
-  <a id="labLink" href="/lab" target="_blank" rel="noopener">lab ↗</a>
-  <a id="guideLink" href="/guide/" target="_blank" rel="noopener">guide ↗</a>
+  <a href="/new/experiment" target="_blank" rel="noopener">new experiment ↗</a>
+  <a href="/new/artifact" target="_blank" rel="noopener">new artifact ↗</a>
+  <a href="/lab" target="_blank" rel="noopener">lab ↗</a>
+  <a href="/guide/" target="_blank" rel="noopener">guide ↗</a>
   <button id="refresh" type="button" disabled>loading…</button>
 </header>
 <div id="meta"></div>
 
 <div id="dashboard">
-<!-- The type picker and its fields (filter.js), and how many rows pass. -->
-<div id="filterRow"><div id="filters"></div><span id="shown"></span>
-  <label id="depsToggle" hidden><input type="checkbox" id="showDeps"> show dependencies</label></div>
+<!-- The experiments view's search by name, the type picker and its fields
+     (filter.js), and how many rows pass. -->
+<div id="filterRow"><input id="experimentSearch" type="search" placeholder="search experiments" hidden>
+  <div id="filters"></div><span id="shown"></span></div>
 <div class="dashboard-artifacts">
 <table>
   <!-- Progress is the one column with no width of its own, so it takes

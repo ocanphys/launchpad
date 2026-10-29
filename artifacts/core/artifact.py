@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from rich.pretty import pprint as rich_pprint
 
 from artifacts.core import manifest, storage
 from artifacts.core.locate import locate
@@ -310,6 +311,13 @@ class Artifact(BaseModel):
             outputs={desc: path.is_file() for desc, path in self.paths(at).items()},
             completion={path: path.is_file() for path in self.completion_paths(at)},
         )
+
+    def pprint(self, expand_all: bool = True, indent_guides: bool = True) -> None:
+        """Prints this artifact and everything it holds, by default fully expanded with indent guides.
+
+            SourceURL(name="odyssey", url="https://example.org/odyssey.txt").pprint()
+        """
+        rich_pprint(self, expand_all=expand_all, indent_guides=indent_guides)
 
     def bind(self, root: Path | None = None) -> Self:
         """Returns this artifact rebuilt from the manifest stored at `root`,

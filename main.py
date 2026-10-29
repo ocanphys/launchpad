@@ -46,12 +46,14 @@ ARTIFACTS_SOURCE = ("artifacts", "models")
 
 WEB_DIR = Path("/web")  # where web_image mounts the web/ folder
 GUIDE_DIR = Path("/guide")  # where web_image mounts site/, the docs built locally by `mkdocs build --strict`
-# Both folders are mounted when a container starts, not copied into the image,
-# so editing code or docs never rebuilds it.
+TEMPLATES = Path("/templates")  # where web_image mounts declarations/, the notebooks `/new/<kind>` starts from
+# All three are mounted when a container starts, not copied into the image,
+# so editing code, docs or a template never rebuilds it.
 web_image = (
     locked_image("web")
     .add_local_dir(local_path="site", remote_path=GUIDE_DIR.as_posix())
     .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
+    .add_local_dir(local_path="declarations", remote_path=TEMPLATES.as_posix())
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
 
@@ -87,7 +89,7 @@ def leasebook():
     # to reach its own function.
     from launcher.leasebook import build_api
 
-    return build_api(run_job, jupyter, WEB_DIR, GUIDE_DIR)
+    return build_api(run_job, jupyter, WEB_DIR, GUIDE_DIR, TEMPLATES)
 
 
 @app.function(image=web_image, volumes={STORAGE.as_posix(): volume}, region=REGION, schedule=modal.Period(seconds=PERSIST_LOGS_EVERY))
@@ -157,7 +159,7 @@ def profile(**parameters) -> dict:
 @modal.concurrent(max_inputs=100)
 @modal.web_server(LAB_PORT, startup_timeout=120)
 def jupyter():
-    """JupyterLab, rooted at the volume.
+    """JupyterLab, rooted at its own disk with the volume linked in.
 
     Named `jupyter`, not `lab`: `lab` is the module a notebook imports (lab.py)
     and `/lab` is the dashboard route that redirects here, and a Modal function

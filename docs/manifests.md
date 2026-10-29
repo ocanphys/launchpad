@@ -170,7 +170,7 @@ safe; the one thing a shared instance must not be is bound, which is why
 
 A definition at a path never changes once declared, so a reader may decode
 each path once and keep it; the launcher does, for its whole life. What a
-redeclaration may change, the resources, is read fresh by launching.
+redeclaration may change, the tags, is read fresh by the dashboard.
 
 **Trusted classes.** A manifest names classes by import path, and decoding
 imports them. The volume is written only by `lab.declare`, from your own
@@ -206,11 +206,13 @@ code, and the commit a job runs is not recorded. Resources configure that
 execution; an unspecified dimension is recorded as `null`, and Modal supplies
 its platform default for it.
 
-Once written, a manifest's definition and declaring commit are immutable. A
-matching redeclaration keeps both; only its resources and tags follow the
-latest committed declaration. Resources configure the next execution and tags
-only label the artifact. A redeclaration that passes no tags records `{}`, as
-one that passes no resources records the defaults. The manifest at an artifact's own path is authoritative.
+Once written, a manifest's definition, declaring commit and resources are
+immutable. A matching redeclaration keeps all three and only adds to its
+tags: every requested value the stored tags lack is appended, and none is
+removed, so tags only label the artifact and an artifact can join one
+experiment after another. A new manifest that passes no tags records `{}`, as
+one that passes no resources records the defaults. The manifest at an
+artifact's own path is authoritative.
 
 ## Why
 

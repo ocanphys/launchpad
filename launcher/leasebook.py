@@ -11,13 +11,17 @@ refuse to read it. Served together, `state` is just a relative path, and no
 CORS question arises.
 """
 
+import json
 import os
 import queue
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
+import httpx
 import modal
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
@@ -193,14 +197,15 @@ def cancel_call(artifact_path: str) -> tuple[bool, str]:
     return True, message
 
 
-def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path) -> FastAPI:
+def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path, templates: Path) -> FastAPI:
     """The whole web app: every route, and the listener thread behind them.
 
     `run_job` is the Modal function `/launch` spawns and `jupyter` the one
-    `/lab` redirects to, both handed in because their decorators are in
-    main.py. `web_dir` is where that image mounted the `web/` folder, and
-    `guide_dir` where it built the docs site, served at GUIDE without the
-    password.
+    `/lab`, `/new/<kind>` and an experiment's notebook link redirect to, both
+    handed in because their decorators are in main.py. `web_dir` is where that
+    image mounted the `web/` folder, `guide_dir` where it built the docs site,
+    served at GUIDE without the password, and `templates` the folder holding
+    the notebooks `/new/<kind>` starts from, `<kind>_template.ipynb`.
     """
     # Everything below is this container's whole setup and its whole life --
     # the log is publishing before anything touches the volume, and one try
@@ -340,6 +345,34 @@ def build_api(run_job, jupyter, web_dir: Path, guide_dir: Path) -> FastAPI:
         @api.get("/lab")
         def lab_redirect() -> RedirectResponse:
             return RedirectResponse(f"{jupyter.get_web_url()}/lab?token={token}")
+
+        # The header's "new artifact" and "new experiment" links: a copy of
+        # that kind's template, written through Jupyter's contents API into
+        # the lab's workspace, its own disk, and opened there. The PUT waits
+        # out a cold lab's startup, and overwrites whatever holds its name,
+        # hence the random suffix.
+        notebooks = {kind: json.loads((templates / f"{kind}_template.ipynb").read_text()) for kind in ("artifact", "experiment")}
+
+        @api.get("/new/{kind}")
+        def new_notebook(kind: Literal["artifact", "experiment"]) -> RedirectResponse:
+            lab = jupyter.get_web_url()
+            name = f"new-{kind}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}.ipynb"
+            httpx.put(
+                f"{lab}/api/contents/{name}",
+                headers={"Authorization": f"token {token}"},
+                json={"type": "notebook", "format": "json", "content": notebooks[kind]},
+                timeout=180,
+            ).raise_for_status()
+            return RedirectResponse(f"{lab}/lab/tree/{name}?token={token}")
+
+        # An experiment row's "declaration" and "notebook" links: the notebook
+        # that created it and the one listing its artifacts, under the
+        # volume's link in the lab's workspace. An experiment only tagged,
+        # never created, has neither, and the lab says so.
+        @api.get("/experiment/{experiment_uid}/{notebook}")
+        def experiment_notebook(experiment_uid: str, notebook: Literal["declaration", "notebook"]) -> RedirectResponse:
+            path = f"storage/experiments/{experiment_uid}/{notebook}.ipynb"
+            return RedirectResponse(f"{jupyter.get_web_url()}/lab/tree/{path}?token={token}")
 
         # :path, not a plain path segment -- an artifact_path contains its own
         # /s (runs/my-run/pretraining), which a plain segment can't match.
