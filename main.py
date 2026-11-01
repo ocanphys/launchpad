@@ -23,7 +23,7 @@ from config import (
 )
 from launcher.lab_server import start_jupyterlab
 from launcher.state import volume
-from system.logs import current_call_id, persist_snapshot, start_logging
+from system.logs import log_to_stdout, persist_snapshot
 from system.runtime import initialize_worker
 
 app = modal.App(APP_NAME)
@@ -57,7 +57,19 @@ web_image = (
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
 
-worker_image = locked_image("worker").add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "profiling", "gpus")
+# gcc: Triton, behind torch.compile, builds its kernel launchers with a C compiler at runtime.
+worker_image = (
+    locked_image("worker")
+    .apt_install("gcc")
+    .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE, "profiling", "gpus")
+)
+
+# torch to run a model, fastapi to serve it, and web/ for the page and its login form.
+chat_image = (
+    locked_image("worker", "web")
+    .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
+    .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
+)
 
 # torch to run a model, fastapi to serve it, and web/ for the page and its login form.
 chat_image = (
@@ -137,16 +149,13 @@ def profile(**parameters) -> dict:
     `profiling.util.profile(**parameters)`, whose docstring says what goes in and comes out.
 
     Call it through `profiling.util.run_profile(resources, ...)`, which requests the GPU from
-    `resources` and prints this call's log rows as they are published. It is not a launched job:
-    no artifact, no lease, nothing written to the volume, so the launcher never sees it.
+    `resources` and prints Modal's log of this call as it runs. It is not a launched job: no
+    artifact, no lease, nothing written to the volume or `call_logs`, so the launcher never sees it.
     """
     from profiling import util
 
-    stop_logging = start_logging(current_call_id())
-    try:
-        return util.profile(**parameters)
-    finally:
-        stop_logging()
+    log_to_stdout()
+    return util.profile(**parameters)
 
 
 @app.function(
@@ -156,7 +165,9 @@ def profile(**parameters) -> dict:
     # One lab, so one filesystem view: two containers would each hold their own
     # uncommitted copy of the same notebook and the later commit would win.
     max_containers=1,
-    region=REGION,
+    # Without a request Modal reserves 0.125 cores and 128 MiB, shared by the server and every kernel.
+    cpu=4.0,
+    memory=4096,
     timeout=CONTAINER_LIFETIME,
     scaledown_window=LAB_IDLE_SECONDS,
 )

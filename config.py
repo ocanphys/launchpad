@@ -9,9 +9,9 @@ APP_NAME = "launchpad"
 VOLUME_NAME = "nlp"
 STORAGE = Path("/storage")  # where the volume is mounted in the container
 CONTAINER_LIFETIME = 3600  # seconds; no container lives beyond this
-# Where the launcher-side containers run, not the GPU worker, which goes
-# wherever its GPU is. Modal serves Dicts and Volumes from us-east, and a Dict
-# get is ~25 ms here against ~250 ms from a far region.
+# Where the launcher and persist_logs run, not the workers or the lab, which go
+# wherever Modal has room for them. Modal serves Dicts and Volumes from us-east,
+# and a Dict get is ~25 ms here against ~250 ms from a far region.
 REGION = "us-east"
 
 # --- liveness: how a call is seen to be running ------------------------------

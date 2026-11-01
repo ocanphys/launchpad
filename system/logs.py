@@ -4,8 +4,7 @@ A row is `{"ts", "call_id", "source", "level", "logger", "msg"}`, a traceback
 folded into `msg`, and the `call_logs` key it lives under is
 `{call_id}:{storage}:{source}` -- `storage` is `livedict` for what a container
 has published or `volume` for what its file holds, and `source` is who wrote
-it: `worker`, `launcher`, `profiler` (a profiling run, which holds no
-lease), or `ambient` for a record none of our loggers
+it: `worker`, `launcher`, or `ambient` for a record none of our loggers
 stamped (a library's warning is the container's own noise, not the call's
 account of itself).
 
@@ -42,7 +41,7 @@ from system.lease_protocol import call_history, call_logs
 LIVE, VOLUME = "livedict", "volume"  # the Dict a container publishes to, and the file
 # Who wrote a row. LAUNCHER is also a call id: the one the leasebook container
 # files its own rows under, so its log is a call's log in every other way.
-WORKER, LAUNCHER, PROFILER, AMBIENT = "worker", "launcher", "profiler", "ambient"
+WORKER, LAUNCHER, AMBIENT = "worker", "launcher", "ambient"
 SOURCES = (WORKER, LAUNCHER, AMBIENT)
 
 _log = logging.getLogger(__name__)  # the publisher's own, ambient wherever it runs
@@ -173,15 +172,8 @@ class BufferHandler(logging.Handler):
             try_publish(key, partial(call_logs.put, key, rows), _log)
 
 
-def start_logging(call_id: str) -> Callable[[], None]:
-    """Points this container's logging at stdout, keeps every record in the
-    live channel its stamp names, and publishes them all every
-    HEARTBEAT_SECONDS; returns what stops it.
-
-    `call_id` is whose the container's unstamped records are -- LAUNCHER for
-    the leasebook, its own call id for a worker. Stopping publishes once more,
-    so the rows logged on the way out land.
-    """
+def log_to_stdout() -> None:
+    """Points this container's logging at stdout, one formatted line per record, at INFO."""
     logging.Formatter.converter = time.gmtime  # timestamps are UTC wherever this runs
     logging.basicConfig(
         level=logging.INFO,  # our own loggers go to DEBUG; libraries stay here
@@ -192,6 +184,18 @@ def start_logging(call_id: str) -> Callable[[], None]:
     )
     for noisy in ("modal", "grpc", "urllib3", "uvicorn.access"):  # the publisher's own RPCs stay out of the log
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def start_logging(call_id: str) -> Callable[[], None]:
+    """Points this container's logging at stdout, keeps every record in the
+    live channel its stamp names, and publishes them all every
+    HEARTBEAT_SECONDS; returns what stops it.
+
+    `call_id` is whose the container's unstamped records are -- LAUNCHER for
+    the leasebook, its own call id for a worker. Stopping publishes once more,
+    so the rows logged on the way out land.
+    """
+    log_to_stdout()
     buffer = BufferHandler(call_id)
     logging.getLogger().addHandler(buffer)
     finished = threading.Event()
