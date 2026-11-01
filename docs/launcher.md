@@ -124,7 +124,8 @@ flowchart TD
 The lab announces itself on the same queue, after its commit: a committed
 `lab.declare` as `declared` on its artifact's path under the call id
 `launcher`, and a committed `lab.create_experiment` as `experiment created`,
-naming the experiment and every artifact path it asked for. A file written on
+or `experiment extended` when it added to one, naming the experiment and every
+artifact path it asked for. A file written on
 the volume by hand is announced by nothing, which is what the refresh button
 is for. Between recomputes the map is the authority on the
 volume, lagged by one message but complete, since an artifact's files never

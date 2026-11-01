@@ -280,8 +280,8 @@ def build_api(run_job, jupyter, chat, web_dir: Path, guide_dir: Path, templates:
                 try:
                     messages = refreshes.get_many(REFRESH_BATCH, timeout=REFRESH_WAIT_SECONDS)
                     for message in messages:
-                        if message["event"] == "experiment created":
-                            log_launcher.info(f"experiments/{message['experiment_uid']}: created over {message['artifact_paths']}")
+                        if "experiment_uid" in message:  # created or extended
+                            log_launcher.info(f"experiments/{message['experiment_uid']}: {message['event']} over {message['artifact_paths']}")
                         else:
                             # The call's row, not the container's: what a call
                             # did reads on that call's page.

@@ -142,7 +142,9 @@ from five other artifacts, counted transitively and once each however many of
 its members depend on them. Its arrow, closed by default, lists those
 dependencies under it after the tagged ones, and stays open across polls. Its
 **declaration ↗** link opens `experiments/<experiment_uid>/declaration.ipynb`
-in the lab, the notebook that created it, and **notebook ↗** opens
+in the lab, the notebook that created it or the extension that overwrote it,
+never the `declaration2.ipynb` and on that other extensions keep beside it, and
+**notebook ↗** opens
 `notebook.ipynb` beside it, which lists every artifact tagged with the
 experiment through `lab.load_experiment` ([Experiments](experiments.md)). An experiment only tagged, never
 created, has neither, and the lab says so.

@@ -24,7 +24,8 @@ and a channel is one key of the `call_logs` Dict:
   persist pass.
 - **`source`** is who wrote it: `worker` (the call's account of itself),
   `launcher` (what the launcher did to that call), or `ambient` (a record no
-  logger of ours stamped, such as a library's warning).
+  logger of ours stamped, such as a library's warning, or a line written to
+  stderr).
 
 ## How a row travels
 
@@ -33,7 +34,7 @@ flowchart TD
   subgraph writers ["Who writes a row"]
     WL["Worker<br/>worker.log = call_logger('job', WORKER, call_id)"]
     LL["Launcher<br/>log_call(call_id), log_launcher"]
-    AL["Anything unstamped<br/>source = ambient"]
+    AL["Anything unstamped, and every line on stderr<br/>source = ambient"]
   end
   WL --> BH
   LL --> BH
@@ -67,7 +68,13 @@ flowchart TD
    well, so a grant or a cancel reads on the artifact's page and in the
    dashboard's panel alike. `emit` never leaves memory: it runs on whatever
    thread logged, Modal's own event loop included, where a blocking Modal
-   call raises.
+   call raises. `start_logging` also puts a tee in place of `sys.stderr`
+   (`_StderrLines`): every write goes through to the real stream, and every
+   complete line reaches the buffer as an unstamped INFO record from the
+   logger `stderr`. That is how a library that logs through a handler of its
+   own, torch's compile warnings and Inductor's `AUTOTUNE` tables among them,
+   and Python's warnings reach a call's log. A carriage return restarts the
+   line, so a progress bar files as its last state.
 3. **Publish.** A thread `start_logging` starts puts every channel the
    container holds, whole, every `HEARTBEAT_SECONDS`. A channel new since the
    last pass is first started from `continued()`: the longer of the Dict's
@@ -127,7 +134,7 @@ record. `persist_snapshot` is the only thing that writes them;
 
 `log_to_stdout`, the first thing `start_logging` does, points `basicConfig` at
 stdout, so every record is also a formatted line in `modal app logs`. A
-profiling call runs `log_to_stdout` alone: its rows are only in Modal's
+`run_profile` call runs `log_to_stdout` alone: its rows are only in Modal's
 capture, which `run_profile` prints as the call runs. Our loggers log at DEBUG, libraries at
 INFO, and `modal`, `grpc`, `urllib3` and `uvicorn.access` at WARNING, so the
 publisher's own requests stay out of the log.
@@ -163,6 +170,13 @@ for them.
 - **A grant is recorded at grant time.** A call whose container never ran is
   still listed under its artifact, with the launcher's rows about it (LESSONS.md,
   "A call the container never spoke for was invisible").
+- **stderr is teed in Python, once, and never put back.** A library's handler
+  keeps the `sys.stderr` it found when it was made, and torch makes its own at
+  import, so the tee goes in with the first `start_logging`, before any job
+  imports torch, and stays for the container's life; each call only points it
+  at its own buffer. Swapping file descriptor 2 for a pipe would also catch
+  native code and subprocesses, but every write to stderr would then wait on a
+  reader thread, and a reader that stalled would stall the job.
 
 ## What it costs
 
@@ -210,14 +224,20 @@ category. A split, if ever worth having, is another `call_logger("job.lease",
 
 ## Not captured
 
-- Output that bypasses `logging` (a bare `print`, tqdm on stderr) reaches only
-  Modal's own capture and expires there.
-- A library that gives itself a handler and sets `propagate = False` never
-  reaches ours (LESSONS.md, "A library that keeps its own handler never reaches
-  ours").
+- A bare `print`, or anything else on stdout that bypasses `logging`, reaches
+  only Modal's own capture and expires there. stderr is captured, but only
+  what Python writes to `sys.stderr`: native code or a subprocess writing to
+  file descriptor 2 reaches only Modal's capture.
+- A library that gives itself a handler and sets `propagate = False` reaches
+  ours only as lines on stderr: `ambient` rows from the logger `stderr`, at
+  INFO whatever their own level, and only from a handler made after the
+  container's first `start_logging` (LESSONS.md, "A library that keeps its own
+  handler never reaches ours").
 - The lab's output reaches only `modal app logs`.
-- A profiling run's rows are only in Modal's capture: `run_profile` prints
+- A `run_profile` call's rows are only in Modal's capture: `run_profile` prints
   them as the call runs, and nothing puts them in `call_logs` or on the volume.
+  A declared profile runs as a job, so its rows, torch's included, are in its
+  call's log.
 - Under `modal serve` no schedule fires, so nothing is persisted; the Dict is
   the only copy.
 - A container killed hard (out of memory, evicted) or one that never starts

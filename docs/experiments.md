@@ -22,7 +22,8 @@ report = lab.create_experiment(experiment_uid, runs, commit=True)
 
 ```mermaid
 flowchart TD
-  U{"experiments/uid exists?"} -->|yes| TAKEN["raise FileExistsError"]
+  U{"experiments/uid exists?"} -->|"yes, no extend"| TAKEN["raise FileExistsError"]
+  U -->|"yes, extend"| EXT["Extend it<br/>(Extending one, below)"]
   U -->|no| G["One graph for every run<br/>resolve(*runs): each path once,<br/>raise on two definitions at a path or a cycle"]
   G --> T["Tag each run with the experiment<br/>its own tags and experiment_uid"]
   T --> P{"commit?"}
@@ -36,7 +37,8 @@ flowchart TD
 ```
 
 1. **The name.** `experiment_uid` is one folder name of letters, digits, `.`,
-   `_` and `-`. A taken one raises before anything else, preview included.
+   `_` and `-`. A taken one raises before anything else, preview included,
+   unless `extend` says how to add to it ([Extending one](#extending-one)).
 2. **One graph.** Every run and everything it is built from resolve together,
    so a tokenizer or dataset the runs share is one node, declared once. Two
    definitions at one path, across runs as within one, raise before anything
@@ -56,6 +58,33 @@ flowchart TD
    created the experiment, and `notebook.ipynb`, whose one cell is
    `lab.load_experiment(experiment_uid)`. Both are written into a staging folder first,
    which is renamed into place last.
+
+## Extending one
+
+An experiment can take more artifacts after it is created: call
+`create_experiment` again with its name, the artifacts to add, and `extend`:
+
+```python
+report = lab.create_experiment("batch-size-study", more_runs, commit=True, extend="add")
+```
+
+The new artifacts resolve, are tagged and are declared exactly as a new
+experiment's are, so `notebook.ipynb`, which lists whatever is tagged, already
+lists them. What `extend` chooses is where the notebook declaring them goes:
+
+- **`"add"`** keeps it beside the first, as the next free `declaration<n>.ipynb`
+  from 2: `declaration2.ipynb`, then `declaration3.ipynb`. `declaration.ipynb`
+  is never touched, so the dashboard's **declaration ↗** link keeps opening the
+  notebook that created the experiment.
+- **`"overwrite"`** replaces `declaration.ipynb` with it, and the dashboard
+  opens that one from then on.
+
+Either way the notebook is written only after everything it declares, whole,
+and renamed into place, so a failed extension leaves the folder as it was and
+running it again completes it. A preview writes nothing, and `extend` on an
+experiment that does not exist yet creates it as a first call would. The
+launcher is told once, `experiment extended`, naming the paths the extension
+asked for.
 
 ## Reading one back
 

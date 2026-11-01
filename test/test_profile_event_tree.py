@@ -116,4 +116,4 @@ def test_launch_namespace_nodes_ambiguity_and_device_work():
 
 def test_no_events_says_kernel_events_was_off():
     with pytest.raises(ValueError, match="kernel_events=True"):
-        events_to_rows([])
+        events_to_rows({})

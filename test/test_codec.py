@@ -17,10 +17,10 @@ from pydantic import ValidationError, create_model
 
 from artifacts.core.artifact import Artifact, ParamConfig, Resources
 from artifacts.core.manifest import manifest_json
+from artifacts.core.SGD.lr_schedule import Constant, WarmupCosine
+from artifacts.core.SGD.optimizers import SGD, AdamW
 from artifacts.core.SGD.training import (
     LoopConfig,
-    LRSchedule,
-    OptimizerParameters,
     TrainingParameters,
 )
 from artifacts.core.storage import write_manifest
@@ -114,14 +114,13 @@ REALS = st.builds(
         TrainingParameters,
         total_steps=POSITIVE,
         max_norm=FLOATS,
-        lr_schedule=st.builds(LRSchedule, max_learning_rate=FLOATS, min_learning_rate=FLOATS),
-        optimizer_parameters=st.builds(
-            OptimizerParameters,
-            lr=FLOATS,
-            betas=st.lists(FLOATS, max_size=3).map(tuple),
+        lr_schedule=st.builds(WarmupCosine, max_learning_rate=FLOATS, min_learning_rate=FLOATS) | st.builds(Constant, lr=FLOATS),
+        optimizer=st.builds(
+            AdamW,
+            betas=st.tuples(FLOATS, FLOATS),
             weight_decay=FLOATS,
             eps=FLOATS,
-        ),
+        ) | st.just(SGD()),
     ),
     loop=st.builds(LoopConfig, checkpoint_every=POSITIVE, gpu_check_every=POSITIVE),
     transformer=st.tuples(POSITIVE, st.integers(1, 64)).flatmap(

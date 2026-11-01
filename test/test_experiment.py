@@ -14,7 +14,9 @@ from unittest.mock import patch
 
 import lab
 from artifacts.core.artifact import Artifact
-from artifacts.core.SGD.training import LoopConfig, LRSchedule, OptimizerParameters, TrainingParameters
+from artifacts.core.SGD.lr_schedule import WarmupCosine
+from artifacts.core.SGD.optimizers import AdamW
+from artifacts.core.SGD.training import LoopConfig, TrainingParameters
 from artifacts.core.storage import MANIFEST
 from artifacts.dataset import DataSet
 from artifacts.sources import SourceURL
@@ -31,6 +33,11 @@ NOTEBOOK = json.dumps({"cells": [
     {"cell_type": "markdown", "source": "temporary"},
     {"cell_type": "code", "source": [CELL]},
 ]}).encode()
+LATER_CELL = 'lab.create_experiment("study", more_runs, commit=True, extend="add")'
+LATER = json.dumps({"cells": [
+    {"cell_type": "markdown", "source": "temporary"},
+    {"cell_type": "code", "source": [LATER_CELL]},
+]}).encode()
 
 
 def run(batch_size: int, **extra) -> Pretraining:
@@ -40,9 +47,8 @@ def run(batch_size: int, **extra) -> Pretraining:
         model=Transformer(vocab_size=1000, sequence_length=8, num_layers=1, d_model=16, d_ff=32, num_heads=2, rope_theta=10000),
         training_parameters=TrainingParameters(
             total_steps=4, batch_size=batch_size, max_norm=1,
-            lr_schedule=LRSchedule(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
-            optimizer="torch.optim.AdamW",
-            optimizer_parameters=OptimizerParameters(lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
+            lr_schedule=WarmupCosine(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
+            optimizer=AdamW(betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
         ),
         loop_config=LoopConfig(val_every=2, gpu_check_every=2, checkpoint_every=2),
         **extra,
@@ -144,10 +150,47 @@ class ExperimentTests(unittest.TestCase):
         self.create(commit=True)
         kept = (self.root / "experiments" / UID / "declaration.ipynb").read_bytes()
         for commit in (False, True):
-            with self.assertRaises(FileExistsError):
+            with self.assertRaisesRegex(FileExistsError, "extend='add'"):
                 self.create([run(128)], commit=commit)
         self.assertEqual((self.root / "experiments" / UID / "declaration.ipynb").read_bytes(), kept)
         self.assertFalse((self.root / run(128).artifact_path).exists())
+
+    def test_an_extension_declares_its_runs_and_keeps_its_notebook_beside_the_first(self):
+        self.create(commit=True)
+        folder = self.root / "experiments" / UID
+        first, listing = (folder / "declaration.ipynb").read_bytes(), (folder / "notebook.ipynb").read_bytes()
+        self.create([run(128)], commit=True, extend="add", notebook=LATER)
+        self.create([run(256)], commit=True, extend="add", notebook=LATER)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()),
+                         ["declaration.ipynb", "declaration2.ipynb", "declaration3.ipynb", "notebook.ipynb"])
+        self.assertEqual((folder / "declaration.ipynb").read_bytes(), first)  # the one the dashboard opens
+        self.assertEqual((folder / "notebook.ipynb").read_bytes(), listing)
+        for name in ("declaration2.ipynb", "declaration3.ipynb"):
+            kept = json.loads((folder / name).read_text())["cells"]
+            self.assertEqual([cell["source"] for cell in kept], [f"# experiments/{UID}", [LATER_CELL]])
+        self.assertEqual(lab.load_experiment(UID, self.root), sorted([*RUNS, run(128), run(256)], key=lambda r: r.artifact_path))
+        self.assertTrue((self.root / run(128).artifact_path / "declaring.ipynb").exists())
+
+    def test_an_overwriting_extension_replaces_the_first_declaration(self):
+        self.create(commit=True)
+        self.create([run(128)], commit=True, extend="overwrite", notebook=LATER)
+        folder = self.root / "experiments" / UID
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["declaration.ipynb", "notebook.ipynb"])
+        kept = json.loads((folder / "declaration.ipynb").read_text())["cells"]
+        self.assertEqual([cell["source"] for cell in kept], [f"# experiments/{UID}", [LATER_CELL]])
+        self.assertIn(run(128), lab.load_experiment(UID, self.root))
+
+    def test_extending_an_experiment_not_there_yet_creates_it(self):
+        self.create(commit=True, extend="add")
+        folder = self.root / "experiments" / UID
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["declaration.ipynb", "notebook.ipynb"])
+
+    def test_a_preview_of_an_extension_writes_nothing(self):
+        self.create(commit=True)
+        before = sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*"))
+        report = self.create([run(128)], commit=False, extend="add")
+        self.assertEqual({row["path"]: row["state"] for row in report.rows}[run(128).artifact_path.as_posix()], "new")
+        self.assertEqual(sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*")), before)
 
     def test_an_experiment_uid_must_be_one_plain_folder_name(self):
         for uid in ("", "a/b", "..", ".staging-x", "a b"):
@@ -221,9 +264,17 @@ class ExperimentTests(unittest.TestCase):
             self.create(commit=True)
             with redirect_stdout(io.StringIO()):
                 lab.declare(ODYSSEY, root=self.root, commit=True, notebook=NOTEBOOK)
+<<<<<<< HEAD
         self.assertEqual(sent, [
             {"experiment_uid": UID, "artifact_paths": [r.artifact_path.as_posix() for r in RUNS], "event": "experiment created"},
             {"artifact_path": ODYSSEY.artifact_path.as_posix(), "call_id": "launcher", "event": "declared"},
+=======
+            self.create([run(128)], commit=True, extend="add", notebook=LATER)
+        self.assertEqual(sent, [
+            {"experiment_uid": UID, "artifact_paths": [r.artifact_path.as_posix() for r in RUNS], "event": "experiment created"},
+            {"artifact_path": ODYSSEY.artifact_path.as_posix(), "call_id": "launcher", "event": "declared"},
+            {"experiment_uid": UID, "artifact_paths": [run(128).artifact_path.as_posix()], "event": "experiment extended"},
+>>>>>>> 53dccf3 (profiling and experiment declare-extend)
         ])
 
 

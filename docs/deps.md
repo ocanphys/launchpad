@@ -147,4 +147,4 @@ once, by hand.
 - [Manifests](manifests.md): how a definition is written to disk and read back.
 - [Jobs](jobs.md): the code that builds one artifact.
 - [Launcher](launcher.md): how the graph is launched and watched.
-- [Artifact Repository](repository.md): what lives where.
+- [Repository](repository.md): what lives where.

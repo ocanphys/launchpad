@@ -1,9 +1,10 @@
-"""Module scopes for a profiled training step, and the tables built from its events.
+"""Module scopes for a profiled training step, its capture as JSON, and the tables built from it.
 
-`profiling.util.profile` returns `prof.events()` unchanged: `FunctionEvent` objects pickle
-with their `cpu_parent` and `cpu_children` references intact, so every step after profiling
-runs locally. The profile container imports this module for `module_scopes` and the capture context
-managers, so pandas and matplotlib, which the worker image lacks, are imported where they are used.
+The capture context managers turn what torch hands back into plain JSON before it leaves the
+container: `event_table` the profiler's events, `capture_memory` the allocator snapshot. Every
+table after that is built from that JSON alone, on any machine. The profile container imports
+this module for `module_scopes` and the capture context managers, so pandas and matplotlib,
+which the worker image lacks, are imported where they are used.
 """
 
 from __future__ import annotations
@@ -12,12 +13,13 @@ import math
 import random
 from contextlib import ExitStack, contextmanager
 from threading import local
+from typing import NamedTuple
 
 import numpy as np
 import torch
 from torch.overrides import TorchFunctionMode
 from torch.profiler import ProfilerActivity, profile, record_function
-from torch.utils._pytree import tree_leaves
+from torch.utils._pytree import tree_leaves, tree_map
 
 PHASE_ORDER = {p: i for i, p in enumerate(
     ["zero_grad", "forward", "loss", "backward", "clip_grad", "optimizer_step", "unscoped"])}
@@ -25,51 +27,20 @@ PHASE_ORDER = {p: i for i, p in enumerate(
 
 @contextmanager
 def module_scopes(model, root="model"):
-    """Record module scoped execution stages for eager modules.
+    """Yields while every eager module call, and the backward of the work it did, is recorded as a module stage.
 
-    Convention and organization
-    ---------------------------
-    A module scoped execution stage is a CPU user_annotation event created by
-    record_function. Its name is <phase>::<module_fqn>, where phase is forward
-    or backward and module_fqn is a named_modules path prefixed by root:
+        with module_scopes(network):
+            run_step(tokens)
 
-        forward::model                  # root module
-        forward::model.tblocks.0        # submodule
-        backward::model.tblocks.0       # same submodule during backward
+    A stage is a record_function annotation named <phase>::<fqn>: forward::model.tblocks.0
+    around the module's forward call, and backward::model, ..., backward::model.tblocks.0 around
+    each autograd node that call created. Keep the context open for forward and backward both;
+    on exit every hook is removed and every open stage closed, even after an exception.
+    docs/profiling/attribution.md says what is claimed, and how kernels are attributed to stages.
 
-    The same convention applies at every module depth. Forward stages nest
-    according to actual module calls. Backward stages restore the recorded
-    root-to-owner module path around each owned autograd node's execution.
-    A stage name can therefore occur in multiple event rows; the original row
-    index identifies each occurrence, not the stage name or module FQN.
-
-    train::<phase> annotations describe whole training phases; module scoped
-    execution stages describe module work within a phase. Backward workers may
-    lack the outer train::backward ancestor, so the stage name encodes its phase
-    directly. These annotations label execution; they are not autograd nodes.
-    Following a kernel's launcher_id chain finds its nearest module scoped
-    execution stage. If none exists, that kernel stays module-unattributed.
-
-    Recording and ownership
-    -----------------------
-    Forward hooks track the active module path. TorchFunctionMode observes each
-    operation's new autograd nodes and attaches that path to them once. Node
-    pre/post hooks restore the path on the backward worker thread, surrounding
-    its CPU operations and CUDA launches with backward::<FQN> annotations.
-    Keep this context open for both forward and backward.
-
-    Input graph nodes and nodes already owned by a child module are not claimed.
-    AccumulateGrad is deliberately unowned: a shared parameter can accumulate
-    contributions from several modules. Loss/optimizer work outside the module
-    calls gets no module label. A kernel without a module annotation anywhere
-    on its launcher_id chain remains unattributed.
-
-    Shared modules use an alias below the active caller when possible, otherwise
-    the first named_modules path. Aliases under the same caller are ambiguous
-    to module hooks and use the first path. Direct .forward() calls bypass hooks.
-    Compiled graphs and checkpoint recomputation are outside this eager workflow.
-    All installed hooks and still-open scopes are cleaned up on context exit.
-    No tensors or gradients are replaced.
+    Args:
+        model: The network to instrument; no tensor or gradient is replaced.
+        root: The FQN of the network's own stages; a submodule's is root.<named_modules path>.
     """
     # Discover module identities and their fully qualified aliases.
     aliases = {}
@@ -175,36 +146,92 @@ def module_scopes(model, root="model"):
         owned_nodes.clear()
 
 
+def event_table(function_events):
+    """Returns profiler events as JSON columns: one list per FunctionEvent attribute, in the
+    events' order, so an event's row ID is its position.
+
+        event_table(prof.events())["name"]  # a CPU profile of torch.ones(2) + 1
+        -> ['aten::ones', 'aten::empty', 'aten::fill_', 'aten::add', 'aten::to', 'aten::_to_copy',
+            'aten::empty_strided', 'aten::copy_']
+
+    Four attributes hold objects JSON cannot: time_range becomes start_us and end_us, device_type
+    its str ("DeviceType.CPU"), cpu_parent the parent's position or None, and cpu_children and
+    kernels, the inverses of links the rows keep, are left out. Any other value JSON cannot hold,
+    such as a symbolic size torch.compile recorded or an infinite fill value, is written as its str.
+
+    Args:
+        function_events: One step's events, as `prof.events()` returns them.
+
+    Returns:
+        Maps each attribute to its column, in torch's order; empty without events.
+    """
+    position = {id(event): i for i, event in enumerate(function_events)}
+
+    def plain(value):
+        if isinstance(value, float):
+            return value if math.isfinite(value) else str(value)
+        return value if value is None or isinstance(value, bool | int | str) else str(value)
+
+    def columns(event):
+        for name, value in vars(event).items():
+            if name == "time_range":
+                yield "start_us", value.start
+                yield "end_us", value.end
+            elif name == "device_type":
+                yield name, str(value)
+            elif name == "cpu_parent":
+                yield name, position.get(id(value))
+            elif name not in ("cpu_children", "kernels"):
+                yield name, tree_map(plain, value)
+
+    records = [dict(columns(event)) for event in function_events]
+    return {name: [record[name] for record in records] for name in records[0]} if records else {}
+
+
 @contextmanager
 def capture_profiler_events(enabled):
-    """Yield a dict whose "events" holds the block's profiler events once it exits; empty when not enabled.
+    """Yields a dict that holds the block's profiler events once it exits; empty when not enabled.
 
-    Event times are us from the trace's start; "trace_start_us" is that start on the unix clock.
     It synchronizes before the profiler stops, so every kernel launched inside the block is recorded.
+
+    Args:
+        enabled: Record the block's CPU ops and CUDA kernels, with their FLOPs, under torch.profiler.
+
+    Yields:
+        The dict: "trace_start_unix_us", the trace's start on the unix clock, which the events'
+        times count from, and "events", event_table's columns.
     """
-    profiled = {"events": []}
+    profiled = {}
     if not enabled:
         yield profiled
         return
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_flops=True) as prof:
         yield profiled
         torch.cuda.synchronize()
-    profiled["events"].extend(prof.events())
-    profiled["trace_start_us"] = prof.profiler.kineto_results.trace_start_ns() / 1e3
+    profiled["trace_start_unix_us"] = prof.profiler.kineto_results.trace_start_ns() / 1e3
+    profiled["events"] = event_table(prof.events())
 
 
 @contextmanager
 def capture_memory(peak=False, trace=False, max_entries=100_000):
-    """Yield a dict that holds the block's memory readings once it exits; empty when both are off.
+    """Yields a dict that holds the block's memory readings once it exits; empty when both are off.
 
-    peak adds peak_allocated and peak_reserved bytes; trace adds the allocator snapshot of just
-    this block under "snapshot".
+    The allocator records no tracebacks, so the snapshot is plain JSON and the block is not
+    slowed by stack capture; which scope allocated a block is still in its annotations.
+
+    Args:
+        peak: Add peak_allocated_bytes and peak_reserved_bytes.
+        trace: Add "snapshot", the allocator snapshot of just this block, as torch returns it.
+        max_entries: The most trace entries the allocator keeps; past it, the earliest are dropped.
+
+    Yields:
+        The dict.
     """
     memory = {}
     if peak:
         torch.cuda.reset_peak_memory_stats()
     if trace:
-        torch.cuda.memory._record_memory_history(max_entries=max_entries, clear_history=True)
+        torch.cuda.memory._record_memory_history(context=None, max_entries=max_entries, clear_history=True)
     try:
         yield memory
         if trace:
@@ -213,12 +240,23 @@ def capture_memory(peak=False, trace=False, max_entries=100_000):
         if trace:
             torch.cuda.memory._record_memory_history(enabled=None)
     if peak:  # allocator statistics are kept on the CPU, so no synchronize is needed
-        memory["peak_allocated"] = torch.cuda.max_memory_allocated()
-        memory["peak_reserved"] = torch.cuda.max_memory_reserved()
+        memory["peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
+        memory["peak_reserved_bytes"] = torch.cuda.max_memory_reserved()
 
 
-def _validate_launchers(parents, cpu_ids):
-    """Validate the one-parent forest; return children and parent-first order."""
+def _forest_order(parents, cpu_ids):
+    """Returns each event's children and every event in parent-first order.
+
+    It raises ValueError unless every launcher is a CPU event in parents and no link closes a cycle.
+
+    Args:
+        parents: Maps each row ID to its launcher's row ID, or None for a root.
+        cpu_ids: The row IDs of CPU events, the only events that launch others.
+
+    Returns:
+        (children, order): children maps each row ID to the row IDs it launched, in row order;
+        order lists every row ID after its launcher.
+    """
     children = {index: [] for index in parents}
     roots = []
     for index, parent in parents.items():
@@ -240,65 +278,53 @@ def _validate_launchers(parents, cpu_ids):
     return children, order
 
 
+def _correlation_index(events):
+    """Returns the CPU events by (node_id, correlation_id), one lookup per id namespace.
+
+    PyTorch ids (ops and scopes) and CUPTI ids (launch calls and GPU work) come from two counters
+    that overlap, so each counter has its own lookup and an id is only compared with ids of its
+    own kind. An id two events in one lookup share maps to None, never to either.
+
+    Args:
+        events: link_events' itertuples rows, with is_cpu and node_id.
+
+    Returns:
+        (ops, launches): ops maps the PyTorch ids of cpu_op and user_annotation rows, launches
+        those of cuda_runtime and cuda_driver rows, each to a row ID or None.
+    """
+    import pandas as pd
+
+    ops, launches = {}, {}
+    for event in events:
+        if not event.is_cpu or pd.isna(event.correlation_id) or event.correlation_id == 0:
+            continue
+        if event.activity_type in {"cpu_op", "user_annotation"}:
+            lookup = ops
+        elif event.activity_type in {"cuda_runtime", "cuda_driver"}:
+            lookup = launches
+        else:
+            continue
+        key = (event.node_id, event.correlation_id)
+        lookup[key] = event.Index if key not in lookup else None
+    return ops, launches
+
+
 def link_events(frame):
-    """Connect events to their immediate CPU origin using original row IDs.
+    """Returns frame with every GPU event's launcher_id set to the CPU event that launched it.
 
-    ID reference
-    ------------
-    frame.index
-        Unique integer row ID assigned when building the original event table.
-        This is the identity used for navigation with frame.loc[row_id]. It is
-        NOT a profiler correlation ID. Preserve it when filtering the table.
-    launcher_id
-        A row ID in this same table, or NA when no parent is known. On input,
-        CPU rows must contain their PyTorch cpu_parent converted from an object
-        reference to its row ID. On output, CPU parents are preserved and GPU
-        rows point to their matched CPU launch call or frontend operation.
-        For a CPU row, "launcher" means its enclosing CPU parent scope; it
-        does not imply that every CPU event launches GPU work.
-    correlation_id
-        The original FunctionEvent.id, renamed during table construction.
-        CPU frontend operations (cpu_op) and scopes (user_annotation) use
-        PyTorch's counter. CUDA runtime/driver calls and GPU work use CUPTI's
-        counter: a GPU activity shares its launch call's correlation ID.
-        These counters can collide, so frontend and launch lookups are kept
-        separate. A correlation ID is not a unique event-row identifier.
-    linked_correlation_id
-        For CUDA runtime/driver calls and GPU work, identifies the originating
-        CPU frontend operation's correlation_id. It is not that operation's
-        row ID, and does not identify the intermediate CUDA launch row.
-        Zero or missing values mean there is no usable correlation link.
-    node_id
-        Profiler node identifier used to keep correlations from different
-        nodes separate. Every lookup uses (node_id, correlation_id); absent
-        or missing node IDs use -1. This is neither a row ID nor a GPU ID.
-    external_id
-        Raw profiler external-correlation metadata, retained unchanged if
-        present. It is not a row ID and this function does not use it.
+    CPU rows keep the launcher_id they come with. Kernels, copies and memsets link to the launch
+    call whose CUPTI id equals theirs; failing that, any GPU row links to the op or scope whose
+    PyTorch id its linked_correlation_id holds. A GPU row without exactly
+    one match stays a root (launcher_id NA): links are never guessed from time.
+    It raises ValueError unless row IDs are unique and the links form a forest of CPU launchers.
 
-    Linking rules
-    -------------
-    1. CPU events keep the cpu_parent row links already computed by PyTorch.
-    2. GPU kernels, copies and memsets first match correlation_id against CPU
-       cuda_runtime/cuda_driver rows, inserting the CUDA API call in the path.
-    3. If there is no unique launch match, match linked_correlation_id against
-       CPU cpu_op/user_annotation rows instead. Other device events only use
-       this fallback; GPU annotation spans must not join unrelated launch IDs.
+    Args:
+        frame: One row per profiler event, with unique row IDs; its CPU rows' launcher_id is
+            already their cpu_parent's row ID.
 
-    Missing or duplicate correlation matches are unresolved, never selected
-    arbitrarily. After fallback, unresolved events retain launcher_id=NA.
-    No time-based parent inference or cross-thread CPU ancestry is added.
-
-    For example, following launcher_id from a kernel might visit original row
-    IDs 50 -> 40 -> 30 -> 20, representing:
-        GPU kernel -> cudaLaunchKernel -> aten::mm -> enclosing CPU scope
-    Read the path in reverse for execution provenance. To find direct children
-    of row 30, use rows.loc[rows["launcher_id"].eq(30)].
-
-    Returns a new DataFrame in O(n) time and space, preserving every row, its
-    index, order and other columns. Only launcher_id is updated (nullable
-    Int64); no groups or duplicated ancestor rows are created. Raises
-    ValueError for non-unique row IDs, missing/non-CPU parents, or cycles.
+    Returns:
+        A copy of frame, every row, column and the order kept, with launcher_id (nullable
+        Int64) set for its GPU rows.
     """
     import pandas as pd
 
@@ -311,80 +337,68 @@ def link_events(frame):
         is_cpu=frame["device_type"].map(str).eq("DeviceType.CPU"),
         node_id=frame.get("node_id", pd.Series(-1, index=frame.index)).fillna(-1),
     ).itertuples())
+    ops, launches = _correlation_index(events)
 
-    # PyTorch frontend IDs and CUPTI launch IDs are separate namespaces; duplicates map to None.
-    frontend, launches = {}, {}
-    for event in events:
-        if not event.is_cpu or pd.isna(event.correlation_id) or event.correlation_id == 0:
-            continue
-        if event.activity_type in {"cpu_op", "user_annotation"}:
-            lookup = frontend
-        elif event.activity_type in {"cuda_runtime", "cuda_driver"}:
-            lookup = launches
-        else:
-            continue
-        key = (event.node_id, event.correlation_id)
-        lookup[key] = event.Index if key not in lookup else None
-
-    gpu_work = {"kernel", "gpu_memcpy", "gpu_memset"}
     parents = {}
     for event in events:
-        if event.is_cpu:
+        if event.is_cpu:  # PyTorch's cpu_parent, already a row ID
             parents[event.Index] = int(event.launcher_id) if pd.notna(event.launcher_id) else None
             continue
-
         launcher = None
         # Annotation spans must not match unrelated CUDA launch IDs.
-        if event.activity_type in gpu_work and pd.notna(event.correlation_id):
+        if event.activity_type in {"kernel", "gpu_memcpy", "gpu_memset"} and pd.notna(event.correlation_id):
             launcher = launches.get((event.node_id, event.correlation_id))
         if launcher is None and pd.notna(event.linked_correlation_id):
-            launcher = frontend.get((event.node_id, event.linked_correlation_id))
+            launcher = ops.get((event.node_id, event.linked_correlation_id))
         parents[event.Index] = launcher
 
-    _validate_launchers(parents, {event.Index for event in events if event.is_cpu})
+    _forest_order(parents, {event.Index for event in events if event.is_cpu})
     return frame.assign(launcher_id=pd.array(list(parents.values()), dtype="Int64"))
 
 
-def events_to_rows(function_events):
-    """Return one linked row per profiler event, indexed by its position in function_events.
+def events_to_rows(table):
+    """Returns one linked row per profiler event, indexed by its row ID, its position in the step's events.
 
-    cpu_parent object references become row IDs in launcher_id, then link_events adds the
-    GPU launch links.
+        rows = events_to_rows(events[0]["events"])  # events.json's step 0
+        rows.loc[532, "launcher_id"] -> 531
+
+    Args:
+        table: One step's events as event_table's columns.
+
+    Returns:
+        The event table: one row per event with its attributes, `id` renamed correlation_id and
+        `cpu_parent` renamed launcher_id, which for a GPU event is the row ID of the CPU event
+        link_events finds.
     """
     import pandas as pd
 
-    if not function_events:
-        raise ValueError("no events captured: call run_profile with kernel_events=True")
-    position = {id(event): i for i, event in enumerate(function_events)}
-    raw_rows = (
-        pd.DataFrame([vars(event) for event in function_events])
-        .rename(columns={"id": "correlation_id"})
-        .drop(columns=["cpu_parent", "cpu_children", "kernels"])
-        .assign(launcher_id=pd.array(
-            [position.get(id(event.cpu_parent)) for event in function_events], dtype="Int64"))
-        .rename_axis("index")
-    )
-    rows = link_events(raw_rows)
-    assert rows.index.equals(raw_rows.index)  # every event keeps its row index
-    return rows
+    if not table:
+        raise ValueError("no events captured: profile with kernel_events=True")
+    frame = pd.DataFrame(table).rename(columns={"id": "correlation_id", "cpu_parent": "launcher_id"})
+    return link_events(frame.astype({"launcher_id": "Int64"}).rename_axis("index"))
 
 
 LAUNCH_CHAIN_COLUMNS = [
-    "name", "activity_type", "device_type",# "device_index",  # what the event is
-    "start_us", "end_us",# "thread",  # timing
-    "launcher_id", "correlation_id", "linked_correlation_id", #"sequence_nr", "fwd_thread", "scope",  # relations
+    "name", "activity_type", "device_type",  # what the event is
+    "start_us", "end_us",  # timing
+    "launcher_id", "correlation_id", "linked_correlation_id",  # relations
     "flops",
     "input_shapes", "input_dtypes",  # shapes
-    #"cpu_memory_usage", "device_memory_usage",  # memory
 ]
 
 
 def launch_chain(rows, kernel_id, format=True):
-    """Return the rows on kernel_id's launcher_id path, ordered from the CPU root down to the kernel.
+    """Returns the rows on kernel_id's launch sequence, from its CPU root down to the kernel.
 
-    rows is the table from events_to_rows. A kernel with no launcher returns just its own row.
-    format=True keeps LAUNCH_CHAIN_COLUMNS, with start_us and end_us expanded from time_range;
-    format=False returns the raw rows.
+        launch_chain(rows, 532).index.tolist() -> [5, 7, 16, 501, 502, 510, 529, 531, 532]
+
+    Args:
+        rows: The table from events_to_rows.
+        kernel_id: The row ID of the event to start from; one with no launcher gives just its row.
+        format: Keep only LAUNCH_CHAIN_COLUMNS; False keeps every column.
+
+    Returns:
+        The rows of the chain, the root first.
     """
     import pandas as pd
 
@@ -393,17 +407,55 @@ def launch_chain(rows, kernel_id, format=True):
         chain.append(current)
         current = rows.loc[current, "launcher_id"]
     chain = rows.loc[chain[::-1]]
-    if not format:
-        return chain
-    return chain.assign(start_us=chain["time_range"].map(lambda r: r.start),
-                        end_us=chain["time_range"].map(lambda r: r.end))[LAUNCH_CHAIN_COLUMNS]
+    return chain[LAUNCH_CHAIN_COLUMNS] if format else chain
+
+
+class _LaunchForest(NamedTuple):
+    """The events of a linked table, as the forest their launcher_id links make."""
+
+    events: dict  # row ID: its itertuples row (name, device_type, activity_type, launcher_id, flops)
+    parents: dict  # row ID: its launcher's row ID, or None for a root
+    children: dict  # row ID: the row IDs it launched, in row order
+    order: list  # every row ID, each after its launcher
+    cpu: set  # the row IDs of CPU events
+    kernels: list  # the row IDs of kernels, in row order
+
+
+def _launch_forest(rows):
+    """Returns the launch forest of a linked event table, checked to be one.
+
+    Args:
+        rows: The table from events_to_rows or link_events.
+
+    Returns:
+        The table's _LaunchForest.
+    """
+    import pandas as pd
+
+    columns = ["name", "device_type", "activity_type", "launcher_id", "flops"]
+    events = {event.Index: event for event in rows.reindex(columns=columns).itertuples()}
+    parents = {index: int(event.launcher_id) if pd.notna(event.launcher_id) else None
+               for index, event in events.items()}
+    cpu = {index for index, event in events.items() if str(event.device_type) == "DeviceType.CPU"}
+    children, order = _forest_order(parents, cpu)
+    kernels = [index for index, event in events.items() if event.activity_type == "kernel"]
+    return _LaunchForest(events, parents, children, order, cpu, kernels)
 
 
 def _execution_context(event, inherited, root):
-    """Return (phase, full owner FQN, owner stage row ID) for one tree node."""
+    """Returns the (phase, owner FQN, owner stage row ID) a CPU event passes to what it launches.
+
+    Args:
+        event: A CPU event's row from the launch forest.
+        inherited: The context its launcher passed down.
+        root: The FQN module_scopes gave the model.
+
+    Returns:
+        A train::<phase> annotation's phase with no owner; a <phase>::<fqn> module stage's phase,
+        FQN and row ID; optimizer_step outside any module for an Optimizer.step# annotation;
+        backward for an autograd node, keeping the owner only inside backward; else inherited.
+    """
     phase, owner, stage_id = inherited
-    if str(event.device_type) != "DeviceType.CPU":
-        return inherited
     name = event.name
     if event.activity_type == "user_annotation":
         if name.startswith("train::"):
@@ -418,86 +470,272 @@ def _execution_context(event, inherited, root):
     return inherited
 
 
-def aggregate_kernels(rows, depth=None, *, root="model"):
-    """Partition kernel events by phase/module depth and roll up ATen FLOPs.
+def _kernel_owners(forest, root):
+    """Returns each kernel's (phase, owner FQN, owner stage row ID), passed down its launch chain.
 
-    Input
-    -----
-    rows is the complete event table returned by link_events, with unique
-    original integer row IDs and launcher_id parent links. No events are
-    removed from or added to rows. Module scoped execution stages use labels
-    <phase>::<module_fqn>. GPU timestamps come from time_range.start/end in us.
+    The owner is the nearest module stage above the kernel, None without one. A kernel whose
+    owner's chain never reaches the root stage raises ValueError: its module path is incomplete.
 
-    depth counts FQN components, including root: 1 = model, 2 = model.tblocks,
-    3 = model.tblocks.0; None retains the full owning FQN. A container prefix
-    need not have a recorded scope: it is a logical group, not a fabricated
-    event. Direct work in a shallower module stays in that module's group.
-    Repeated occurrences of the same phase/FQN merge. Kernel membership is
-    exclusive: no group includes kernels already assigned to another group.
+    Args:
+        forest: The table's _LaunchForest.
+        root: The FQN module_scopes gave the model.
 
-    Ownership and timing
-    --------------------
-    The nearest module stage owns a kernel. Without one, module_fqn is
-    <unattributed>. Phase comes from the stage, train::<phase>, or a backward
-    engine/optimizer scope; otherwise it is unscoped. All kernel rows appear
-    once, including those with missing links. Copies and memsets are excluded.
-    GPU span = latest end - earliest start (including gaps). GPU time is the
-    sum of kernel durations (overlapping launches contribute independently).
+    Returns:
+        Maps each kernel's row ID, in row order, to its context.
+    """
+    contexts, rooted = {}, {}
+    for index in forest.order:
+        event, parent = forest.events[index], forest.parents[index]
+        context = contexts.get(parent, ("unscoped", None, None))
+        contexts[index] = _execution_context(event, context, root) if index in forest.cpu else context
+        rooted[index] = rooted.get(parent, False) or (
+            index in forest.cpu and event.activity_type == "user_annotation"
+            and event.name.partition("::")[2] == root)
+    owners = {index: contexts[index] for index in forest.kernels}
+    unrooted = [index for index in forest.order if index in owners and owners[index][1] is not None and not rooted[index]]
+    if unrooted:
+        raise ValueError(f"Kernels owned by a module stage but not under the {root} stage: {unrooted}")
+    return owners
 
-    FLOPs
-    -----
-    Only CPU aten:: operations with descendant kernels contribute. A positive
-    finite reported flops value replaces the sum of all child estimates.
-    Otherwise, child estimates pass up through intermediate event nodes.
-    Thus nested reported estimates are suppressed by the outermost reported
-    ancestor, siblings add, and one ATen launching many kernels counts once.
-    Every contribution is identified by its original ATen row ID, never by
-    operation name. No FLOP total is replicated on individual kernel rows.
 
-    Returns
-    -------
-    groups: DataFrame indexed by (phase, module_fqn) in phase execution order,
-        with kernel_ids, owner_stage_ids, kernel_count, estimated_flops,
-        flop_source_ids, gpu_start_us, gpu_end_us, gpu_span_us and gpu_time_us.
-    kernels: Original kernel rows, at their original unique indices, sorted by
-        phase execution order, module_fqn and gpu_start_us, augmented
-        with phase, module_fqn, owner_fqn, owner_stage_id, gpu_start_us,
-        gpu_end_us and duration_us. groups.kernel_ids references this table.
-    unattributed_kernels: The rows of kernels whose module_fqn is <unattributed>.
-    flop_sources: Positive reported ATen estimates with descendant kernels,
-        indexed by original ATen row ID. status is allocated, suppressed or
-        unallocated. suppressed_by identifies the overriding ATen ancestor;
-        contribution_flops is nonzero only for allocated estimates.
-        spans_groups checks the caveat below, including suppressed estimates.
+def _module_group(owner, depth, root):
+    """Returns the module group of a kernel with this owner: the owner's first depth FQN components.
 
-    Limitations
-    -----------
-    FLOPs are partial operation estimates, not measured GPU instructions.
-    Zero/missing/nonfinite values mean unavailable here; zero output does not
-    prove zero work. CPU-only branches without kernels are excluded, but a
-    reported operation estimate cannot separate mixed CPU/GPU computation.
+        _module_group("model.tblocks.0.ffn", 3, "model") -> "model.tblocks.0"
 
-    Usually module stages enclose ATen operations. Hypothetically an estimated
-    ATen ancestor could instead enclose several module stages whose kernels
-    fall into different requested groups. Multiple kernels or shared weights
-    alone do NOT imply this. We check actual descendant group membership and
-    flag spans_groups=True. If such an estimate is unsuppressed, it remains
-    unallocated rather than being divided or duplicated; its descendants are
-    still suppressed. Inspect rows.loc[flop_sources.index] for the real source
-    events. Allocated group totals can consequently change with depth; the
-    allocated plus unallocated estimate stays conserved. Suppressed reports
-    must never be added back to totals.
+    Args:
+        owner: The kernel's owner FQN, or None for a kernel no module stage owns.
+        depth: How many FQN components to keep, root included; None keeps them all.
+        root: The FQN module_scopes gave the model, one component however many dots it has.
 
-    Missing ancestry stays unattributed; no phase/module links are invented.
-    A kernel owned by a module stage whose launcher chain never reaches the
-    root stage raises ValueError: its attribution would be incomplete.
-    A merged group's time span can include gaps between repeated invocations.
-    The shared validator builds the forest once. Ownership passes down and
-    FLOPs pass up in O(events + kernels); no per-kernel
-    ancestor walks or copies of entire subtrees are required.
+    Returns:
+        The group's FQN, or <unattributed> without an owner.
+    """
+    if owner is None:
+        return "<unattributed>"
+    if depth is None:
+        return owner
+    components = [root] + owner[len(root) + 1:].split(".") if owner != root else [root]
+    return ".".join(components[:depth])
+
+
+def _reported_flops(forest):
+    """Returns the FLOP estimates the profiler reported and the outermost reported ancestor of each.
+
+    An estimate is reported when a CPU aten:: event has a positive finite flops value.
+
+    Args:
+        forest: The table's _LaunchForest.
+
+    Returns:
+        (reported, suppressed_by): reported maps each reporting row ID to its FLOPs, in
+        parent-first order; suppressed_by maps the same IDs to the outermost reporting ATen
+        ancestor's row ID, None for an estimate no reporting ancestor encloses.
     """
     import pandas as pd
 
+    reported, suppressed_by, outermost = {}, {}, {}
+    for index in forest.order:
+        event, ancestor = forest.events[index], outermost.get(forest.parents[index])
+        if (index in forest.cpu and event.name.startswith("aten::")
+                and pd.notna(event.flops) and event.flops > 0 and math.isfinite(event.flops)):
+            reported[index] = float(event.flops)
+            suppressed_by[index] = ancestor
+            if ancestor is None:
+                ancestor = index
+        outermost[index] = ancestor
+    return reported, suppressed_by
+
+
+_MIXED = object()  # the destination of a subtree whose kernels fall into more than one group
+
+
+def _subtree_summaries(forest, group_keys, reported):
+    """Returns, for every event, the kernels below it, the group they fall into and the FLOPs it carries.
+
+    A subtree carries its reported estimate if it has one, else the sum of what its children
+    carry; a subtree without kernels carries none.
+
+    Args:
+        forest: The table's _LaunchForest.
+        group_keys: Maps each kernel's row ID to its (phase, module_fqn) group.
+        reported: Maps each reporting ATen row ID to its FLOPs.
+
+    Returns:
+        (kernel_counts, destinations, effective_flops), each keyed by row ID: the kernels in the
+        subtree; their one group key, None without kernels or _MIXED for several groups; and the
+        FLOPs the subtree carries.
+    """
+    kernel_counts, destinations, effective_flops = {}, {}, {}
+    for index in reversed(forest.order):
+        destination, count, child_flops = group_keys.get(index), int(index in group_keys), 0.0
+        for child in forest.children[index]:
+            count += kernel_counts[child]
+            child_flops += effective_flops[child]
+            if destinations[child] is None:
+                continue
+            if destination is None:
+                destination = destinations[child]
+            elif destination != destinations[child]:
+                destination = _MIXED
+        kernel_counts[index], destinations[index] = count, destination
+        effective_flops[index] = reported.get(index, child_flops) if count else 0.0
+    return kernel_counts, destinations, effective_flops
+
+
+def _flop_sources(forest, group_keys):
+    """Returns one row per reported FLOP estimate with kernels below it, and the group it counts toward.
+
+    An estimate is suppressed when an outer reported estimate encloses it, unallocated when its
+    kernels fall into several groups, and otherwise allocated to its kernels' one group. It raises
+    ValueError unless allocated plus unallocated FLOPs equal what the forest's roots carry.
+
+    Args:
+        forest: The table's _LaunchForest.
+        group_keys: Maps each kernel's row ID to its (phase, module_fqn) group.
+
+    Returns:
+        A DataFrame indexed by the estimate's row ID (aten_id), in parent-first order, with name,
+        reported_flops, contribution_flops (reported_flops when allocated, else 0), status,
+        suppressed_by, spans_groups, kernel_count, and the phase and module_fqn it is allocated to.
+    """
+    import pandas as pd
+
+    reported, suppressed_by = _reported_flops(forest)
+    kernel_counts, destinations, effective_flops = _subtree_summaries(forest, group_keys, reported)
+    records = []
+    for index, amount in reported.items():
+        if not kernel_counts[index]:
+            continue
+        blocker, spans_groups = suppressed_by[index], destinations[index] is _MIXED
+        status = "suppressed" if blocker is not None else "unallocated" if spans_groups else "allocated"
+        phase, fqn = (None, None) if spans_groups else destinations[index]
+        records.append((index, forest.events[index].name, amount, amount if status == "allocated" else 0.0,
+                        status, blocker, spans_groups, kernel_counts[index], phase, fqn))
+    sources = pd.DataFrame(records, columns=[
+        "aten_id", "name", "reported_flops", "contribution_flops", "status", "suppressed_by",
+        "spans_groups", "kernel_count", "phase", "module_fqn",
+    ]).set_index("aten_id")
+    sources["suppressed_by"] = pd.array(sources["suppressed_by"], dtype="Int64")
+    sources["spans_groups"] = sources["spans_groups"].astype(bool)
+
+    counted = sources["contribution_flops"].sum() + sources.loc[sources["status"].eq("unallocated"), "reported_flops"].sum()
+    if not math.isclose(counted, sum(effective_flops[index] for index in forest.order if forest.parents[index] is None)):
+        raise ValueError("FLOP sources must conserve the bottom-up estimate")
+    return sources
+
+
+def _kernel_table(rows, owners, group_keys):
+    """Returns the kernel rows of rows, in row order, with their owner, group and GPU interval.
+
+    It raises ValueError for a kernel whose start_us and end_us are not a finite interval.
+
+    Args:
+        rows: The linked event table.
+        owners: Maps each kernel's row ID, in row order, to its (phase, owner FQN, owner stage row ID).
+        group_keys: Maps each kernel's row ID to its (phase, module_fqn) group.
+
+    Returns:
+        The kernel rows with phase, module_fqn, owner_fqn, owner_stage_id, gpu_start_us,
+        gpu_end_us and duration_us.
+    """
+    import pandas as pd
+
+    kernel_ids = list(owners)
+    kernels = rows.loc[kernel_ids].copy()
+    starts, ends = [], []
+    for index, start, end in zip(kernels.index, kernels["start_us"], kernels["end_us"]):
+        start, end = float(start), float(end)
+        if not math.isfinite(start) or not math.isfinite(end) or end < start:
+            raise ValueError(f"Invalid GPU interval for kernel {index}")
+        starts.append(start)
+        ends.append(end)
+    kernels["phase"] = [group_keys[index][0] for index in kernel_ids]
+    kernels["module_fqn"] = [group_keys[index][1] for index in kernel_ids]
+    kernels["owner_fqn"] = [owners[index][1] for index in kernel_ids]
+    kernels["owner_stage_id"] = pd.array([owners[index][2] for index in kernel_ids], dtype="Int64")
+    kernels["gpu_start_us"], kernels["gpu_end_us"] = starts, ends
+    kernels["duration_us"] = kernels["gpu_end_us"] - kernels["gpu_start_us"]
+    return kernels
+
+
+def _phase_rank(level):
+    """Returns a sort key that orders a phase index level or column by PHASE_ORDER, any other as it is.
+
+    Args:
+        level: An index level or column, as sort_index and sort_values pass it.
+
+    Returns:
+        The phases' ranks, or level unchanged.
+    """
+    return level.map(PHASE_ORDER) if level.name == "phase" else level
+
+
+def _group_table(kernels, flop_sources):
+    """Returns one row per (phase, module_fqn) group of kernels, in phase execution order.
+
+    Args:
+        kernels: The kernel table, in row order.
+        flop_sources: The FLOP estimates and the groups they are allocated to.
+
+    Returns:
+        A DataFrame indexed by (phase, module_fqn) with kernel_ids, owner_stage_ids, kernel_count,
+        total_est_flops (the sum of the group's allocated estimates), one
+        <op>_est_flops column per ATen op with an allocated estimate, in name order
+        (aten::bmm's is bmm_est_flops), flop_source_ids, gpu_start_us, gpu_end_us,
+        gpu_span_us (end minus start, gaps included) and gpu_time_us (the sum of kernel durations).
+    """
+    import pandas as pd
+
+    allocated = flop_sources[flop_sources["status"].eq("allocated")]
+    columns = allocated["name"].str.removeprefix("aten::") + "_est_flops"
+    breakdown = sorted(set(columns))
+    group_flops, group_sources = {}, {}
+    for index, phase, fqn, column, amount in zip(allocated.index, allocated["phase"], allocated["module_fqn"],
+                                                 columns, allocated["contribution_flops"]):
+        group_flops.setdefault((phase, fqn), dict.fromkeys(breakdown, 0.0))[column] += amount
+        group_sources.setdefault((phase, fqn), []).append(index)
+
+    summaries = []
+    for key, members in kernels.groupby(["phase", "module_fqn"], sort=False, dropna=False):
+        start, end = members["gpu_start_us"].min(), members["gpu_end_us"].max()
+        flops = group_flops.get(key, dict.fromkeys(breakdown, 0.0))
+        summaries.append((*key, members.index.tolist(), members["owner_stage_id"].dropna().unique().tolist(),
+                          len(members), sum(flops.values(), 0.0), *flops.values(), group_sources.get(key, []),
+                          start, end, end - start, members["duration_us"].sum()))
+    return pd.DataFrame(summaries, columns=[
+        "phase", "module_fqn", "kernel_ids", "owner_stage_ids", "kernel_count", "total_est_flops", *breakdown,
+        "flop_source_ids", "gpu_start_us", "gpu_end_us", "gpu_span_us", "gpu_time_us",
+    ]).set_index(["phase", "module_fqn"]).sort_index(key=_phase_rank)
+
+
+def aggregate_kernels(rows, depth=None, *, root="model"):
+    """Returns the kernels of a linked event table grouped by phase and module, with the FLOPs of each group.
+
+        groups, kernels, unattributed_kernels, flop_sources = aggregate_kernels(rows, depth=3)
+        groups.loc[("forward", "model.embedding"), ["kernel_ids", "total_est_flops"]].tolist() -> [[14], 0.0]
+
+    Every kernel is in exactly one group and every reported FLOP estimate counts toward at most
+    one; docs/profiling/attribution.md shows how. Copies and memsets are not kernels here.
+
+    Args:
+        rows: The table from events_to_rows, which is not changed.
+        depth: How many FQN components a group keeps, root included: 1 groups everything under
+            model, 3 under model.tblocks.0; None keeps each kernel's full owner FQN.
+        root: The FQN module_scopes gave the model.
+
+    Returns:
+        (groups, kernels, unattributed_kernels, flop_sources):
+
+        - groups: one row per (phase, module_fqn) in phase execution order, with kernel_ids,
+          owner_stage_ids, kernel_count, total_est_flops and its <op>_est_flops
+          breakdown, flop_source_ids, gpu_start_us, gpu_end_us, gpu_span_us and gpu_time_us.
+        - kernels: the kernel rows, sorted by phase, module_fqn and gpu_start_us, with phase,
+          module_fqn, owner_fqn, owner_stage_id, gpu_start_us, gpu_end_us and duration_us.
+        - unattributed_kernels: the rows of kernels no module stage owns.
+        - flop_sources: one row per reported ATen estimate with kernels below it, indexed by its
+          row ID, with its status: allocated, suppressed or unallocated.
+    """
     if depth is not None and (isinstance(depth, bool) or not isinstance(depth, int) or depth < 1):
         raise ValueError("depth must be a positive integer or None")
     if not isinstance(root, str) or not root:
@@ -505,139 +743,14 @@ def aggregate_kernels(rows, depth=None, *, root="model"):
     if not rows.index.is_unique:
         raise ValueError("Event row indices must be unique")
 
-    # Read just the fields needed to build the forest and compute estimates.
-    columns = ["name", "device_type", "activity_type", "launcher_id", "time_range", "flops"]
-    events = {event.Index: event for event in rows.reindex(columns=columns).itertuples()}
-    parents = {index: int(event.launcher_id) if pd.notna(event.launcher_id) else None
-               for index, event in events.items()}
-    cpu_ids = {index for index, event in events.items() if str(event.device_type) == "DeviceType.CPU"}
-    children, order = _validate_launchers(parents, cpu_ids)
-    kernel_ids = [index for index, event in events.items() if event.activity_type == "kernel"]
-    kernel_set = set(kernel_ids)
-
-    # One top-down pass carries module ownership and the overriding FLOP source.
-    contexts, group_keys, reported, suppressed_by, active_source = {}, {}, {}, {}, {}
-    rooted, unrooted = {}, []
-    owner_groups = {None: "<unattributed>"}
-    for index in order:
-        event, parent = events[index], parents[index]
-        context = contexts.get(parent, ("unscoped", None, None))
-        if index in cpu_ids and (event.activity_type == "user_annotation"
-                                 or event.name.startswith("autograd::engine::evaluate_function:")):
-            context = _execution_context(event, context, root)
-        contexts[index] = context
-        rooted[index] = rooted.get(parent, False) or (
-            index in cpu_ids and event.activity_type == "user_annotation"
-            and event.name.partition("::")[2] == root)
-        if index in kernel_set:
-            phase, owner, _ = context
-            if owner is not None and not rooted[index]:
-                unrooted.append(index)
-            if owner not in owner_groups:
-                components = [root] + owner[len(root) + 1:].split(".") if owner != root else [root]
-                owner_groups[owner] = owner if depth is None else ".".join(components[:depth])
-            group_keys[index] = phase, owner_groups[owner]
-
-        ancestor = active_source.get(parent)
-        if (index in cpu_ids and event.name.startswith("aten::")
-                and pd.notna(event.flops) and event.flops > 0 and math.isfinite(event.flops)):
-            reported[index] = float(event.flops)
-            suppressed_by[index] = ancestor
-            if ancestor is None:
-                ancestor = index
-        active_source[index] = ancestor
-
-    if unrooted:
-        raise ValueError(f"Kernels owned by a module stage but not under the {root} stage: {unrooted}")
-
-    # A subtree needs just one group key or a mixed marker, not a set of kernels.
-    mixed = object()
-    destinations, kernel_counts, effective_flops = {}, {}, {}
-    for index in reversed(order):
-        destination = group_keys[index] if index in kernel_set else None
-        count = int(index in kernel_set)
-        child_flops = 0.0
-        for child in children[index]:
-            count += kernel_counts[child]
-            child_flops += effective_flops[child]
-            child_destination = destinations[child]
-            if child_destination is not None:
-                if destination is None:
-                    destination = child_destination
-                elif destination != child_destination:
-                    destination = mixed
-        destinations[index], kernel_counts[index] = destination, count
-        effective_flops[index] = reported.get(index, child_flops) if count else 0.0
-
-    # Only estimated ATen nodes need source records, not every event in the tree.
-    source_records, group_flops, group_sources = [], {}, {}
-    for index, amount in reported.items():
-        if not kernel_counts[index]:
-            continue
-        blocker = suppressed_by[index]
-        destination = destinations[index]
-        spans_groups = destination is mixed
-        if blocker is not None:
-            status = "suppressed"
-        else:
-            status = "unallocated" if spans_groups else "allocated"
-        phase, fqn = (None, None) if spans_groups else destination
-        contribution = amount if status == "allocated" else 0.0
-        source_records.append((index, events[index].name, amount, contribution,
-                               status, blocker, spans_groups, kernel_counts[index], phase, fqn))
-        if status == "allocated":
-            group_flops[destination] = group_flops.get(destination, 0.0) + amount
-            group_sources.setdefault(destination, []).append(index)
-
-    flop_sources = pd.DataFrame(source_records, columns=[
-        "aten_id", "name", "reported_flops", "contribution_flops", "status", "suppressed_by",
-        "spans_groups", "kernel_count", "phase", "module_fqn",
-    ]).set_index("aten_id")
-    flop_sources["suppressed_by"] = pd.array(flop_sources["suppressed_by"], dtype="Int64")
-    flop_sources["spans_groups"] = flop_sources["spans_groups"].astype(bool)
-
-    # Keep one detail row per original kernel, including its GPU interval.
-    kernels = rows.loc[kernel_ids].copy()
-    starts, ends = [], []
-    for index, interval in kernels["time_range"].items():
-        start, end = float(interval.start), float(interval.end)
-        if not math.isfinite(start) or not math.isfinite(end) or end < start:
-            raise ValueError(f"Invalid GPU interval for kernel {index}")
-        starts.append(start)
-        ends.append(end)
-    kernels["phase"] = [group_keys[index][0] for index in kernel_ids]
-    kernels["module_fqn"] = [group_keys[index][1] for index in kernel_ids]
-    kernels["owner_fqn"] = [contexts[index][1] for index in kernel_ids]
-    kernels["owner_stage_id"] = pd.array([contexts[index][2] for index in kernel_ids], dtype="Int64")
-    kernels["gpu_start_us"], kernels["gpu_end_us"] = starts, ends
-    kernels["duration_us"] = kernels["gpu_end_us"] - kernels["gpu_start_us"]
-
-    summaries = []
-    for key, members in kernels.groupby(["phase", "module_fqn"], sort=False, dropna=False):
-        start, end = members["gpu_start_us"].min(), members["gpu_end_us"].max()
-        summaries.append((*key, members.index.tolist(), members["owner_stage_id"].dropna().unique().tolist(),
-                          len(members), group_flops.get(key, 0.0), group_sources.get(key, []),
-                          start, end, end - start, members["duration_us"].sum()))
-    groups = pd.DataFrame(summaries, columns=[
-        "phase", "module_fqn", "kernel_ids", "owner_stage_ids", "kernel_count", "estimated_flops",
-        "flop_source_ids", "gpu_start_us", "gpu_end_us", "gpu_span_us", "gpu_time_us",
-    ]).set_index(["phase", "module_fqn"])
-
-    assigned = [index for members in groups["kernel_ids"] for index in members]
-    if len(assigned) != len(kernel_ids) or set(assigned) != set(kernel_ids):
-        raise ValueError("Kernel groups must partition all input kernels exactly once")
-
-    # Sort by phase in execution order, then module, then GPU start.
-    phase_rank = lambda level: level.map(PHASE_ORDER) if level.name == "phase" else level
-    groups = groups.sort_index(key=phase_rank)
-    kernels = kernels.sort_values(["phase", "module_fqn", "gpu_start_us"], key=phase_rank)
-    unattributed_kernels = kernels[kernels["module_fqn"].eq("<unattributed>")]
-
-    allocated = flop_sources["contribution_flops"].sum()
-    unallocated = flop_sources.loc[flop_sources["status"].eq("unallocated"), "reported_flops"].sum()
-    if not math.isclose(allocated + unallocated, sum(effective_flops[index] for index in order if parents[index] is None)):
-        raise ValueError("FLOP sources must conserve the bottom-up estimate")
-    return groups, kernels, unattributed_kernels, flop_sources
+    forest = _launch_forest(rows)
+    owners = _kernel_owners(forest, root)
+    group_keys = {index: (phase, _module_group(owner, depth, root)) for index, (phase, owner, _) in owners.items()}
+    flop_sources = _flop_sources(forest, group_keys)
+    kernels = _kernel_table(rows, owners, group_keys)
+    groups = _group_table(kernels, flop_sources)
+    kernels = kernels.sort_values(["phase", "module_fqn", "gpu_start_us"], key=_phase_rank)
+    return groups, kernels, kernels[kernels["module_fqn"].eq("<unattributed>")], flop_sources
 
 
 def allocations_by_label(memory_snapshot, device=0):
@@ -697,193 +810,315 @@ def memory_over_time(memory_snapshot):
 
 
 def dots_height(phase_count):
-    """Return the height in inches of the kernel duration dots under the kernel timeline: a lane per phase."""
+    """Returns the height in inches of the kernel duration dots under the kernel timeline: a lane per phase.
+
+    Args:
+        phase_count: The phases with kernels.
+
+    Returns:
+        The height in inches.
+    """
     return 0.8 * (0.5 + 0.3 * phase_count)
 
 
+def _kernel_panel_height(group_count):
+    """Returns the height in inches of the kernel timeline: a row per group.
+
+    Args:
+        group_count: The groups plotted.
+
+    Returns:
+        The height in inches.
+    """
+    return max(3, 0.3 * group_count + 1.2)
+
+
 def timeline_height(groups=None, memory=None, phases=None, peaks=None):
-    """Return the height in inches draw_timeline wants for these groups, memory, phases and peaks."""
+    """Returns the height in inches draw_timeline wants for these groups, memory, phases and peaks.
+
+    Args:
+        groups: The groups draw_timeline plots, or None.
+        memory: The memory over time, or None.
+        phases: The phase spans, or None.
+        peaks: The peak memory, or None.
+
+    Returns:
+        The height in inches; 0 when there is nothing to draw.
+    """
     has_kernels = groups is not None and not groups.empty
-    kernels_height = (max(3, 0.3 * len(groups) + 1.2)
+    kernels_height = (_kernel_panel_height(len(groups))
                       + dots_height(groups.index.get_level_values("phase").nunique())) if has_kernels else 0
     height = kernels_height + 3 * (memory is not None or peaks is not None)
     return height or 1.5 * (phases is not None)  # phases alone get a strip of their own
 
 
+def _phase_colors(phases, seed):
+    """Returns a color for each phase: unscoped gray, the others from a palette in a shuffled order.
+
+    Args:
+        phases: The phase names drawn, repeats allowed.
+        seed: Seeds the shuffle, so the same phases get the same colors.
+
+    Returns:
+        Maps each phase, and unscoped, to a color.
+    """
+    shuffled = ["#15803d", "#c75a0a", "#1d4ed8", "#7c3aed", "#0f766e", "#b91c1c", "#be185d", "#a16207"]
+    random.Random(seed).shuffle(shuffled)
+    colors = {phase: shuffled[i % len(shuffled)]
+              for i, phase in enumerate(sorted(phase for phase in set(phases) if phase != "unscoped"))}
+    colors["unscoped"] = "#6b7280"
+    return colors
+
+
+def _plotted_groups(groups, kernels):
+    """Returns the groups in plot order, earliest GPU start first, and the kernels they plot.
+
+    It raises ValueError for a repeated group or kernel index, or a kernel in two groups.
+
+    Args:
+        groups: The groups to plot.
+        kernels: The kernel table their kernel_ids index.
+
+    Returns:
+        (selected, plotted): the groups sorted by gpu_start_us, and the rows of their kernels.
+    """
+    if not groups.index.is_unique or not kernels.index.is_unique:
+        raise ValueError("Group and kernel indices must be unique")
+    selected = groups.sort_values("gpu_start_us", kind="stable")
+    kernel_ids = [index for ids in selected["kernel_ids"] for index in ids]
+    if len(kernel_ids) != len(set(kernel_ids)):
+        raise ValueError("A kernel cannot appear in more than one plotted group")
+    return selected, kernels.loc[kernel_ids]
+
+
+def _time_extent(selected, memory, phases):
+    """Returns the earliest and latest time drawn, infinite when nothing drawn has a time.
+
+    Args:
+        selected: The plotted groups, or None.
+        memory: The memory over time, or None.
+        phases: The phase spans, or None.
+
+    Returns:
+        (left, right) in us.
+    """
+    left, right = math.inf, -math.inf
+    if selected is not None:
+        left, right = selected["gpu_start_us"].min(), selected["gpu_end_us"].max()
+    if memory is not None:
+        left, right = min(left, memory.index.min()), max(right, memory.index.max())
+    if phases is not None:
+        for phase in phases.itertuples():
+            left, right = min(left, phase.start_us), max(right, phase.end_us)
+    return left, right
+
+
+def _heading(title, info):
+    """Returns title with the info lines joined on one line under it.
+
+    Args:
+        title: The panel's title.
+        info: Text lines, or none.
+
+    Returns:
+        The heading text.
+    """
+    return "\n".join([title, " | ".join(info)] if info else [title])
+
+
+def _draw_kernel_rows(ax, selected, kernels, kernel_phases, colors, heading):
+    """Draws a row per group into ax: its GPU span in gray and every one of its kernels in its phase's color.
+
+    Rectangles are batched per group, one collection each, without merging any kernels.
+
+    Args:
+        ax: The kernel timeline's axes.
+        selected: The groups, in plot order.
+        kernels: The kernel table their kernel_ids index.
+        kernel_phases: The phases with kernels, in plot order, for the legend.
+        colors: Maps each phase to its color.
+        heading: The panel's title, or None when the memory panel above holds it.
+    """
+    from matplotlib.patches import Patch
+
+    background, labels = "#d1d5db", []
+    for y, ((phase, module_fqn), group) in enumerate(selected.iterrows()):
+        launches = kernels.loc[group["kernel_ids"]]
+        labels.append(f"{phase}::{module_fqn}")
+        ax.barh(y, group["gpu_end_us"] - group["gpu_start_us"], left=group["gpu_start_us"], height=0.8,
+                color=background, linewidth=0, zorder=1)
+        intervals = list(zip(launches["gpu_start_us"], launches["duration_us"]))
+        bars = ax.broken_barh(intervals, (y - 0.32, 0.64), facecolors=colors[phase], edgecolors=colors[phase],
+                              linewidth=0.6, zorder=3)
+        bars.set_gid(f"kernels:{phase}::{module_fqn}")
+    ax.set_yticks(range(len(selected)), labels=labels, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel("Time (us)")
+    if heading is not None:
+        ax.set_title(heading)
+    ax.grid(axis="x", alpha=0.2)
+    ax.set_axisbelow(True)
+    handles = [Patch(color=colors[phase], label=f"{phase.replace('_', ' ').capitalize()} GPU")
+               for phase in kernel_phases]
+    handles.append(Patch(color=background, label="Group GPU span"))
+    ax.legend(handles=handles, loc="upper right", fontsize=8, borderpad=0.4, labelspacing=0.3, framealpha=0.9)
+    ax.margins(y=0.02)
+
+
+def _draw_flops(flop_ax, selected, colors):
+    """Draws each group's estimated FLOPs as a bar in its phase's color, beside its kernel row.
+
+    Args:
+        flop_ax: The FLOPs panel's axes, sharing the kernel timeline's rows.
+        selected: The groups, in plot order.
+        colors: Maps each phase to its color.
+    """
+    from matplotlib.ticker import EngFormatter
+
+    estimates = selected["total_est_flops"].to_numpy(dtype=float)
+    phase_colors = [colors[phase] for phase in selected.index.get_level_values("phase")]
+    flop_bars = flop_ax.barh(range(len(selected)), estimates, height=0.64, color=phase_colors, linewidth=0, zorder=3)
+    formatter = EngFormatter(places=1, sep="")
+    flop_ax.bar_label(flop_bars, labels=[formatter(value) for value in estimates], padding=3, fontsize=8)
+    flop_ax.set_xlim(0, max(float(estimates.max()) * 1.35, 1))
+    flop_ax.xaxis.set_major_formatter(EngFormatter(sep=""))
+    flop_ax.locator_params(axis="x", nbins=3)
+    flop_ax.tick_params(axis="y", left=False, labelleft=False)
+    flop_ax.set_xlabel("Estimated FLOPs per stage\n0 = no allocated estimate", fontsize=8)  # a title would widen the gap above
+    flop_ax.grid(axis="x", alpha=0.2)
+    flop_ax.set_axisbelow(True)
+
+
+def _draw_durations(dots_ax, plotted, kernel_phases, colors):
+    """Draws a lane per phase with every kernel's duration as a dot on a log axis, a black tick at the median.
+
+    Args:
+        dots_ax: The duration panel's axes.
+        plotted: The rows of the plotted kernels.
+        kernel_phases: The phases with kernels, in plot order, one lane each.
+        colors: Maps each phase to its color.
+    """
+    jitter = np.random.default_rng(0)  # only spreads the dots vertically within a lane
+    for lane, phase in enumerate(kernel_phases):
+        durations = plotted.loc[plotted["phase"] == phase, "duration_us"]
+        dots_ax.scatter(durations, lane + jitter.uniform(-0.3, 0.3, len(durations)), s=8, alpha=0.5,
+                        color=colors[phase], linewidths=0)
+        dots_ax.vlines(durations.median(), lane - 0.4, lane + 0.4, color="k", linewidth=1.5)  # the median
+    dots_ax.set_yticks(range(len(kernel_phases)),
+                       [f"{phase} (n={(plotted['phase'] == phase).sum()})" for phase in kernel_phases], fontsize=7)
+    dots_ax.invert_yaxis()
+    dots_ax.set_xscale("log")
+    dots_ax.set_xlabel("kernel duration (us), black tick = median", fontsize=8)
+    dots_ax.tick_params(axis="x", labelsize=7)
+    dots_ax.grid(axis="x", alpha=0.2)
+
+
+def _draw_memory(memory_ax, memory, peaks, memory_baseline, total_memory, persistent_memory, estimated_total_memory):
+    """Draws allocated and reserved memory over time in MiB, with the lines for its peaks and totals.
+
+    Args:
+        memory_ax: The memory panel's axes.
+        memory: allocated and reserved bytes indexed by time, or None.
+        peaks: The peak allocated and reserved bytes, or None.
+        memory_baseline: The allocated and reserved bytes before the model was built, or None.
+        total_memory: The GPU's bytes, or None.
+        persistent_memory: The bytes of weights, gradients and optimizer state, or None.
+        estimated_total_memory: The estimated persistent plus activation bytes, or None.
+    """
+    highest = []
+    for index, name in enumerate(["allocated", "reserved"]):
+        color = f"C{index}"
+        if memory is not None:
+            memory_ax.step(memory.index, memory[name] / 2**20, where="post", color=color, label=name)
+            highest.append(memory[name].max())
+        if peaks is not None:
+            memory_ax.axhline(peaks[name] / 2**20, color=color, linestyle=":",
+                              label=f"peak {name} ({peaks[name] / 2**20:.1f} MiB)")
+            highest.append(peaks[name])
+        if memory_baseline is not None:
+            memory_ax.axhline(memory_baseline[name] / 2**20, color=color, alpha=0.5,
+                              label=f"{name} before model ({memory_baseline[name] / 2**20:.1f} MiB)")
+    memory_ax.set_ylim(0, 1.1 * max(highest) / 2**20)  # a larger total is clipped, not rescaled
+    if total_memory is not None:
+        memory_ax.axhline(total_memory / 2**20, color="k", linestyle="--",
+                          label=f"total VRAM ({total_memory / 2**30:.1f} GiB)")
+    if persistent_memory is not None:
+        memory_ax.axhline(persistent_memory / 2**20, color="grey", linestyle="--", alpha=0.5,
+                          label=f"persistent ({persistent_memory / 2**20:.1f} MiB)")
+    if estimated_total_memory is not None:
+        memory_ax.axhline(estimated_total_memory / 2**20, color="C2", linestyle="--", alpha=0.6,
+                          label=f"total, est. ({estimated_total_memory / 2**20:.1f} MiB)")
+    memory_ax.set_ylabel("MiB")
+    memory_ax.grid(axis="x", alpha=0.2)
+
+
+def _shade_phases(panels, phases, colors):
+    """Shades each phase's span behind every panel in its color, labelled at the top of the first.
+
+    Args:
+        panels: The axes to shade, the top one first.
+        phases: The phase spans: name, start_us and end_us.
+        colors: Maps each phase to its color.
+    """
+    for phase in phases.itertuples():
+        for panel in panels:
+            panel.axvspan(phase.start_us, phase.end_us, color=colors[phase.name], alpha=0.1, linewidth=0, zorder=0)
+        panels[0].text((phase.start_us + phase.end_us) / 2, 0.98, phase.name, transform=panels[0].get_xaxis_transform(),
+                       ha="center", va="top", fontsize=7, color=colors[phase.name])
+
+
 def draw_timeline(
     fig, area, groups=None, kernels=None, title="Training step", *,
     color_seed=0, show_flops=True, memory=None, total_memory=None,
-    memory_baseline=None, persistent_memory=None, phases=None, peaks=None, info=(),
+    memory_baseline=None, persistent_memory=None, estimated_total_memory=None, phases=None, peaks=None, info=(),
 ):
-    """Draw group GPU spans, one bar per original kernel event, and memory above them, into area of fig.
+    """Draws a step's panels into area of fig: memory on top, then a row per kernel group with its FLOPs, then kernel durations.
 
-    area is a SubplotSpec of a figure with constrained layout, which spaces the panels and their
-    labels; size it with timeline_height. title goes on the top panel. Every time
-    (kernels' gpu_start_us and gpu_end_us, memory's index, phases) is us from one shared t = 0, so
-    the panels line up; step_report puts a captured step's data on one.
+    Each panel is drawn only when its data is there; phases alone get a strip of their own. Every
+    time is us from one shared t = 0, so the panels line up, and the view spans everything drawn,
+    padded by 5% on each side. Color depends only on phase. Details stay in pandas:
+    kernels.loc[groups.loc[key, "kernel_ids"]].
 
-    Each panel is drawn only when its data is there: without groups (or with none selected) there
-    is no kernel timeline and no FLOPs panel, and without memory there is no memory panel. With
-    neither, the phases get a strip of their own.
-
-    Rows are ordered by earliest GPU start. Gray backgrounds show each group's
-    enclosing interval; colored rectangles show exact individual kernel intervals.
-    Rectangles are batched by stage for faster rendering without merging events.
-    Color depends only on phase, including for module-unattributed kernels.
-    Unscoped is gray and appears in the legend only when present. Other phases
-    draw from a shuffled palette; color_seed makes the assignment reproducible.
-
-    show_flops adds a right-hand panel with one estimated_flops bar per stage,
-    using exactly the same groups, depth, row order and phase colors. These are
-    allocated estimates from aggregate_kernels, never a sum of per-kernel FLOPs.
-    A zero means no allocated estimate, not necessarily zero computation.
-    Stage labels contain only phase and module FQN. Rounded values in the
-    right-hand panel are for display; groups.estimated_flops holds exact totals.
-
-    memory adds a top panel with one step line per column (allocated, reserved) in MiB, sharing the
-    time axis. peaks ({"allocated", "reserved"} bytes) draws each as a dotted line in that panel, which
-    then appears even without memory. total_memory, in bytes, adds a dashed line.
-    memory_baseline maps a memory column to its bytes before the model was built, drawn as a faded line
-    in that column's color. persistent_memory, in bytes, adds a dashed grey line for the memory that stays
-    allocated through the step (weights, gradients and optimizer state).
-
-    phases shades each phase of the step (zero_grad, forward, ...) behind every panel, in its phase's
-    color and labelled at the top. It is a DataFrame of name, start_us and end_us.
-
-    With kernels, a thin panel under the kernel timeline has a lane per phase with every kernel's
-    duration as a dot on a log axis, in the phase colors of the kernel legend and a black tick at the
-    lane's median. info is a list of text lines shown just below the legend of the top panel; without
-    a memory panel they join the title.
-
-    Details remain in pandas: kernels.loc[groups.loc[key, "kernel_ids"]].
-    Filter groups to plot a subset; each selected kernel is drawn at most once.
+    Args:
+        fig: A figure with constrained layout, which spaces the panels and their labels.
+        area: The SubplotSpec of fig to draw into; size it with timeline_height.
+        groups: The groups from aggregate_kernels, or a subset of them; each kernel is drawn once.
+        kernels: The kernel table their kernel_ids index.
+        title: The top panel's title.
+        color_seed: Seeds the order phases take their colors in.
+        show_flops: Adds the panel of each group's total_est_flops beside its row.
+        memory: allocated and reserved bytes indexed by time, drawn as steps in MiB.
+        total_memory: The GPU's bytes, a dashed line.
+        memory_baseline: The allocated and reserved bytes before the model was built, faded lines.
+        persistent_memory: The bytes of weights, gradients and optimizer state, a dashed grey line.
+        estimated_total_memory: The estimated persistent plus activation bytes, a dashed line.
+        phases: The phase spans (name, start_us, end_us), shaded behind every panel.
+        peaks: The peak allocated and reserved bytes, dotted lines; they draw the memory panel alone.
+        info: Text lines under the memory panel's legend, or in the title without one.
     """
-    from matplotlib.patches import Patch
-    from matplotlib.ticker import EngFormatter
-
     has_kernels = groups is not None and not groups.empty
     if not has_kernels and memory is None and phases is None and peaks is None:
         return
     show_flops = show_flops and has_kernels
-    height = 0
-    if has_kernels:
-        if not groups.index.is_unique or not kernels.index.is_unique:
-            raise ValueError("Group and kernel indices must be unique")
-        selected = groups.sort_values("gpu_start_us", kind="stable")
-        kernel_ids = [index for ids in selected["kernel_ids"] for index in ids]
-        if len(kernel_ids) != len(set(kernel_ids)):
-            raise ValueError("A kernel cannot appear in more than one plotted group")
-        height = max(3, 0.3 * len(selected) + 1.2)  # the kernel panel; the dots panel is dots_height
-
-    palette = {"green": "#15803d", "orange": "#c75a0a", "blue": "#1d4ed8",
-               "purple": "#7c3aed", "teal": "#0f766e", "red": "#b91c1c",
-               "pink": "#be185d", "gold": "#a16207"}
+    selected, plotted = _plotted_groups(groups, kernels) if has_kernels else (None, None)
     kernel_phases = list(dict.fromkeys(selected.index.get_level_values("phase"))) if has_kernels else []
-    named = dict.fromkeys(kernel_phases + (list(phases["name"]) if phases is not None else []))
-    shuffled = list(palette.values())
-    random.Random(color_seed).shuffle(shuffled)
-    colors = {phase: shuffled[i % len(shuffled)]
-              for i, phase in enumerate(sorted(phase for phase in named if phase != "unscoped"))}
-    colors["unscoped"] = "#6b7280"
+    colors = _phase_colors(kernel_phases + (list(phases["name"]) if phases is not None else []), color_seed)
 
     top = int(memory is not None or peaks is not None)  # the memory panel
     rows = max(top + 2 * has_kernels, 1)  # memory, kernels, kernel duration dots: one grid, so their edges align
-    ratios = [3] * top + [height, dots_height(len(kernel_phases))] * has_kernels
+    ratios = [3] * top + ([_kernel_panel_height(len(selected)), dots_height(len(kernel_phases))] if has_kernels else [])
     grid = area.subgridspec(rows, 2 if show_flops else 1, width_ratios=[4, 1.15] if show_flops else None,
                             height_ratios=ratios if rows > 1 else None)
-    left, right = math.inf, -math.inf  # the view spans the earliest to the latest time drawn
+    ax = None
     if has_kernels:
-        background = "#d1d5db"
-        labels = []
-        formatter = EngFormatter(places=1, sep="")
-
         ax = fig.add_subplot(grid[top, 0])
         if show_flops:
-            flop_ax = fig.add_subplot(grid[top, 1], sharey=ax)
-        for y, ((phase, module_fqn), group) in enumerate(selected.iterrows()):
-            launches = kernels.loc[group["kernel_ids"]]
-            labels.append(f"{phase}::{module_fqn}")
-            ax.barh(y, group["gpu_end_us"] - group["gpu_start_us"],
-                    left=group["gpu_start_us"], height=0.8,
-                    color=background, linewidth=0, zorder=1)
-            # One collection per stage; each kernel still has its own exact
-            # rectangle. This avoids hundreds of separate Matplotlib artists.
-            intervals = list(zip(launches["gpu_start_us"], launches["duration_us"]))
-            bars = ax.broken_barh(intervals, (y - 0.32, 0.64),
-                                 facecolors=colors[phase], edgecolors=colors[phase],
-                                 linewidth=0.6, zorder=3)
-            bars.set_gid(f"kernels:{phase}::{module_fqn}")
-
-        if show_flops:
-            estimates = selected["estimated_flops"].to_numpy(dtype=float)
-            phase_colors = [colors[phase] for phase in selected.index.get_level_values("phase")]
-            flop_bars = flop_ax.barh(range(len(selected)), estimates, height=0.64,
-                                     color=phase_colors, linewidth=0, zorder=3)
-            flop_ax.bar_label(flop_bars, labels=[formatter(value) for value in estimates],
-                              padding=3, fontsize=8)
-            flop_ax.set_xlim(0, max(float(estimates.max()) * 1.35, 1))
-            flop_ax.xaxis.set_major_formatter(EngFormatter(sep=""))
-            flop_ax.locator_params(axis="x", nbins=3)
-            flop_ax.tick_params(axis="y", left=False, labelleft=False)
-            flop_ax.set_xlabel("Estimated FLOPs per stage\n0 = no allocated estimate", fontsize=8)  # a title would widen the gap above
-            flop_ax.grid(axis="x", alpha=0.2)
-            flop_ax.set_axisbelow(True)
-
-        ax.set_yticks(range(len(selected)), labels=labels, fontsize=8)
-        ax.invert_yaxis()
-        ax.set_xlabel("Time (us)")
-        if not top:
-            ax.set_title("\n".join([title, " | ".join(info)] if info else [title]))
-        ax.grid(axis="x", alpha=0.2)
-        ax.set_axisbelow(True)
-        handles = [Patch(color=colors[phase], label=f"{phase.replace('_', ' ').capitalize()} GPU")
-                   for phase in kernel_phases]
-        handles.append(Patch(color=background, label="Group GPU span"))
-        ax.legend(handles=handles, loc="upper right", fontsize=8,
-                  borderpad=0.4, labelspacing=0.3, framealpha=0.9)
-        ax.margins(y=0.02)
-        left, right = selected["gpu_start_us"].min(), selected["gpu_end_us"].max()
-
-        plotted = kernels.loc[kernel_ids]
-        dots_ax = fig.add_subplot(grid[top + 1, 0])
-        jitter = np.random.default_rng(0)  # only spreads the dots vertically within a lane
-        for lane, phase in enumerate(kernel_phases):
-            durations = plotted.loc[plotted["phase"] == phase, "duration_us"]
-            dots_ax.scatter(durations, lane + jitter.uniform(-0.3, 0.3, len(durations)), s=8, alpha=0.5,
-                            color=colors[phase], linewidths=0)
-            dots_ax.vlines(durations.median(), lane - 0.4, lane + 0.4, color="k", linewidth=1.5)  # the median
-        dots_ax.set_yticks(range(len(kernel_phases)),
-                           [f"{phase} (n={(plotted['phase'] == phase).sum()})" for phase in kernel_phases], fontsize=7)
-        dots_ax.invert_yaxis()
-        dots_ax.set_xscale("log")
-        dots_ax.set_xlabel("kernel duration (us), black tick = median", fontsize=8)
-        dots_ax.tick_params(axis="x", labelsize=7)
-        dots_ax.grid(axis="x", alpha=0.2)
+            _draw_flops(fig.add_subplot(grid[top, 1], sharey=ax), selected, colors)
+        _draw_kernel_rows(ax, selected, kernels, kernel_phases, colors, None if top else _heading(title, info))
+        _draw_durations(fig.add_subplot(grid[top + 1, 0]), plotted, kernel_phases, colors)
     if top:
-        memory_ax = fig.add_subplot(grid[0, 0], sharex=ax if has_kernels else None)
-        highest = []
-        for index, name in enumerate(["allocated", "reserved"]):
-            color = f"C{index}"
-            if memory is not None:
-                memory_ax.step(memory.index, memory[name] / 2**20, where="post", color=color, label=name)
-                highest.append(memory[name].max())
-            if peaks is not None:
-                memory_ax.axhline(peaks[name] / 2**20, color=color, linestyle=":",
-                                  label=f"peak {name} ({peaks[name] / 2**20:.1f} MiB)")
-                highest.append(peaks[name])
-            if memory_baseline is not None:
-                memory_ax.axhline(memory_baseline[name] / 2**20, color=color, alpha=0.5,
-                                  label=f"{name} before model ({memory_baseline[name] / 2**20:.1f} MiB)")
-        if memory is not None:
-            left, right = min(left, memory.index.min()), max(right, memory.index.max())
-        memory_ax.set_ylim(0, 1.1 * max(highest) / 2**20)  # a larger total is clipped, not rescaled
-        if total_memory is not None:
-            memory_ax.axhline(total_memory / 2**20, color="k", linestyle="--",
-                              label=f"total VRAM ({total_memory / 2**30:.1f} GiB)")
-        if persistent_memory is not None:
-            memory_ax.axhline(persistent_memory / 2**20, color="grey", linestyle="--", alpha=0.5,
-                              label=f"persistent ({persistent_memory / 2**20:.1f} MiB)")
-        memory_ax.set_ylabel("MiB")
+        memory_ax = fig.add_subplot(grid[0, 0], sharex=ax)
+        _draw_memory(memory_ax, memory, peaks, memory_baseline, total_memory, persistent_memory, estimated_total_memory)
         memory_ax.set_title(title)
         # The legend sits to the right of the memory panel, above the FLOPs panel when there is one.
         if show_flops:
@@ -897,7 +1132,6 @@ def draw_timeline(
         if info:  # just below the legend, wherever the layout puts it
             note_ax.annotate("\n".join(info), xy=(0, 0), xycoords=legend, xytext=(0, -6), textcoords="offset points",
                              va="top", ha="left", fontsize=8, annotation_clip=False)
-        memory_ax.grid(axis="x", alpha=0.2)
         if has_kernels:
             memory_ax.tick_params(axis="x", labelbottom=False)
         else:
@@ -905,90 +1139,13 @@ def draw_timeline(
     panels = ([memory_ax] if top else []) + ([ax] if has_kernels else [])
     if not panels:  # phases alone: a strip with just their bands
         strip = fig.add_subplot(grid[0, 0])
-        strip.set_title("\n".join([title, " | ".join(info)] if info else [title]))
+        strip.set_title(_heading(title, info))
         strip.set_yticks([])
         strip.set_xlabel("Time (us)")
         panels = [strip]
     if phases is not None:
-        for phase in phases.itertuples():
-            left, right = min(left, phase.start_us), max(right, phase.end_us)
-            for panel in panels:
-                panel.axvspan(phase.start_us, phase.end_us, color=colors[phase.name], alpha=0.1, linewidth=0, zorder=0)
-            panels[0].text((phase.start_us + phase.end_us) / 2, 0.98, phase.name, transform=panels[0].get_xaxis_transform(),
-                           ha="center", va="top", fontsize=7, color=colors[phase.name])
+        _shade_phases(panels, phases, colors)
+    left, right = _time_extent(selected, memory, phases)
     if math.isfinite(left):  # peaks alone have no times
-        # Pad the view by 5% of the plotted time on each side; the data is untouched.
-        pad = 0.05 * (right - left)
+        pad = 0.05 * (right - left)  # the view, not the data
         panels[-1].set_xlim(left - pad, right + pad)
-
-
-def _timeline_arguments(step):
-    """Return draw_timeline's keyword arguments for one step of a step_report report."""
-    import pandas as pd
-
-    arguments = {}
-    if "kernels" in step:
-        clock = {"start_us": "gpu_start_us", "end_us": "gpu_end_us"}
-        arguments["kernels"] = pd.DataFrame(step["kernels"]).set_index("id").rename(columns=clock)
-        arguments["groups"] = pd.DataFrame(step["groups"]).rename(columns=clock).set_index(["phase", "module"])
-    memory = step.get("memory", {})
-    if "series" in memory:
-        arguments["memory"] = pd.DataFrame(memory["series"]).set_index("time_us")
-    if "peak_allocated_bytes" in memory:
-        arguments["peaks"] = {"allocated": memory["peak_allocated_bytes"], "reserved": memory["peak_reserved_bytes"]}
-    if "phases" in step:
-        arguments["phases"] = pd.DataFrame(step["phases"])[["name", "start_us", "end_us"]]
-    return arguments
-
-
-def _with_prefix(value, unit):
-    """Return value in a unit with an SI prefix that keeps it readable: 228.8 GFLOPs, 7.6 TFLOPs/s."""
-    for exponent, prefix in ((15, "P"), (12, "T"), (9, "G"), (6, "M"), (3, "K")):
-        if abs(value) >= 10**exponent:
-            return f"{value / 10**exponent:,.1f} {prefix}{unit}"
-    return f"{value:,.1f} {unit}"
-
-
-def display_steps(report, steps=None):
-    """Display each step of a step_report report as a timeline, stacked top to bottom in one figure.
-
-    report is step_report.build_report's result and steps picks step numbers (all by default).
-    A step's panels appear only if its block is in the report: kernels, memory (the curves with a
-    trace, the peak lines with peak) and the shaded phases. Persistent memory and total VRAM are
-    drawn wherever the memory panel is. Under each step's legend: the GPU, the step's wall time, its
-    FLOP count (FLOPs), the achieved rate (FLOPs/s), the GPU's dense peak rate for the precision profile
-    ran in and the MFU. Every FLOP figure is an algorithmic estimate from op shapes, and a footnote
-    says so; report["run"]["sources"] has the details. All times are on the step's own clock, from
-    the earliest time its blocks recorded, in the report.
-    """
-    import matplotlib.pyplot as plt
-
-    run = report["run"]
-    gpu, peak = run["gpu"], run["peak"]
-    timelines, infos = {}, {}
-    for step in map(str, steps if steps is not None else report["steps"]):
-        readings, mfu = report["steps"][step], report["steps"][step]["mfu"]
-        timelines[step] = _timeline_arguments(readings)
-        infos[step] = [f"GPU: {gpu['name']} [{gpu['spec_row']}]",
-                       f"step time: {mfu['step_ms']:.1f} ms",
-                       f"step: {_with_prefix(mfu['step_flops'], 'FLOPs')} (est.)",
-                       f"achieved: {_with_prefix(mfu['achieved_flops_per_s'], 'FLOPs/s')} (est.)",
-                       "peak: n/a" if peak["flops_per_s"] is None
-                       else f"peak: {_with_prefix(peak['flops_per_s'], 'FLOPs/s')} {peak['dtype']}",
-                       "MFU: n/a" if mfu["mfu"] is None else f"MFU: {mfu['mfu']:.1%} (est.)"]
-    heights = {step: timeline_height(timeline.get("groups"), timeline.get("memory"), timeline.get("phases"),
-                                     timeline.get("peaks")) for step, timeline in timelines.items()}
-    timelines = {step: timeline for step, timeline in timelines.items() if heights[step]}  # nothing recorded, no plot
-    if not timelines:
-        return
-    heights = [heights[step] for step in timelines]
-    # ioff prevents ipympl from displaying once on creation and again on show().
-    with plt.ioff():
-        fig = plt.figure(figsize=(12, sum(heights)), layout="constrained")
-        fig.get_layout_engine().set(w_pad=0.03, h_pad=0.03, wspace=0.02, hspace=0.02)  # tight, in inches and fractions
-        for area, (step, timeline) in zip(fig.add_gridspec(len(heights), 1, height_ratios=heights), timelines.items()):
-            draw_timeline(fig, area, title=f"step {step}", total_memory=run["gpu"]["vram_bytes"],
-                          persistent_memory=run["persistent_memory_bytes"], info=infos[step], **timeline)
-        fig.supxlabel("(est.): algorithmic estimates from shapes (the model's step_flops, the profiler's per-op "
-                      "formulas), not hardware counters. Peak: vendor datasheet, dense.", fontsize=7, color="0.4")
-    plt.show()

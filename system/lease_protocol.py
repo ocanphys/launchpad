@@ -26,7 +26,8 @@ call_history = modal.Dict.from_name(f"{APP_NAME}-call-history", create_if_missin
 # state map when it finds one. A call's or a declaration's message is
 # `{"artifact_path", "call_id", "event"}`, where event is "started", "done",
 # "failed", "lease lost" or "declared" (call id `launcher`); an experiment's
-# is `{"experiment_uid", "artifact_paths", "event": "experiment created"}`.
+# is `{"experiment_uid", "artifact_paths", "event"}`, where event is
+# "experiment created" or "experiment extended".
 # Either is what to say in the launcher's log, not something the map is
 # computed from -- that is read off the volume, as ever.
 refreshes = modal.Queue.from_name(f"{APP_NAME}-refreshes", create_if_missing=True)

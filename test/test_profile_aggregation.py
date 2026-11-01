@@ -1,6 +1,4 @@
 """Partition and FLOP accounting tests for the notebook aggregator."""
-from types import SimpleNamespace
-
 import pandas as pd
 import pytest
 
@@ -17,7 +15,7 @@ def event(index, name, parent=None, flops=0, kind="cpu_op"):
     return {"index": index, "name": name, "launcher_id": parent, "flops": flops,
             "activity_type": kind,
             "device_type": "DeviceType.CUDA" if kind in {"kernel", "gpu_memcpy"} else "DeviceType.CPU",
-            "time_range": SimpleNamespace(start=float(index), end=float(index + 2))}
+            "start_us": float(index), "end_us": float(index + 2)}
 
 
 def stage(index, name, parent=None):
@@ -60,14 +58,14 @@ def test_partition_and_flops_are_conserved_at_every_depth(rows, depth):
     assert len(memberships) == len(set(memberships)) == len(expected)
     assert set(memberships) == set(expected)
     assert groups.kernel_count.sum() == len(expected)
-    assert groups.estimated_flops.sum() == 212
+    assert groups.total_est_flops.sum() == 212
     assert sources.loc[4, "status"] == "suppressed"
     assert sources.loc[4, "suppressed_by"] == 3
     assert sources.loc[3, "kernel_count"] == 2
     assert sources.loc[3, "contribution_flops"] == 100
     assert 63 not in sources.index  # No descendant kernels.
     assert not sources.spans_groups.any()
-    assert sources.contribution_flops.sum() == groups.estimated_flops.sum()
+    assert sources.contribution_flops.sum() == groups.total_est_flops.sum()
     assert kernels.loc[17, "phase"] == "unscoped"
     assert kernels.loc[16, "phase"] == "loss"
     assert kernels.loc[16, "module_fqn"] == "<unattributed>"
@@ -77,7 +75,10 @@ def test_partition_and_flops_are_conserved_at_every_depth(rows, depth):
         assert group.gpu_end_us == members.gpu_end_us.max()
         assert group.gpu_span_us == group.gpu_end_us - group.gpu_start_us
         assert group.gpu_time_us == members.duration_us.sum()
-        assert group.estimated_flops == sources.loc[group.flop_source_ids, "contribution_flops"].sum()
+        assert group.total_est_flops == sources.loc[group.flop_source_ids, "contribution_flops"].sum()
+    breakdown = ["child_est_flops", "direct_est_flops", "loss_est_flops", "mm_est_flops"]
+    assert groups.columns[groups.columns.str.endswith("_est_flops")].tolist() == ["total_est_flops", *breakdown]
+    assert groups[breakdown].sum(axis=1).tolist() == groups.total_est_flops.tolist()
     pd.testing.assert_frame_equal(rows, original)
 
 
@@ -86,7 +87,9 @@ def test_direct_work_stays_exclusive_and_repeated_stages_merge(rows):
     assert groups.loc[("forward", "model"), "kernel_ids"] == [15]
     assert groups.loc[("forward", "model.left"), "kernel_ids"] == [10, 11, 12, 13, 18]
     assert groups.loc[("forward", "model.left"), "owner_stage_ids"] == [2, 61]
-    assert groups.loc[("forward", "model.left"), "estimated_flops"] == 177
+    assert groups.loc[("forward", "model.left"), "total_est_flops"] == 177
+    assert groups.loc[("forward", "model.left"), ["mm_est_flops", "child_est_flops"]].tolist() == [107, 70]
+    assert groups.loc[("forward", "model.right"), ["mm_est_flops", "child_est_flops"]].tolist() == [20, 0]
     assert kernels.loc[18, "owner_stage_id"] == 61
     assert kernels.loc[18, "owner_fqn"] == "model.left"
     assert (kernels.gpu_end_us - kernels.gpu_start_us).eq(2).all()
@@ -103,10 +106,10 @@ def test_spanning_aten_is_diagnosed_and_not_split_or_duplicated():
     assert sources.loc[1, "status"] == "unallocated"
     assert sources.loc[[3, 6], "status"].eq("suppressed").all()
     assert sources.loc[[3, 6], "suppressed_by"].eq(1).all()
-    assert groups.estimated_flops.sum() == 0
+    assert groups.total_est_flops.sum() == 0
     assert kernels.index.tolist() == [4, 7]
     coarse, coarse_kernels, _, coarse_sources = aggregate_kernels(rows, depth=1)
-    assert coarse.estimated_flops.sum() == 300
+    assert coarse.total_est_flops.sum() == 300
     assert coarse_sources.loc[1, "status"] == "allocated"
     assert not coarse_sources.spans_groups.any()
     assert coarse_kernels.index.equals(kernels.index)
@@ -128,7 +131,7 @@ def test_phase_fallbacks_virtual_prefixes_and_unknown_flops():
     assert kernels.loc[12, "module_fqn"] == "<unattributed>"
     assert kernels.loc[21, "phase"] == "optimizer_step"
     assert kernels.loc[32, "phase"] == "backward"
-    assert groups.estimated_flops.sum() == 400
+    assert groups.total_est_flops.sum() == 400
     assert set(sources.index) == {4, 11, 31}
 
 
@@ -163,7 +166,7 @@ def test_empty_input_and_invalid_inputs(rows):
     with pytest.raises(ValueError, match="missing"):
         aggregate_kernels(broken)
     invalid_interval = rows.copy()
-    invalid_interval.loc[10, "time_range"] = SimpleNamespace(start=10, end=9)
+    invalid_interval.loc[10, ["start_us", "end_us"]] = [10.0, 9.0]
     with pytest.raises(ValueError, match="GPU interval"):
         aggregate_kernels(invalid_interval)
 
@@ -171,7 +174,7 @@ def test_empty_input_and_invalid_inputs(rows):
 def test_row_order_does_not_affect_ownership_or_flops(rows):
     groups, kernels, _, sources = aggregate_kernels(rows)
     shuffled_groups, shuffled_kernels, _, shuffled_sources = aggregate_kernels(rows.iloc[::-1])
-    pd.testing.assert_series_equal(groups.estimated_flops.sort_index(), shuffled_groups.estimated_flops.sort_index())
+    pd.testing.assert_series_equal(groups.total_est_flops.sort_index(), shuffled_groups.total_est_flops.sort_index())
     pd.testing.assert_series_equal(kernels.module_fqn.sort_index(), shuffled_kernels.module_fqn.sort_index())
     pd.testing.assert_series_equal(sources.contribution_flops.sort_index(), shuffled_sources.contribution_flops.sort_index())
 
@@ -189,7 +192,7 @@ def test_launch_chain_runs_from_the_cpu_root_to_the_kernel(rows):
     assert launch_chain(rows, 17, format=False).index.tolist() == [17]  # no launcher
 
 
-def test_formatted_launch_chain_keeps_the_key_columns_and_expands_time_range(rows):
+def test_formatted_launch_chain_keeps_the_key_columns(rows):
     wide = rows.reindex(columns=[*rows.columns, *(c for c in LAUNCH_CHAIN_COLUMNS if c not in rows.columns)])
     chain = launch_chain(wide, 10)
     assert chain.columns.tolist() == LAUNCH_CHAIN_COLUMNS
@@ -228,7 +231,7 @@ def test_timeline_keeps_every_kernel_interval_and_aligned_flops(rows, plotting):
             assert path.vertices[:, 0].max() == pytest.approx(kernels.loc[index, "gpu_end_us"])
     assert len(seen) == len(set(seen)) == len(kernels)
     assert set(seen) == set(kernels.index)
-    assert [bar.get_width() for bar in flop_ax.patches] == ordered.estimated_flops.tolist()
+    assert [bar.get_width() for bar in flop_ax.patches] == ordered.total_est_flops.tolist()
     assert timeline.get_ylim() == flop_ax.get_ylim()
     start, end = ordered.gpu_start_us.min(), ordered.gpu_end_us.max()
     assert timeline.get_xlim() == pytest.approx((start - 0.05 * (end - start), end + 0.05 * (end - start)))  # padded

@@ -12,10 +12,10 @@ from unittest.mock import patch
 
 import lab
 from artifacts.core.artifact import Artifact, Resources
+from artifacts.core.SGD.lr_schedule import WarmupCosine
+from artifacts.core.SGD.optimizers import AdamW
 from artifacts.core.SGD.training import (
     LoopConfig,
-    LRSchedule,
-    OptimizerParameters,
     TrainingParameters,
 )
 from artifacts.core.storage import MANIFEST
@@ -40,9 +40,8 @@ PRETRAINING = Pretraining(
     ),
     training_parameters=TrainingParameters(
         total_steps=4, batch_size=4, max_norm=1,
-        lr_schedule=LRSchedule(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
-        optimizer="torch.optim.AdamW",
-        optimizer_parameters=OptimizerParameters(lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
+        lr_schedule=WarmupCosine(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
+        optimizer=AdamW(betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
     ),
     loop_config=LoopConfig(val_every=2, gpu_check_every=2, checkpoint_every=2),
 )

@@ -34,7 +34,7 @@ def test_aliases_share_their_compute():
 
 def test_device_names_map_to_the_row_of_the_gpu_modal_gave():
     rows = {
-        "Tesla T4": "T4", "NVIDIA L4": "L4", "NVIDIA L40S": "L40S", "NVIDIA A10": "A10",
+        "Tesla T4": "T4", "NVIDIA L4": "L4", "NVIDIA L40S": "L40S", "NVIDIA A10": "A10", "NVIDIA A10G": "A10G",
         "NVIDIA A100-SXM4-40GB": "A100-40GB", "NVIDIA A100-SXM4-80GB": "A100-80GB", "NVIDIA A100 80GB PCIe": "A100-80GB",
         "NVIDIA H100 80GB HBM3": "H100", "NVIDIA H200": "H200", "NVIDIA B200": "B200", "NVIDIA B300 SXM6 AC": "B300",
         "NVIDIA RTX PRO 6000 Blackwell Server Edition": "RTX-PRO-6000",
@@ -42,7 +42,7 @@ def test_device_names_map_to_the_row_of_the_gpu_modal_gave():
     assert {name: spec_row(name) for name in rows} == rows
     assert set(rows.values()) <= set(gpu_specs)
     with pytest.raises(KeyError, match="not in gpus/peaks.py"):
-        spec_row("NVIDIA A10G")  # a different GPU from the A10: not guessed
+        spec_row("NVIDIA A40")  # a GPU not in the table: not guessed
 
 
 def test_peak_tflops_reads_the_precision_column():

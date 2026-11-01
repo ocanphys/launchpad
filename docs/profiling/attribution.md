@@ -12,12 +12,13 @@ on the one before it and is one function in `profiling/profile_events.py`;
 
 `capture_profiler_events` records one training step with `torch.profiler`, and
 `prof.events()` hands it back as a flat list of `FunctionEvent` objects, one per thing that
-ran: tens of thousands even for a small model. `events_to_rows` turns the list into a DataFrame
-with one row per event, in the order the profiler returned them:
+ran: tens of thousands even for a small model. `event_table` keeps them as JSON columns, the
+profile's `events.json` ([Profiling](../profiling.md#eventsjson)), and `events_to_rows` turns one
+step's columns into a DataFrame with one row per event, in the order the profiler returned them.
+A profile's `events(step)` does both:
 
 ```python
-step = max(captured["steps"])
-rows = events_to_rows(captured["steps"][step]["events"])
+rows = profile.events(2)
 rows[["name", "activity_type", "device_type", "correlation_id", "linked_correlation_id", "flops"]].head(10)
 ```
 
@@ -41,7 +42,7 @@ The step opens with the `zero_grad` phase and the optimizer's scope inside it, t
 Their ids, 38476 and up, come from a different counter than the scopes' 18433 and up (step 2).
 
 Each event has a name, an `activity_type` (what kind of thing it is, and who recorded it), a
-`device_type` (where it ran), a `time_range`, two ids, and on some ATen ops a FLOP estimate.
+`device_type` (where it ran), a `start_us` and `end_us`, two ids, and on some ATen ops a FLOP estimate.
 Every event is one of these kinds:
 
 | activity_type | device_type | What it is |
@@ -429,8 +430,8 @@ spreading it over them would invent per-kernel numbers.
 - `gpu_time_us`: the sum of its kernels' durations. Overlapping kernels each count in full.
 
 `aggregate_kernels` returns this table, the kernel table sorted by phase, module and start,
-the kernels with no owner, and the FLOP sources. `build_report` keeps groups and kernels per
-step, and `display_steps` draws one row per group with its `total_est_flops` beside it.
+the kernels with no owner, and the FLOP sources. A profile's `display_steps` draws one row per
+group with its `total_est_flops` beside it.
 
 ## Cases in the event tree
 
@@ -519,9 +520,9 @@ config:
 ---
 flowchart TD
   subgraph WORKER["profile()"]
-    CAP["On the GPU worker:<br/><b>module_scopes()</b> wraps each module's forward call<br/>in forward::fqn, and the backward work it created<br/>in backward::fqn<br/><b>capture_profiler_events()</b> records every event"]
+    CAP["On the GPU worker:<br/><b>module_scopes()</b> wraps each module's forward call<br/>in forward::fqn, and the backward work it created<br/>in backward::fqn<br/><b>capture_profiler_events()</b> records every event,<br/>and <b>event_table()</b> keeps them as JSON columns"]
   end
-  CAP -->|"prof.events()"| ROWS
+  CAP -->|"events.json's step"| ROWS
   subgraph TABLE["events_to_rows()"]
     ROWS["<b>1. events_to_rows()</b><br/>one row per event, its row ID its position;<br/>a CPU row's launcher_id is its cpu_parent"]
     ROWS -->|"rows, GPU rows<br/>not linked yet"| LINK
@@ -550,7 +551,7 @@ flowchart TD
     SRC -->|"flop_sources"| GT
     GT["<b>8. _group_table()</b><br/>one row per (phase, module_fqn): its kernels,<br/>GPU span and time, and the sum of its<br/>allocated FLOP estimates"]
   end
-  GT -->|"groups, kernels,<br/>unattributed_kernels,<br/>flop_sources"| REPORT["<b>build_report()</b> keeps each step's groups and kernels<br/><b>display_steps()</b> draws them"]
+  GT -->|"groups, kernels,<br/>unattributed_kernels,<br/>flop_sources"| REPORT["<b>Profile.display_steps()</b> draws each step's groups and kernels"]
 ```
 
 Each box is one function and what it does; each arrow is the value it hands on. Every step is a

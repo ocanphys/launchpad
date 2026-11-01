@@ -1,6 +1,5 @@
 """Exercise notebook instrumentation locally; never run the Modal profile."""
 from copy import deepcopy
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -116,8 +115,8 @@ def test_forward_backward_paths_shared_aliases_gradients_and_kernel_links():
             phase = labels[0].split("::", 1)[0]
             assert labels[-1] == f"{phase}::model"
 
-    intervals = [SimpleNamespace(start=float(i), end=i + 1.0) for i in range(len(rows))]
-    groups, kernels, _, _ = aggregate_kernels(rows.assign(time_range=intervals))
+    intervals = {"start_us": [float(i) for i in range(len(rows))], "end_us": [i + 1.0 for i in range(len(rows))]}
+    groups, kernels, _, _ = aggregate_kernels(rows.assign(**intervals))
     assert len(kernels) == len(expected_kernel_scopes)
     for kernel_id, (_, expected_path) in expected_kernel_scopes.items():
         assert (kernels.loc[kernel_id, "module_fqn"] == "<unattributed>") == (not expected_path)
@@ -126,7 +125,7 @@ def test_forward_backward_paths_shared_aliases_gradients_and_kernel_links():
     incomplete = rows.copy()
     incomplete.loc[incomplete["name"].eq("backward::model"), "name"] = "unlabelled"
     with pytest.raises(ValueError, match="not under the model stage"):
-        aggregate_kernels(incomplete.assign(time_range=intervals))
+        aggregate_kernels(incomplete.assign(**intervals))
 
 
 def test_external_graph_accumulation_and_optimizer_are_unattributed():

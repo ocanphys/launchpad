@@ -10,7 +10,8 @@ an experiment's, and the experiment's artifacts read back:
 A committed declaration that creates an artifact it was asked for also copies
 the notebook it ran from to `<artifact_path>/declaring.ipynb`, so the volume
 keeps what declared it; an experiment keeps its own copy too, in
-`experiments/<experiment_uid>/declaration.ipynb`.
+`experiments/<experiment_uid>/declaration.ipynb`, and one per extension
+beside it, `declaration2.ipynb` and on, unless an extension overwrites the first.
 
 Construction, loading and binding stay on the artifact classes --
 `Tokenizer(...)`, `Artifact.load(path)`, `tokenizer.bind()` -- and every one
@@ -36,6 +37,7 @@ from collections import Counter
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from typing import Literal
 
 import modal
 
@@ -403,6 +405,7 @@ def create_experiment(
     strict_commit: bool = False,
     verbose: bool = False,
     notebook: bytes | None = None,
+    extend: Literal["add", "overwrite"] | None = None,
 ) -> DeclarationReport:
     """Returns the declaration report for an experiment's artifacts and
     everything they are built from, resolved together as one graph and
@@ -415,18 +418,35 @@ def create_experiment(
     Each artifact asked for is tagged `{"experiment": [experiment_uid]}`, on
     top of its own tags and, when it is already declared, the stored ones;
     what they are built from is not. A taken `experiment_uid` raises before
-    anything else. A commit keeps the notebook it runs from, as last
-    saved, and refuses one whose saved file lacks the running cell: save it
-    first. The experiment's folder appears only once everything is written,
-    so a failed commit leaves no experiment, and running it again completes
-    it.
+    anything else, unless `extend` adds to it. A commit keeps the notebook it
+    runs from, as last saved, and refuses one whose saved file lacks the
+    running cell: save it first. A new experiment's folder appears only once
+    everything is written, so a failed commit leaves no experiment, and
+    running it again completes it.
 
         lab.create_experiment("batch-size-study", runs, commit=True)  # declarations/experiment_template.ipynb's runs
         -> ... declared on artifact paths:
            runs/batch-size-study-bs32/pretraining/0-20000-960dd4bc7f
            runs/batch-size-study-bs64/pretraining/0-20000-2956000f6f
            runs/batch-size-study-bs128/pretraining/0-20000-08147cf8f3
-           experiment created: experiments/batch-size-study
+           experiment created: experiments/batch-size-study/declaration.ipynb
+
+    Args:
+        experiment_uid: The experiment's name, one folder name.
+        artifacts: The artifacts it is made of, or adds; what they are built from is declared too.
+        root: Where the experiment lives; anything but STORAGE is a test's folder, never reloaded or committed.
+        commit: Write the declaration; False previews and writes nothing.
+        strict_commit: Refuse a commit over drift, as `declare` does.
+        verbose: Print every row of the report.
+        notebook: The declaring notebook's bytes, for a caller with no kernel; None reads the running one.
+        extend: How a taken `experiment_uid` is added to: "add" keeps this notebook as the next free
+            `declaration<n>.ipynb` from 2, beside the first; "overwrite" replaces `declaration.ipynb`,
+            the one the dashboard opens. Its new artifacts are tagged with it, so `notebook.ipynb`
+            already lists them. None refuses a taken one; an experiment that does not exist yet is
+            created whatever it says.
+
+    Returns:
+        The report.
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", experiment_uid):
         raise ValueError(f"experiment_uid must be letters, digits, '.', '_' and '-', got {experiment_uid!r}")
@@ -436,8 +456,16 @@ def create_experiment(
         refresh()
     experiments = root / "experiments"
     final = experiments / experiment_uid
-    if final.exists():
-        raise FileExistsError(f"experiments/{experiment_uid} exists: pick another experiment_uid")
+    extending = final.exists()
+    if extending and extend is None:
+        raise FileExistsError(f"experiments/{experiment_uid} exists: pick another experiment_uid, "
+                              f"or add to it with extend='add' or extend='overwrite'")
+    declaration = "declaration.ipynb"
+    if extending and extend == "add":
+        n = 2
+        while (final / f"declaration{n}.ipynb").exists():
+            n += 1
+        declaration = f"declaration{n}.ipynb"
     roots = list(dict.fromkeys(artifact.artifact_path.as_posix() for artifact in artifacts))
     graph = []
     for node in resolve(*artifacts):
@@ -458,14 +486,14 @@ def create_experiment(
         if running not in ["".join(cell["source"]).strip() for cell in json.loads(notebook)["cells"]]:
             raise ValueError("the notebook on disk is not the one running: save it, then run this cell again")
     options = {"commit": commit, "strict_commit": strict_commit, "verbose": verbose, "notebook": notebook}
-    if commit:
+    if commit and not extending:
         # Staged under a name the existence check above never matches, and
         # renamed into place last: the experiment exists only once complete.
         staging = experiments / f".staging-{experiment_uid}"
         shutil.rmtree(staging, ignore_errors=True)  # one writer, so a leftover is a dead attempt's
         staging.mkdir(parents=True)
         try:
-            (staging / "declaration.ipynb").write_text(_headed(notebook, f"experiments/{experiment_uid}"))
+            (staging / declaration).write_text(_headed(notebook, f"experiments/{experiment_uid}"))
             source = f"import lab\n\nartifacts = lab.load_experiment({experiment_uid!r})\nartifacts"
             tagged = {
                 "cells": [{"cell_type": "code", "execution_count": None, "id": "tagged", "metadata": {}, "outputs": [], "source": source}],
@@ -479,15 +507,20 @@ def create_experiment(
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        if root == STORAGE:
-            save()
-            message = {"experiment_uid": experiment_uid, "artifact_paths": roots, "event": "experiment created"}
-            try_publish("experiment created", lambda: refreshes.put(message), _log)
     else:
         report = _declare(graph, roots, root, **options)
+        if commit:  # an extension, its declaration written after everything it declares, and renamed into place whole
+            staged = final / f".staging-{declaration}"
+            staged.write_text(_headed(notebook, f"experiments/{experiment_uid}"))
+            staged.replace(final / declaration)
+    event = "experiment extended" if extending else "experiment created"
+    if commit and root == STORAGE:
+        save()
+        message = {"experiment_uid": experiment_uid, "artifact_paths": roots, "event": event}
+        try_publish(event, lambda: refreshes.put(message), _log)
     print(report.render(verbose))
     if commit:
-        print(f"experiment created: experiments/{experiment_uid}")
+        print(f"{event}: experiments/{experiment_uid}/{declaration}")
     return report
 
 

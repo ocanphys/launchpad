@@ -18,7 +18,9 @@ tokenizers/<uid>/                 trained tokenizer
 tokenized/<tokenizer>/<source>/   one source through one tokenizer
 datasets/, mappeddatasets/        training data
 runs/<run_id>/pretraining/...     training legs, their checkpoints and step logs
-experiments/<experiment_uid>/     declaration.ipynb and notebook.ipynb: what created the experiment, what lists it
+profiles/<run_id>/<hash>/         profiled steps on one GPU: report.json, events.json, memory.json
+experiments/<experiment_uid>/     declaration.ipynb and notebook.ipynb: what created the experiment, what lists it;
+                                  declaration2.ipynb and on: what extended it
 logs/launcher.jsonl               the launcher's own log
 call_history.json                 every grant ever made, per artifact path
 ```
@@ -36,8 +38,12 @@ call_history.json                 every grant ever made, per artifact path
   `pretraining/` legs. Everything a run depends on that is not run-scoped (its
   tokenizer, its dataset, the sources behind them) lives under a shared root,
   found by walking the dependency tree embedded in the run's manifest.
+- **`profiles/{run_id}/`** holds a series of profiles, each a model's profiled steps on one GPU,
+  identified by every input that changes what is measured, the GPU included
+  ([Profiling](profiling.md)).
 - **`experiments/{experiment_uid}/`** is not an artifact: no manifest, only
-  `declaration.ipynb`, the notebook that created the experiment, and
+  `declaration.ipynb`, the notebook that created the experiment,
+  `declaration2.ipynb` and on, each a notebook that extended it, and
   `notebook.ipynb`, which lists the artifacts tagged with it
   ([Experiments](experiments.md)). An artifact declared from a notebook keeps
   its own copy beside its manifest, `declaring.ipynb`.
@@ -124,8 +130,8 @@ What is happening now lives outside the volume, in Modal Dicts and one Queue:
   one naming how it ended (`done`, `failed`, `lease lost`), after its
   `volume.commit()` and its last beat; one per committed `lab.declare`,
   `declared`, under the call id `launcher`; and one per committed
-  `lab.create_experiment`, `{experiment_uid, artifact_paths, event: "experiment
-  created"}`. Workers and the lab write it, and the launcher is the only
+  `lab.create_experiment`, `{experiment_uid, artifact_paths, event}`, where
+  event is `experiment created` or `experiment extended`. Workers and the lab write it, and the launcher is the only
   reader. Nothing is computed from a
   message: it only says the volume and the Dicts are worth reading again.
 

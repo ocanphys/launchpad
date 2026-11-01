@@ -13,12 +13,11 @@ import torch
 from pydantic import ValidationError
 
 from artifacts.core.artifact import Artifact
-from artifacts.core.SGD.lr_schedule import lr_cosine_schedule
+from artifacts.core.SGD.lr_schedule import WarmupCosine
+from artifacts.core.SGD.optimizers import AdamW
 from artifacts.core.SGD.steplog import StepLog
 from artifacts.core.SGD.training import (
     LoopConfig,
-    LRSchedule,
-    OptimizerParameters,
     TrainingParameters,
 )
 from artifacts.core.storage import write_manifest
@@ -42,9 +41,8 @@ MODEL = Transformer(
 )
 TRAINING = TrainingParameters(
     total_steps=4, batch_size=4, max_norm=1,
-    lr_schedule=LRSchedule(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
-    optimizer="torch.optim.AdamW",
-    optimizer_parameters=OptimizerParameters(lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
+    lr_schedule=WarmupCosine(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
+    optimizer=AdamW(betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
 )
 LOOP = LoopConfig(val_every=2, gpu_check_every=2, checkpoint_every=2)
 
@@ -293,8 +291,8 @@ class PretrainJobTests(unittest.TestCase):
 
     def test_a_checkpoint_holds_the_rate_its_step_was_taken_with(self):
         PretrainJob(self.leg).run(self.root, worker())
-        rate_of_step_4 = lr_cosine_schedule(4, **TRAINING.lr_schedule.model_dump())
-        self.assertNotEqual(rate_of_step_4, TRAINING.optimizer_parameters.lr)
+        rate_of_step_4 = TRAINING.lr_schedule.rate(4)
+        self.assertNotEqual(rate_of_step_4, 1e-3)  # torch's default, the rate the optimizer is built with
         for state in (torch.load(self.folder / "checkpoints" / "4.pt"), self.final(self.leg)):
             self.assertEqual(state["optimizer"]["param_groups"][0]["lr"], rate_of_step_4)
 
