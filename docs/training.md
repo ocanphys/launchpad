@@ -20,9 +20,9 @@ is a parameter. Here three books from Project Gutenberg train the model and a
 fourth validates it:
 
 ```python
-from artifacts.core.SGD.training import (
-    LoopConfig, LRSchedule, OptimizerParameters, TrainingParameters,
-)
+from artifacts.core.SGD.lr_schedule import WarmupCosine
+from artifacts.core.SGD.optimizers import AdamW
+from artifacts.core.SGD.training import LoopConfig, TrainingParameters
 from artifacts.mappeddataset import MappedDataSet
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
@@ -63,14 +63,11 @@ leg = Pretraining(
     ),
     training_parameters=TrainingParameters(
         total_steps=20000, batch_size=64, max_norm=1.0,
-        lr_schedule=LRSchedule(
+        lr_schedule=WarmupCosine(
             max_learning_rate=1e-3, min_learning_rate=1e-4,
             warmup_iters=200, cosine_cycle_iters=20000,
         ),
-        optimizer="torch.optim.AdamW",
-        optimizer_parameters=OptimizerParameters(
-            lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8,
-        ),
+        optimizer=AdamW(betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
     ),
     loop_config=LoopConfig(val_every=200, gpu_check_every=100, checkpoint_every=1000),
 )
@@ -111,7 +108,15 @@ What the leg itself checks when it is built, each a validator on its class:
 
 ::: artifacts.core.SGD.training
     options:
-      members: [TrainingParameters, LRSchedule, OptimizerParameters, LoopConfig]
+      members: [TrainingParameters, LoopConfig]
+      heading_level: 3
+
+::: artifacts.core.SGD.lr_schedule
+    options:
+      heading_level: 3
+
+::: artifacts.core.SGD.optimizers
+    options:
       heading_level: 3
 
 ## What the job does
@@ -136,7 +141,7 @@ flowchart TD
 
 In every case the optimizer settings come from this leg, not from the
 checkpoint it loaded: `load_state_dict` restores the saved leg's, so the job
-overwrites them with `training_parameters.optimizer_parameters` after loading.
+overwrites them with `training_parameters.optimizer`'s fields after loading.
 If the starting checkpoint saved no optimizer state, the job warns and uses a
 fresh optimizer. A leg that starts from another leg also checks that the
 checkpoint's recorded step matches its own `start_step`, and refuses
@@ -146,7 +151,7 @@ Function by function:
 
 ```mermaid
 flowchart TD
-  INIT["PretrainJob.__init__() -> TrainingJob.__init__()<br/>the device: cuda when there is a GPU, else cpu<br/>locate(lr_schedule_fn), torch.manual_seed(seed)"] --> R
+  INIT["PretrainJob.__init__() -> TrainingJob.__init__()<br/>the device: cuda when there is a GPU, else cpu<br/>torch.manual_seed(seed)"] --> R
   R["PretrainJob.run(root, worker)"] --> DONE{"Already complete?<br/>status().complete"}
   DONE -->|yes| SKIP["Log and return"]
   DONE -->|no| RES["Build model and optimizer<br/>TrainingJob.resume(): Model.build(device), locate(optimizer)"]
@@ -157,7 +162,7 @@ flowchart TD
   FS --> LR0
   SCK --> LR0
   FRESH --> LR0
-  LR0["Sync the rate to the step<br/>set_learning_rate() -> lr_cosine_schedule()"] --> SLG["Open the step log<br/>StepLog(): next attempt number from train.jsonl"]
+  LR0["Sync the rate to the step<br/>set_learning_rate() -> lr_schedule.rate(step)"] --> SLG["Open the step log<br/>StepLog(): next attempt number from train.jsonl"]
   SLG --> BD["Map the data<br/>dataset.bind(root): train_tokens, valid_tokens"]
   BD --> LOOP{"step below end_step?"}
   LOOP -->|yes| STEP["One step<br/>set_learning_rate(), get_train_batch(step) -> batch_loss()<br/>backward(), clip_grad_norm_(), optimizer.step()"]
@@ -319,8 +324,8 @@ leg's name carries a hash of its history:
 starting checkpoint's uid (recursively, the whole chain), the dataset's and
 tokenizer's uids, and the model and training parameters exactly as the leg's
 manifest writes them. The model's `"class"` key is among them, so moving or
-renaming an architecture class moves its legs, and the two `Transformer`
-classes, which have the same fields, give different legs. `loop_config` and
+renaming an architecture class moves its legs, and `Transformer` and
+`TransformerFA`, which have the same fields, give different legs. `loop_config` and
 `run_id` stay out: the first controls observation, not the trajectory, and the
 second is already in the path. The device is not a parameter at all: the job
 picks it, so a leg has one path whichever device trains it. The
@@ -376,7 +381,7 @@ in the lineage hash, so decide it before the first real run.
   `dtype` would then name the autocast dtype.
 - **Weight decay groups.** One param group, so embeddings, RMSNorm gains and
   biases are decayed. The usual recipe decays `p.ndim >= 2` only. `resume`
-  re-applies `optimizer_parameters` to every group; with two groups it must
+  re-applies the optimizer's fields to every group; with two groups it must
   leave the no-decay group's `weight_decay` at 0.
 - **`mmap=True` on the volume mount.** Stripping optimizers maps each earlier
   failsafe and renames over it. Whether Modal's FUSE mount supports the map
@@ -387,9 +392,9 @@ in the lineage hash, so decide it before the first real run.
   resume briefly holds two copies of both. `map_location="cpu"` removes the
   transient at the cost of a slower copy.
 - **`torch.compile(model)`** is usually a free 1.3 to 2x on this shape on CUDA.
-- **Optimizer flags outside `OptimizerParameters`** (`amsgrad`, `fused`,
-  `foreach`, `capturable`) come from the saved leg, since the re-apply covers
-  only `lr`, `betas`, `eps` and `weight_decay`. This bites when a torch
+- **Optimizer flags its class does not declare** (`AdamW`'s `amsgrad`,
+  `fused`, `foreach`, `capturable`) come from the saved leg, since the
+  re-apply covers only the declared fields. This bites when a torch
   upgrade between legs changes a default.
 - **Sweeping stale `.tmp` files.** `worker.publishing` deletes its temporary
   file whenever it does not publish, so an ordinary failure and a lost lease

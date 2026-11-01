@@ -15,7 +15,8 @@ is described.
 | [Training a Model](training.md), [Models](models.md) | Training legs, checkpoints, architectures. |
 | [Jobs](jobs.md), [Workers](workers.md) | The code that builds an artifact, and what runs around it. |
 | [Launcher](launcher.md), [Dashboard](dashboard.md), [Logging](logging.md) | Launching, the state map, the web page, logs. |
-| [Artifact Repository](repository.md) | What lives where: the volume, the Dicts, the code. |
+| [Repository](repository.md) | What lives where: the volume, the Dicts, the code. |
+| [Artifact Repository](artifact-repository.md) | Every artifact family under `artifacts/`, one page each. |
 
 Every Markdown file in `docs/` is a page here. `mkdocs serve` previews them
 locally; `mkdocs build --strict && modal deploy main.py` publishes them at `/guide/`.

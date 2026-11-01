@@ -23,9 +23,8 @@ and a channel is one key of the `call_logs` Dict:
   for what its file holds: the same rows, the second trailing the first by a
   persist pass.
 - **`source`** is who wrote it: `worker` (the call's account of itself),
-  `launcher` (what the launcher did to that call), `profiler` (a profiling
-  run), or `ambient` (a record no logger of ours stamped, such as a library's
-  warning).
+  `launcher` (what the launcher did to that call), or `ambient` (a record no
+  logger of ours stamped, such as a library's warning).
 
 ## How a row travels
 
@@ -39,6 +38,7 @@ flowchart TD
   WL --> BH
   LL --> BH
   AL --> BH
+  BH["Buffer the row per channel, in memory only<br/>BufferHandler.emit(): row(), channel()"] --> PT["Publish every HEARTBEAT_SECONDS<br/>start_logging() thread -> BufferHandler.publish()<br/>new channel: continued(), then try_publish()"]
   BH["Buffer the row per channel, in memory only<br/>BufferHandler.emit(): row(), channel()"] --> PT["Publish every HEARTBEAT_SECONDS<br/>start_logging() thread -> BufferHandler.publish()<br/>new channel: continued(), then try_publish()"]
   PT --> LIVE[("call_logs<br/>call_id:livedict:source")]
 
@@ -58,8 +58,7 @@ flowchart TD
 1. **Stamp.** Code logs through `call_logger(name, source, call_id)`, which
    puts `source` and `call_id` on the record itself. A job's is `worker.log`
    (`job`, `worker`); the launcher's are `log_launcher` for its own doings and
-   `log_call(call_id)` for a call it manages (`leasebook`, `launcher`); a
-   profiling run's is `profile`, `profiler`.
+   `log_call(call_id)` for a call it manages (`leasebook`, `launcher`).
 2. **Buffer.** `start_logging(call_id)`, once per container, attaches a
    `BufferHandler` to the root logger. `emit` turns each record into a row and
    appends it to the live channel its stamp names; an unstamped record is
@@ -106,8 +105,7 @@ nothing on the volume goes unlisted.
 `launchpad-call-logs`, served from us-east, holds every channel. A `livedict`
 channel is written by the container that logged its rows, through its
 `BufferHandler`, and read by both log routes, by `continued()` when a container
-starts the channel again, by `persist_snapshot` for the rows to file, and by
-`run_profile` to print a profiling run as it goes. A `volume` channel is a copy
+starts the channel again, and by `persist_snapshot` for the rows to file. A `volume` channel is a copy
 of the file's rows, written by `load_snapshot_from_volume` and
 `persist_snapshot`, and read by both log routes and `continued()`.
 
@@ -127,15 +125,18 @@ record. `persist_snapshot` is the only thing that writes them;
 
 ### stdout
 
-`start_logging` points `basicConfig` at stdout, so every record is also a
-formatted line in `modal app logs`. Our loggers log at DEBUG, libraries at
+`log_to_stdout`, the first thing `start_logging` does, points `basicConfig` at
+stdout, so every record is also a formatted line in `modal app logs`. A
+profiling call runs `log_to_stdout` alone: its rows are only in Modal's
+capture, which `run_profile` prints as the call runs. Our loggers log at DEBUG, libraries at
 INFO, and `modal`, `grpc`, `urllib3` and `uvicorn.access` at WARNING, so the
 publisher's own requests stay out of the log.
 
 ### Regions
 
 The launcher and `persist_logs` run in `REGION`, beside the Dicts, so each Dict
-read is a short round trip; a worker runs wherever its GPU is.
+read is a short round trip; a worker and the lab run in any region, wherever Modal has room
+for them.
 
 ## Why
 
@@ -215,8 +216,8 @@ category. A split, if ever worth having, is another `call_logger("job.lease",
   reaches ours (LESSONS.md, "A library that keeps its own handler never reaches
   ours").
 - The lab's output reaches only `modal app logs`.
-- A profiling run's rows are live only: `run_profile` prints them as they are
-  published, and no grant names the call, so no file is written.
+- A profiling run's rows are only in Modal's capture: `run_profile` prints
+  them as the call runs, and nothing puts them in `call_logs` or on the volume.
 - Under `modal serve` no schedule fires, so nothing is persisted; the Dict is
   the only copy.
 - A container killed hard (out of memory, evicted) or one that never starts

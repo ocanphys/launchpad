@@ -9,12 +9,26 @@ plugins:
         python:
           options:
             filters: ["!^_"]
+            separate_signature: true
+            docstring_options:
+              warn_missing_types: false
+              returns_multiple_items: false
 extra_javascript:
+<<<<<<< HEAD
+=======
+  - js/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
+>>>>>>> 506415c (docs update)
   - https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js
   - path: js/mermaid-elk.js
     type: module
 markdown_extensions:
   - tables
+<<<<<<< HEAD
+=======
+  - pymdownx.arithmatex:
+      generic: true
+>>>>>>> 506415c (docs update)
   - pymdownx.highlight:
       use_pygments: false
   - pymdownx.superfences:
@@ -37,6 +51,28 @@ nav:
   - Launcher: launcher.md
   - Dashboard: dashboard.md
   - Logging: logging.md
+<<<<<<< HEAD
   - Artifact Repository: repository.md
   - Profiling: profiling.md
   - Chat: chat.md
+=======
+  - Monitoring: monitoring.md
+  - Profiling:
+      - Overview: profiling.md
+      - Attribution: profiling/attribution.md
+  - Chat: chat.md
+  - Repository: repository.md
+  - Artifact Repository:
+      - Overview: artifact-repository.md
+      - Sources: artifact-repository/sources.md
+      - Tokenizers: artifact-repository/tokenizers.md
+      - Tokenized: artifact-repository/tokenized.md
+      - Dataset: artifact-repository/dataset.md
+      - Mapped dataset: artifact-repository/mappeddataset.md
+      - Stages: artifact-repository/stages.md
+  - Model Repository:
+      - Overview: model-repository.md
+      - Transformer: model-repository/transformer.md
+      - Transformer FA: model-repository/transformerFA.md
+      - Mamba: model-repository/mamba.md
+>>>>>>> 506415c (docs update)

@@ -270,7 +270,7 @@ network.load_state_dict(state["model"])
   raises. The dashboard shows which are done.
 - **The default root is the volume.** Every load and bind reads from `STORAGE`
   unless given another absolute `Path`, so the same code runs against a test
-  folder ([Artifact Repository](repository.md#roots)).
+  folder ([Repository](repository.md#roots)).
 
 ## Reference
 

@@ -1,4 +1,4 @@
-# Artifact Repository
+# Repository
 
 Where everything lives: the volume that holds every artifact, the Modal Dicts
 and Queue that hold what is happening now, and the code that reads and writes
@@ -155,4 +155,4 @@ What is happening now lives outside the volume, in Modal Dicts and one Queue:
   [Workers](workers.md)).
 - **`web/`**: the dashboard page ([Dashboard](dashboard.md)).
 - **`gpus/`**, **`profiling/`**: GPU throughput tables, the training loop's MFU
-  monitor, and the profiler ([Profiling](profiling.md)).
+  monitor ([Monitoring](monitoring.md)), and the profiler ([Profiling](profiling.md)).
