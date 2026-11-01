@@ -17,7 +17,8 @@ gpu_specs: dict[str, dict[str, float]] = {
     for row, values in {  # fp64   fp32   tf32    bf16    fp16    fp8  mem_bw
         "T4":           (0.25,   8.1,   nan,    nan,     65,   nan,   320),
         "L4":           ( nan,  30.3,    60,    121,    121,   242,   300),
-        "A10":          ( nan,  31.2,  62.5,    125,    125,   nan,   600),
+        "A10":          ( nan,  31.2,  62.5,    125,    125,   nan,   600),  # may be an A10G
+        "A10G":         ( nan,    35,    35,     70,     70,   nan,   600),  # AWS's A10, no NVIDIA datasheet: flopper.io
         "L40S":         ( nan,  91.6,   183,    362,    362,   733,   864),
         "A100":         (19.5,  19.5,   156,    312,    312,   nan,  1555),  # 40 GB, or an 80 GB upgrade (2039)
         "A100-40GB":    (19.5,  19.5,   156,    312,    312,   nan,  1555),
@@ -39,11 +40,11 @@ PRECISIONS: dict[str, str] = {
 }
 
 # gpu_specs row of each torch.cuda.get_device_name(), first match wins: the A100 pattern with 80GB
-# comes before the one without, and \b keeps "L4" from matching "L40S". The Modal-only rows
-# (A100, H100!, B200+) are never returned: a device name says which GPU Modal actually gave.
+# comes before the one without, and \b keeps "L4" from matching "L40S" and "A10" from "A10G". The
+# Modal-only rows (A100, H100!, B200+) are never returned: a device name says which GPU Modal actually gave.
 DEVICE_ROWS = {
     "A100-80GB": r"\bA100\b.*80GB", "A100-40GB": r"\bA100\b",
-    "T4": r"\bT4\b", "L4": r"\bL4\b", "A10": r"\bA10\b", "L40S": r"\bL40S\b",
+    "T4": r"\bT4\b", "L4": r"\bL4\b", "A10": r"\bA10\b", "A10G": r"\bA10G\b", "L40S": r"\bL40S\b",
     "RTX-PRO-6000": r"RTX PRO 6000", "H100": r"\bH100\b", "H200": r"\bH200\b",
     "B200": r"\bB200\b", "B300": r"\bB300\b",
 }

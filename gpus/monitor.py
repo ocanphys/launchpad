@@ -10,7 +10,7 @@ import torch
 from gpus.peaks import PRECISIONS, gpu_specs, spec_row
 
 if TYPE_CHECKING:
-    from artifacts.core.SGD.training import Model
+    from models import Model
     from system.runtime import Worker
 
 
