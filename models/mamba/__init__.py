@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING
 
 from pydantic import Field
 
-from artifacts.core.SGD import training
+from models import Model
 
 if TYPE_CHECKING:
     import torch
 
 
-class Mamba(training.Model):
+class Mamba(Model):
     """A Mamba LM: the fields are its shapes, and `build` makes it. Its
     `sequence_length` is the batch shape only, since the recurrence has no
     context limit.
@@ -24,6 +24,9 @@ class Mamba(training.Model):
           -> Mamba(vocab_size=1000, sequence_length=32, ..., d_state=16, d_conv=4, expand=2)
     """
 
+    vocab_size: int = Field(gt=0)
+    sequence_length: int = Field(gt=0)
+    dtype: str = "torch.float32"  # resolved worker-side via artifacts.core.locate.locate
     num_layers: int = Field(gt=0)
     d_model: int = Field(gt=0)
     d_state: int = Field(default=16, gt=0)

@@ -2,7 +2,9 @@ import logging
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import einsum, rearrange
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 logger = logging.getLogger(__name__)
 
@@ -241,9 +243,11 @@ class MultiHeadAttention(nn.Module):
             hK = self.rope(hK, token_positions)
             hQ = self.rope(hQ, token_positions)
         if hQ.is_cuda and not self.capture_internals:
-            from models.transformerV2.src.flash_attention import flash_attention
-
-            attention_output, attention_scores = flash_attention(hQ, hK, hV), None
+            # flash only, so a dtype or GPU it cannot run on raises: it needs fp16 or bf16, and Ampere or later.
+            # RoPE's fp32 tables promote hQ and hK, so they take hV's dtype.
+            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                attention_output = F.scaled_dot_product_attention(hQ.to(hV.dtype), hK.to(hV.dtype), hV, is_causal=True)
+            attention_scores = None
         else:
             attention_output, attention_scores = SPDA(hQ, hK, hV, mask, return_scores=self.capture_internals)
         mult_head_attention = rearrange(
