@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from artifacts.core.job import Job
-from artifacts.core.locate import locate
 from artifacts.core.SGD.training import Training
 
 if TYPE_CHECKING:
@@ -34,9 +33,6 @@ class TrainingJob(Job):
         self.loop_config = artifact.loop_config
         # the GPU when there is one: the device is where the leg runs, not what it trains
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # saved as dotted paths in the config - resolved to the python objects
-        self.schedule_fn = locate(self.training_parameters.lr_schedule_fn)
-        self.schedule_parameters = self.training_parameters.lr_schedule.model_dump()
         # seeds every RNG that model initialization draws from, CPU and CUDA
         torch.manual_seed(self.training_parameters.seed)
         if torch.cuda.is_available():
@@ -51,7 +47,7 @@ class TrainingJob(Job):
         and optimizer, so the three are always in sync. Resume sets it after
         loading for the same reason.
         """
-        learning_rate = self.schedule_fn(step, **self.schedule_parameters)
+        learning_rate = self.training_parameters.lr_schedule.rate(step)
         for group in optimizer.param_groups:
             group["lr"] = learning_rate
         return learning_rate
@@ -69,9 +65,7 @@ class TrainingJob(Job):
         # parameters, so the two share tensors; loading state_dicts afterwards
         # keeps that link, which pickled whole objects would not.
         model = self.artifact.model.build(self.device)
-        optimizer = locate(self.training_parameters.optimizer)(
-            model.parameters(), **self.training_parameters.optimizer_parameters.model_dump()
-        )
+        optimizer = self.training_parameters.optimizer.build(model.parameters())
         device = self.device
 
         # pick the state to resume from
@@ -118,7 +112,7 @@ class TrainingJob(Job):
                 # load_state_dict also restores the saved leg's betas/
                 # weight_decay; this leg's are the ones in its lineage hash
                 for group in optimizer.param_groups:
-                    group.update(self.training_parameters.optimizer_parameters.model_dump())
+                    group.update(self.training_parameters.optimizer.model_dump())
             else:
                 # only reachable from a starting checkpoint: failsafes without
                 # an optimizer were skipped above

@@ -20,7 +20,6 @@ class PretrainJob(TrainingJob):
     def __init__(self, artifact: Pretraining):
         super().__init__(artifact)
         self.dataset = artifact.dataset
-        self.sequence_length = artifact.model.sequence_length
         self.loss_function = torch.nn.CrossEntropyLoss()
 
     def to_device(self, batch: tuple["np.ndarray", ...]) -> tuple[torch.Tensor, ...]:
@@ -44,7 +43,7 @@ class PretrainJob(TrainingJob):
 
         The variance is across batches, so 0 for a single batch. While it runs,
         worker.progress["val_batch"] reads "done/total" for the batches queued."""
-        total, get_valid_batch = dataset.valid_batches(self.training_parameters.batch_size, self.sequence_length)
+        total, get_valid_batch = dataset.valid_batches(self.training_parameters.batch_size, self.artifact.model.sequence_length)
         losses = []
         model.eval()
         with torch.no_grad():
@@ -63,7 +62,6 @@ class PretrainJob(TrainingJob):
             return
         end_step = self.artifact.end_step
         batch_size = self.training_parameters.batch_size
-        sequence_length = self.sequence_length
         seed = self.training_parameters.seed
         max_norm = self.training_parameters.max_norm
         val_every = self.loop_config.val_every
@@ -76,7 +74,7 @@ class PretrainJob(TrainingJob):
         steplog = StepLog(root, self.artifact.artifact_path.as_posix())
         gpu_monitor = GpuMonitor(self.artifact.model, self.device, batch_size, gpu_check_every, step, worker)
         dataset = self.dataset.bind(root)
-        get_train_batch = dataset.train_batches(batch_size, sequence_length, seed)
+        get_train_batch = dataset.train_batches(batch_size, self.artifact.model.sequence_length, seed)
         # optimization notes for data pipeline: drawing step + 1's batch
         # before this step's forward would hide the draw too, and sending the
         # uint16 tokens and casting to int64 on device would cut the bytes

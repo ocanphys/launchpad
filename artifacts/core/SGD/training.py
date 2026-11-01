@@ -15,84 +15,22 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 from pydantic import Field, model_validator
 
 from artifacts.core.artifact import Artifact, ParamConfig
+from artifacts.core.SGD.lr_schedule import LRSchedule
+from artifacts.core.SGD.optimizers import Optimizer
+from models import Model
 
 if TYPE_CHECKING:
     import torch
 
 
-class Model(ParamConfig):
-    """The base of every architecture under models/: a subclass's fields are
-    what a leg declares, and `build` makes the network they describe. The
-    fields declared here are the ones stages and jobs read off any model.
-
-    A field annotated `Model` holds any subclass, and its manifest names that
-    subclass under "class" (artifacts.core.manifest).
-
-        Transformer(vocab_size=1000, sequence_length=32, num_layers=4, d_model=128, d_ff=256, num_heads=16,
-                    rope_theta=10000).sequence_length -> 32
-    """
-
-    vocab_size: int = Field(gt=0)
-    sequence_length: int = Field(gt=0)
-    dtype: str = "torch.float32"  # resolved worker-side via artifacts.core.locate.locate
-
-    def build(self, device: torch.device):
-        """Returns a freshly initialized torch module on `device`.
-
-            Transformer(...).build(torch.device("cpu")) -> TransformerLM(...) with every parameter on the cpu
-        """
-        raise NotImplementedError
-
-    def step_flops(self, batch_size: int) -> int:
-        """Returns the FLOPs of one forward and backward pass over batch_size sequences: an analytic
-        estimate from this architecture's shapes, not a measurement.
-
-            Transformer(vocab_size=1000, sequence_length=8, num_layers=1, d_model=16, d_ff=32, num_heads=2,
-                        rope_theta=10000).step_flops(4) -> 3612672
-        """
-        raise NotImplementedError
-
-
-class OptimizerParameters(ParamConfig):
-    """Exactly the keyword arguments the optimizer is built with, after its
-    parameters; torch checks their values when it builds it.
-
-        OptimizerParameters(lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8).model_dump()
-          -> {"lr": 0.0003, "betas": (0.9, 0.95), "weight_decay": 0.1, "eps": 1e-08}
-    """
-
-    lr: float  # fallback: what the optimizer runs with when no lr_schedule overrides it
-    betas: tuple[float, ...]
-    weight_decay: float
-    eps: float
-
-
-class LRSchedule(ParamConfig):
-    """The keyword arguments of the learning-rate schedule function. Independent
-    of OptimizerParameters: any schedule can drive any optimizer, so this is
-    not nested under it, as torch.optim's own lr_scheduler wraps an optimizer
-    from outside.
-
-    LRSchedule(max_learning_rate=3e-4, min_learning_rate=3e-5, warmup_iters=200, cosine_cycle_iters=5000)
-    """
-
-    max_learning_rate: float
-    min_learning_rate: float
-    warmup_iters: int
-    cosine_cycle_iters: int
-
-
 class TrainingParameters(ParamConfig):
     """What changes the optimization trajectory, including its seed and
     duration, as opposed to LoopConfig, which controls observation and
-    recovery cadence.
+    recovery cadence. `lr_schedule` is the only place the learning rate is
+    stated.
 
-    ``optimizer`` and ``lr_schedule_fn`` are dotted paths, resolved worker-side
-    via artifacts.core.locate.locate; ``optimizer_parameters`` and
-    ``lr_schedule`` are exactly the keyword arguments each is called with.
-
-        TrainingParameters(total_steps=1000, batch_size=64, max_norm=1, lr_schedule=LRSchedule(...),
-                           optimizer="torch.optim.AdamW", optimizer_parameters=OptimizerParameters(...)).max_norm
+        TrainingParameters(total_steps=1000, batch_size=64, max_norm=1, lr_schedule=Constant(lr=3e-4),
+                           optimizer=AdamW()).max_norm
           -> 1.0
     """
 
@@ -100,9 +38,7 @@ class TrainingParameters(ParamConfig):
     batch_size: int = Field(gt=0)
     max_norm: float
     lr_schedule: LRSchedule
-    optimizer: str  # a torch.optim.Optimizer subclass
-    optimizer_parameters: OptimizerParameters
-    lr_schedule_fn: str = "artifacts.core.SGD.lr_schedule.lr_cosine_schedule"
+    optimizer: Optimizer
     seed: int = 0
 
 
