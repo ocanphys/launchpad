@@ -174,6 +174,10 @@ To profile a declared leg, pass its fields: `run_id=leg.run_id`,
   its kernel launchers.
 - **Not both `compile` and `module_scopes`.** Module stages do not work under `torch.compile`,
   so a profile with both is refused, and a compiled profile's kernels group by phase only.
+- **A `TransformerFA` runs in fp16 or bf16.** Its flash attention takes nothing else, so a
+  profile whose `autocast` is None and whose model's `dtype` is fp32 is refused when it is
+  declared, not on the GPU. In a sweep, leave those points out, or declare the model with
+  `dtype="torch.bfloat16"`.
 
 ## Running a profile
 

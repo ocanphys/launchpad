@@ -20,7 +20,9 @@ raises instead of falling back to another kernel:
 
 - **Precision.** Flash attention takes fp16 or bf16: declare
   `dtype="torch.bfloat16"`, or run under bf16 autocast, as profiling's
-  `autocast="torch.bfloat16"` does. An fp32 network without autocast raises.
+  `autocast="torch.bfloat16"` does. An fp32 network without autocast raises,
+  and a [Profile](../profiling.md#the-step-and-compile) that would run one is
+  refused when it is declared.
   RoPE's tables are fp32, so the rotated queries and keys are cast to the
   values' dtype first.
 - **GPU.** An Ampere GPU or later (A10, L4, A100, H100); a T4 raises.

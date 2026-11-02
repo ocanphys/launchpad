@@ -17,10 +17,12 @@ change".
 
 ## The optimizer holds the learning rate of the current step
 
-`TrainingJob.resume` does `group.update(optimizer_parameters.model_dump())` after
+`TrainingJob.resume` does `group.update(optimizer.model_dump())` after
 `load_state_dict`, so a new leg trains with its own betas and weight decay.
-That dict also carries `lr`, the fallback, which overwrote the scheduled
-rate the failsafe had saved. With the rate set at the top of each iteration
+When the optimizer declared an `lr` of its own, a fallback, that dict
+carried it too, and it overwrote the scheduled rate the failsafe had saved.
+The lr is now stated only in the leg's `lr_schedule`, so no such fallback
+exists. With the rate set at the top of each iteration
 this was invisible, except for an attempt that resumed from a failsafe
 already at `end_step`: zero iterations, and the fallback landed in
 `model.pt`, so the file depended on which attempt wrote it.
@@ -144,23 +146,6 @@ library is captured, check the whole family, not the top name:
 
     [(n, l.propagate, bool(l.handlers)) for n, l in
      logging.root.manager.loggerDict.items() if isinstance(l, logging.Logger)]
-
-## A log handler that calls Modal breaks Modal's own heartbeat
-
-A handler's `emit` runs on the thread that logged, and the Modal client logs
-from its own event loop: "Received a cancellation signal while processing
-input" is a `logger.warning` inside the heartbeat coroutine. `BufferHandler`
-once read `call_logs` the first time a channel appeared, and on a worker that
-warning was the first `ambient` row. The blocking `Dict.get` from Modal's loop
-raised `Deadlock detected: calling a sync function from the synchronizer
-loop`, `emit` let it out, and it surfaced in the coroutine that called
-`logger.warning` -- the log read "Heartbeat attempt failed" with that error,
-in the middle of the heartbeat delivering a cancel.
-
-So `emit` touches memory and nothing else, and every Modal call a handler
-needs happens on the publisher's own thread. The same goes for any handler,
-filter or formatter added later: a record from `modal.*` can arrive on
-Modal's loop at any time, and a cancellation is when it does.
 
 ## A traceback keeps the volume's files mapped after the call
 
@@ -408,3 +393,14 @@ each of these passed a test until a probe hit it:
 A test that the codec round-trips is not enough; test that it refuses, per
 case (test/test_codec.py), and that a subclass comes back as its own class at
 every depth.
+
+## A call waiting for a GPU is silent in its own log
+
+Modal's "waiting to be scheduled on a GPU_L4 worker" lines carry no function
+call id: `call.logs` never yields them, only `Function.logs` with
+`source="system"` does. Found when a profile call on an L4 looked hung for
+minutes, its own log empty. `call.logs.stream()` yields only what the call
+writes after the stream opens, so a finished call streams nothing.
+
+Open the call's stream right after `spawn`, and read the function's system log
+beside it until the call writes its first line, as `run_profile` does.

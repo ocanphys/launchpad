@@ -32,7 +32,11 @@ reference is an error, not a warning.
 ## Docstrings
 
 **First line says what it returns, present tense.** Then at most one paragraph, for the
-single thing a caller can get wrong. Stop there.
+single thing a caller can get wrong.
+
+**Every function ends with `Args:` and `Returns:`, Google style,** which mkdocs renders as
+tables. One line per argument: what it is and what it changes, not its type, which the
+signature already says. A function that returns nothing omits `Returns:`.
 
 **A user-facing function shows one example with real values, as a code block.** User-facing
 is anything a notebook, a job or a shell calls. The example is indented four spaces past
@@ -44,6 +48,13 @@ def flatline_age(last_beat: float, now: float) -> float:
     """Returns the seconds since the last heartbeat.
 
         flatline_age(last_beat=100.0, now=105.0) -> 5.0
+
+    Args:
+        last_beat: Unix time of the last heartbeat, in seconds.
+        now: Unix time to measure from, in seconds.
+
+    Returns:
+        The seconds from last_beat to now.
     """
     return now - last_beat
 ```

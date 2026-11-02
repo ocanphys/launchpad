@@ -50,12 +50,14 @@ nav:
   - Workers: workers.md
   - Launcher: launcher.md
   - Dashboard: dashboard.md
-  - Logging: logging.md
+  - Logging:
+      - Overview: logging.md
 <<<<<<< HEAD
   - Artifact Repository: repository.md
   - Profiling: profiling.md
   - Chat: chat.md
 =======
+      - Capture through Modal (proposed): logging/modal-capture.md
   - Monitoring: monitoring.md
   - Profiling:
       - Overview: profiling.md
