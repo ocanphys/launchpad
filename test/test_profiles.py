@@ -18,6 +18,7 @@ from artifacts.core.storage import write_manifest
 from artifacts.profiles import Profile, _with_prefix, jobs
 from artifacts.profiles.jobs import ProfileJob
 from models.transformer import Transformer
+from models.transformerFA import TransformerFA
 from profiling.util import run_profile
 from system.runtime import Worker
 
@@ -118,6 +119,11 @@ def test_a_profile_is_allocated_the_one_gpu_it_measures_and_refuses_what_would_n
     with pytest.raises(ValidationError, match="module_scopes do not work under torch.compile"):
         declared(compile="default")
     assert declared(compile="default", module_scopes=False).compile == "default"
+    flash = TransformerFA(**dict(MODEL))
+    with pytest.raises(ValidationError, match="flash attention takes fp16 or bf16, not torch.float32"):
+        declared(model=flash, autocast=None)
+    assert declared(model=flash).precision == "torch.bfloat16"
+    assert declared(model=TransformerFA(**dict(MODEL) | {"dtype": "torch.bfloat16"}), autocast=None).autocast is None
     for change in ({"autocast": "torch.float32"}, {"compile": "fast"}, {"batch_size": 0}, {"profile_steps": 0},
                    {"warmup_steps": -1}):
         with pytest.raises(ValidationError):

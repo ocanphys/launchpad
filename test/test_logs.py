@@ -1,8 +1,10 @@
 """system.logs: the shape every row carries, the channel its stamp files it
 under, and the pass that moves those rows between the Dicts and the volume."""
 
+import io
 import json
 import logging
+import sys
 import threading
 import time
 import unittest
@@ -41,8 +43,10 @@ class LoggingTests(unittest.TestCase):
 
     def setUp(self):
         self.store = Dict()
+        self.stderr = io.StringIO()  # the real stream the tee writes through to, put back after
         self.enterContext(patch.object(logs, "call_logs", self.store))
         self.enterContext(patch.object(logs, "HEARTBEAT_SECONDS", 3600))  # only the stop publishes
+        self.enterContext(patch.object(sys, "stderr", self.stderr))
         self.addCleanup(logging.getLogger().handlers.clear)
 
     def start(self, call_id: str):
@@ -105,6 +109,47 @@ class LoggingTests(unittest.TestCase):
         )
         self.assertEqual([r["msg"] for r in self.store["fc-b:livedict:launcher"]], ["granted"])
         self.assertEqual([r["msg"] for r in self.store["launcher:livedict:ambient"]], ["noise"])
+
+    def test_a_line_written_to_stderr_is_an_ambient_row_and_still_reaches_stderr(self):
+        """Torch's loggers keep a handler of their own and never propagate, so
+        what they log arrives only as a line on stderr."""
+        stop = self.start("fc-a")
+        library = logging.getLogger("a_library_with_its_own_handler")
+        library.propagate = False
+        library.addHandler(logging.StreamHandler())  # made after start_logging, as torch makes its own at import
+        self.addCleanup(library.handlers.clear)
+        library.warning("Not enough SMs to use max_autotune_gemm mode")
+        sys.stderr.write("AUTOTUNE mm(64x64, 64x64)\n")
+        sys.stderr.write("\r10%\r100%\n")  # a progress bar files as its last state
+        sys.stderr.write("unfinished")
+        stop()
+
+        rows = self.store["fc-a:livedict:ambient"]
+        self.assertEqual([r["msg"] for r in rows],
+                         ["Not enough SMs to use max_autotune_gemm mode", "AUTOTUNE mm(64x64, 64x64)", "100%"])
+        self.assertEqual({(r["call_id"], r["source"], r["level"], r["logger"]) for r in rows},
+                         {("fc-a", AMBIENT, "INFO", "stderr")})
+        self.assertEqual(self.stderr.getvalue(),
+                         "Not enough SMs to use max_autotune_gemm mode\nAUTOTUNE mm(64x64, 64x64)\n\r10%\r100%\nunfinished")
+
+    def test_a_handler_made_during_an_earlier_call_files_under_the_current_one(self):
+        """A container outlives its call, and torch is imported once: its
+        handlers keep the stderr of the first call, which has to reach every
+        later call's buffer."""
+        first = self.start("fc-a")
+        library = logging.getLogger("a_library_with_its_own_handler")
+        library.propagate = False
+        library.addHandler(logging.StreamHandler())
+        self.addCleanup(library.handlers.clear)
+        first()
+        library.warning("between calls")  # still on stderr, in no call's log
+        second = self.start("fc-b")
+        library.warning("from the second call")
+        second()
+
+        self.assertNotIn("fc-a:livedict:ambient", self.store)
+        self.assertEqual([r["msg"] for r in self.store["fc-b:livedict:ambient"]], ["from the second call"])
+        self.assertIn("between calls", self.stderr.getvalue())
 
     def test_a_worker_files_its_rows_once(self):
         """A worker stamps no call but its own, so the two channels the
