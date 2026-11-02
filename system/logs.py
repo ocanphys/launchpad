@@ -5,8 +5,8 @@ folded into `msg`, and the `call_logs` key it lives under is
 `{call_id}:{storage}:{source}` -- `storage` is `livedict` for what a container
 has published or `volume` for what its file holds, and `source` is who wrote
 it: `worker`, `launcher`, or `ambient` for a record none of our loggers
-stamped (a library's warning is the container's own noise, not the call's
-account of itself).
+stamped or a line written to stderr (a library's warning is the container's
+own noise, not the call's account of itself).
 
 A container configures the whole of it with `start_logging(call_id)`, which is
 whose its unstamped records are, and logs through
@@ -32,6 +32,7 @@ from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
+from typing import TextIO
 
 import modal
 
@@ -172,6 +173,41 @@ class BufferHandler(logging.Handler):
             try_publish(key, partial(call_logs.put, key, rows), _log)
 
 
+class _StderrLines:
+    """`sys.stderr` from a container's first `start_logging` on. A write goes
+    through to the stream it replaced, which Modal captures, and each complete
+    line is also handed, unstamped and at INFO, to the BufferHandler
+    `start_logging` last gave it, so it lands as an `ambient` row.
+
+    It is never taken back out; `stop` only takes its handler away. A library
+    keeps the `sys.stderr` it found when it made its handler, as torch's fifty
+    or so `StreamHandler`s do at import, so putting the old stream back would
+    leave them writing past every later call's buffer. A carriage return
+    restarts the line, so a progress bar files as its last state.
+    """
+
+    def __init__(self, stream: TextIO):
+        self.stream = stream
+        self.handler: logging.Handler | None = None
+        self.line = ""  # written since the last newline
+        self.lock = threading.Lock()
+
+    def write(self, text: str) -> int:
+        written = self.stream.write(text)
+        with self.lock:
+            *lines, pending = (self.line + text).split("\n")
+            self.line = pending.rsplit("\r", 1)[-1]
+        handler = self.handler
+        for line in (line.rstrip("\r").rsplit("\r", 1)[-1] for line in lines):
+            if handler is not None and line.strip():
+                handler.handle(logging.makeLogRecord(
+                    {"name": "stderr", "levelno": logging.INFO, "levelname": "INFO", "msg": line}))
+        return written
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.stream, name)  # flush, fileno, isatty, encoding: the real stream's
+
+
 def log_to_stdout() -> None:
     """Points this container's logging at stdout, one formatted line per record, at INFO."""
     logging.Formatter.converter = time.gmtime  # timestamps are UTC wherever this runs
@@ -192,12 +228,17 @@ def start_logging(call_id: str) -> Callable[[], None]:
     HEARTBEAT_SECONDS; returns what stops it.
 
     `call_id` is whose the container's unstamped records are -- LAUNCHER for
-    the leasebook, its own call id for a worker. Stopping publishes once more,
-    so the rows logged on the way out land.
+    the leasebook, its own call id for a worker -- and whose the lines written
+    to stderr are, a library's own handler's included (`_StderrLines`).
+    Stopping publishes once more, so the rows logged on the way out land.
     """
     log_to_stdout()
     buffer = BufferHandler(call_id)
     logging.getLogger().addHandler(buffer)
+    if not isinstance(sys.stderr, _StderrLines):
+        sys.stderr = _StderrLines(sys.stderr)
+    stderr = sys.stderr
+    stderr.handler = buffer
     finished = threading.Event()
 
     def publish() -> None:
@@ -211,6 +252,7 @@ def start_logging(call_id: str) -> Callable[[], None]:
     thread.start()
 
     def stop() -> None:
+        stderr.handler = None
         logging.getLogger().removeHandler(buffer)
         finished.set()
         thread.join()

@@ -144,18 +144,21 @@ def run_job(artifact_path: str) -> None:
 # No gpu here: the caller requests it with
 # `.with_options(**resource_options(allocated_resources))`, as a production run is started.
 @app.function(image=worker_image, timeout=600)
-def profile(**parameters) -> dict:
-    """Returns the measurements of a few profiled training steps of a model, run on a GPU:
-    `profiling.util.profile(**parameters)`, whose docstring says what goes in and comes out.
+def profile(spec) -> dict:
+    """Returns the JSON text of each of a Profile's files, from a few profiled steps run on a GPU:
+    `profiling.util.profile(spec, ...)`, whose docstring says what comes out.
 
-    Call it through `profiling.util.run_profile(resources, ...)`, which requests the GPU from
-    `resources` and prints Modal's log of this call as it runs. It is not a launched job: no
-    artifact, no lease, nothing written to the volume or `call_logs`, so the launcher never sees it.
+    Call it through `profiling.util.run_profile(spec)`, which requests the GPU from
+    `spec.resources` and prints Modal's log of this call as it runs. It is not a launched job: no
+    lease, nothing written to the volume or `call_logs`, so the launcher never sees it. A
+    declared Profile is run by `run_job`, as every artifact is.
     """
+    import logging
+
     from profiling import util
 
     log_to_stdout()
-    return util.profile(**parameters)
+    return util.profile(spec, logging.getLogger("profile"))
 
 
 @app.function(
@@ -166,8 +169,8 @@ def profile(**parameters) -> dict:
     # uncommitted copy of the same notebook and the later commit would win.
     max_containers=1,
     # Without a request Modal reserves 0.125 cores and 128 MiB, shared by the server and every kernel.
-    cpu=4.0,
-    memory=4096,
+    cpu=0.5,
+    # memory=1024,
     timeout=CONTAINER_LIFETIME,
     scaledown_window=LAB_IDLE_SECONDS,
 )
