@@ -150,8 +150,11 @@ library is captured, check the whole family, not the top name:
 ## A traceback keeps the volume's files mapped after the call
 
 A memmap over a tokens.bin is a local in `PretrainJob.run` and in every
-frame under it (`evaluate`, `get_train_batch`, `get_valid_batch`), and the
-two batch functions also hold it in their closures. When one of those raises, the
+frame under it (`evaluate`, each evaluation's `measure`, and the batch
+function `Sampler.batches` returns), and that batch function also holds it in
+its closure. Samplers and evaluations are on the job instance, through the
+leg, so neither may keep a split of its own: everything they read stays in
+frames and closures. When one of those raises, the
 exception's `__traceback__` holds those frames and their locals, so the
 mapping stays open for as long as anything holds the exception, and Modal's
 runtime holds it past the call. The container is reused, the next call's
@@ -404,3 +407,20 @@ writes after the stream opens, so a finished call streams nothing.
 
 Open the call's stream right after `spawn`, and read the function's system log
 beside it until the call writes its first line, as `run_profile` does.
+
+## A sampler's identity names its class, not the code that ran
+
+A leg's identity holds `{"class": "...Epochs", "max_epochs": 3}`, not the code:
+the manifest records `declaring_commit` beside it, but no digest reads that.
+Edit what `Epochs.starts` draws, and every leg that used it now replays
+different batches under the same `lineage_hash`, so its provenance is silently
+wrong. The same holds for a new field with a default: defaults are dumped, so
+it rewrites every manifest of that class. Found while designing samplers; the
+same is true of `LRSchedule` and `Optimizer`, whose subclasses are named the
+same way.
+
+A sampler's behaviour and fields are frozen once a leg uses it: a change is a
+new class. `test_samplers.py` pins what each class draws for fixed seeds
+(`EPOCHS_STARTS`, and `TRAIN_BATCHES_STARTS`, which `RandomWindows` was checked
+against before `train_batches` was deleted), so an accidental change fails
+there. A new sampler gets its pin when it ships.

@@ -95,7 +95,7 @@ class MappedDataSetTests(unittest.TestCase):
             dataset = bound(
                 root, (FIRST, SECOND, THIRD), (THIRD,), {FIRST: [1, 2], SECOND: [3], THIRD: [4, 5]}
             )
-            train = dataset.train_tokens
+            train = dataset.train.tokens
             self.assertEqual(len(train), 7)
             self.assertEqual(train.shape, (7,))
             self.assertEqual(train[:].tolist(), [1, 2, EOT, 3, EOT, 4, 5])
@@ -110,7 +110,7 @@ class MappedDataSetTests(unittest.TestCase):
                 train[7]
             with self.assertRaises(ValueError):
                 train[::2]
-            valid = dataset.valid_tokens
+            valid = dataset.valid.tokens
             self.assertEqual(valid[:].tolist(), [4, 5])
             self.assertIsInstance(valid[:], np.memmap)
 
@@ -121,47 +121,20 @@ class MappedDataSetTests(unittest.TestCase):
             dataset = bound(
                 root, (FIRST, SECOND, THIRD), (), {FIRST: [1, 2], SECOND: [], THIRD: [4, 5]}
             )
-            self.assertEqual(dataset.train_tokens[:].tolist(), [1, 2, EOT, EOT, 4, 5])
-            self.assertEqual(dataset.train_tokens[2:4].tolist(), [EOT, EOT])
-            self.assertEqual(len(dataset.valid_tokens), 0)
+            self.assertEqual(dataset.train.tokens[:].tolist(), [1, 2, EOT, EOT, 4, 5])
+            self.assertEqual(dataset.train.tokens[2:4].tolist(), [EOT, EOT])
+            self.assertEqual(dataset.train.tags[:].tolist(), [0] * 6)
+            self.assertEqual((len(dataset.valid.tokens), len(dataset.valid.tags)), (0, 0))
 
     def test_bind_needs_every_tokens_bin(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             dataset = MappedDataSet.from_sources(TOKENIZER, (FIRST,), (SECOND,))
             declare(dataset, root)
+            with self.assertRaisesRegex(RuntimeError, "bind"):
+                dataset.train
             with self.assertRaisesRegex(FileNotFoundError, "not built"):
                 dataset.bind(root)
-
-    def test_train_batches_draw_windows_of_train_tokens_by_seed_and_step(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            with self.assertRaisesRegex(RuntimeError, "bind"):
-                MappedDataSet.from_sources(NO_EOT, (FIRST,), ()).train_batches(4, 8, seed=0)
-            dataset = bound(root, (FIRST,), (), {FIRST: list(range(100))})
-            get_train_batch = dataset.train_batches(4, 8, seed=0)
-            inputs, targets = get_train_batch(3)
-            self.assertEqual((inputs.shape, inputs.dtype), ((4, 8), np.int64))
-            # tokens are their own positions, so every window counts up by one
-            np.testing.assert_array_equal(inputs, inputs[:, :1] + np.arange(8))
-            np.testing.assert_array_equal(targets, inputs + 1)
-            np.testing.assert_array_equal(get_train_batch(3)[0], inputs)
-
-    def test_valid_batches_cover_valid_tokens_in_order(self):
-        # 66 tokens: 8 sequences of 8 in 2 full batches; 25: 3 sequences, one short batch
-        for tokens, total, shape in ((66, 2, (4, 8)), (25, 1, (3, 8))):
-            with self.subTest(tokens=tokens), TemporaryDirectory() as directory:
-                dataset = bound(Path(directory), (FIRST,), (SECOND,), {FIRST: range(100), SECOND: range(tokens)})
-                count, get_valid_batch = dataset.valid_batches(4, 8)
-                inputs, targets = get_valid_batch(count - 1)
-                self.assertEqual((count, inputs.shape, inputs.dtype), (total, shape, np.int64))
-                np.testing.assert_array_equal(inputs.ravel(), np.arange((count - 1) * inputs.size, count * inputs.size))
-                np.testing.assert_array_equal(targets, inputs + 1)
-        for tokens in (8, 0):
-            with self.subTest(tokens=tokens), TemporaryDirectory() as directory:
-                dataset = bound(Path(directory), (FIRST,), (SECOND,), {FIRST: range(100), SECOND: range(tokens)})
-                with self.assertRaisesRegex(ValueError, "fewer than one sequence"):
-                    dataset.valid_batches(4, 8)
 
 
 if __name__ == "__main__":

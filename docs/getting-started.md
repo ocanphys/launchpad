@@ -75,6 +75,7 @@ dataset = MappedDataSet.from_sources(tokenizer=tokenizer,
 ```python
 from artifacts.core.SGD.training import LoopConfig, TrainingParameters
 from artifacts.stages.pretraining import Pretraining
+from artifacts.stages.pretraining.evaluations import TokenLoss
 from models.transformer import Transformer
 
 pretraining = Pretraining(
@@ -84,7 +85,8 @@ pretraining = Pretraining(
                       sequence_length=32, num_layers=4, num_heads=16,
                       rope_theta=10000),
     training_parameters=TrainingParameters(total_steps=20000, batch_size=64, ...),
-    loop_config=LoopConfig(checkpoint_every=5000, val_every=200, ...),
+    loop_config=LoopConfig(checkpoint_every=5000,
+                           evaluations=(TokenLoss(eval_every=200, batch_size=64),), ...),
     allocated_resources=Resources(gpu_type="T4", gpu_count=1),
     tags={"experiment": ["my-experiment"]},
 )

@@ -24,6 +24,7 @@ from artifacts.core.SGD.training import (
     TrainingParameters,
 )
 from artifacts.core.storage import write_manifest
+from artifacts.stages.pretraining.evaluations import TokenLoss
 from lab import _leaves
 from models.mamba import Mamba
 from models.transformer import Transformer
@@ -122,7 +123,12 @@ REALS = st.builds(
             eps=FLOATS,
         ) | st.just(SGD()),
     ),
-    loop=st.builds(LoopConfig, checkpoint_every=POSITIVE, gpu_check_every=POSITIVE),
+    loop=st.builds(
+        LoopConfig,
+        evaluations=st.lists(st.builds(TokenLoss, eval_every=POSITIVE, batch_size=POSITIVE), max_size=2).map(tuple),
+        checkpoint_every=POSITIVE,
+        gpu_check_every=POSITIVE,
+    ),
     transformer=st.tuples(POSITIVE, st.integers(1, 64)).flatmap(
         lambda kh: st.builds(Transformer, d_model=st.just(kh[0] * kh[1]), num_heads=st.just(kh[1]))
     ),

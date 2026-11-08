@@ -232,13 +232,15 @@ assert tokenizer == declared and tokenizer is not declared
 ```
 
 What binding loads depends on the type. A tokenizer loads its vocabulary and
-merges. A dataset opens its token files as memory maps, and exposes the same
-batch functions the training loop uses:
+merges. A dataset opens its token files as memory maps, as `train` and `valid`
+splits, and a leg's sampler draws from them exactly as the training loop did:
 
 ```python
-dataset = Artifact.load("datasets/<uid>").bind()
-get_batch = dataset.train_batches(batch_size=4, sequence_length=256, seed=0)
-inputs, targets = get_batch(1)  # the batch training step 1 would see
+leg = Artifact.load("runs/<run_id>/pretraining/<start>-<end>-<hash>")
+dataset = leg.dataset.bind()
+get_batch = leg.sampler.batches(dataset.train, leg.training_parameters.batch_size,
+                                leg.model.sequence_length, leg.training_parameters.seed, leg.end_step)
+inputs, targets = get_batch(1)  # the batch training step 1 saw
 ```
 
 Binding loads only what the artifact and its direct dependencies name; it

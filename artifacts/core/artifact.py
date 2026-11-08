@@ -49,7 +49,7 @@ class ParamConfig(BaseModel):
     never a folder or manifest of its own. Subclasses declare their fields and
     the constraints on them; construction refuses a value that breaks one.
 
-        LoopConfig(val_every=0, gpu_check_every=200) -> ValidationError (val_every: greater than 0)
+        LoopConfig(evaluations=(), gpu_check_every=0) -> ValidationError (gpu_check_every: greater than 0)
     """
 
     model_config = STRICT

@@ -21,15 +21,24 @@ tokenizer's special tokens; both are refused at construction.
 
 ## Bound view
 
-After `bind(root)`, `train_tokens` and `valid_tokens` are `uint16` memmaps
-(an empty split is an empty array). Two methods serve the training loop:
+After `bind(root)`, `train` and `valid` are each a `Split`: the split's
+`tokens`, a `uint16` memmap (an empty split is an empty array), and its `tags`,
+the tag of every token position. A dataset serves tokens and tags only; how
+batches are drawn from them is the leg's [sampler](samplers.md).
 
-- `train_batches(batch_size, sequence_length, seed)` returns a function from a
-  step to `(inputs, targets)`. The batch depends on `(seed, step)` alone, so a
-  resumed run draws the batches the interrupted one would have.
-- `valid_batches(batch_size, sequence_length)` returns the batch count and a
-  function from a batch id to consecutive, non-overlapping sequences. A split
-  shorter than one sequence raises.
+```python
+split = dataset.bind(root).train
+split.tokens[100:108], split.tags[100:108]
+```
+
+Positions belong to one split, so train and valid carry their own tags. Tags
+are stored as ranges (the position each starts at, and its tag id), one entry
+per range rather than one per token, and read as one tag per position. No
+dataset is tagged yet, so every position reads tag 0.
+
+::: artifacts.core.split
+    options:
+      heading_level: 3
 
 ## The job
 

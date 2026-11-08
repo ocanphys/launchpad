@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
@@ -12,9 +11,7 @@ from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers import Tokenizer
 
 if TYPE_CHECKING:
-    import numpy as np
-
-    from artifacts.mappeddataset.tokenstream import TokenStream
+    from artifacts.core.split import Split
 
 END_OF_TEXT = "<|endoftext|>"
 
@@ -34,9 +31,9 @@ def require_separator(name: str, sources: tuple[TokenizedSource, ...]) -> None:
 class MappedDataSet(Artifact):
     """A training set that owns no bytes: it is done exactly when the
     TokenizedSources it depends on are (`completion_paths`), and its bound
-    object is a TokenStream per split (artifacts/mappeddataset/tokenstream.py)
-    that reads like one memmap over every source's own tokens.bin, with
-    <|endoftext|> between sources. `from_sources` builds one from a tokenizer
+    object holds `train` and `valid` Splits whose tokens are a TokenStream
+    (artifacts/mappeddataset/tokenstream.py) that reads like one memmap over
+    every source's own tokens.bin, with <|endoftext|> between sources. `from_sources` builds one from a tokenizer
     and raw sources.
 
     Its folder (`mappeddatasets/<uid>`) holds only the manifest, which is what
@@ -115,89 +112,42 @@ class MappedDataSet(Artifact):
 
     # -- the bound view ------------------------------------------------------
 
-    _train_tokens: TokenStream = PrivateAttr()
-    _valid_tokens: TokenStream = PrivateAttr()
+    _train: Split = PrivateAttr()
+    _valid: Split = PrivateAttr()
 
     def _load(self, root: Path) -> None:
-        """Artifact._load's hook: one TokenStream per split, offsets worked out
-        from the bin files' lengths. The separator id comes from the split's
-        tokenizer, whose tokenizer.json every tokens.bin was written from."""
+        """Artifact._load's hook: one untagged TokenStream per split, offsets
+        worked out from the bin files' lengths. The separator id comes from the
+        split's tokenizer, whose tokenizer.json every tokens.bin was written
+        from."""
         # local import: numpy only loads when something actually binds this
+        from artifacts.core.split import Split, TagRanges
         from artifacts.mappeddataset.tokenstream import TokenStream
 
-        for name, sources in (("_train_tokens", self.train_set), ("_valid_tokens", self.valid_set)):
+        for name, sources in (("_train", self.train_set), ("_valid", self.valid_set)):
             separator = None
             if len(sources) > 1:
                 [separator] = sources[0].tokenizer.bind(root).encode(END_OF_TEXT)
             stream = TokenStream([ts.paths(root)["tokens"] for ts in sources], separator)
-            setattr(self, name, stream)
+            setattr(self, name, Split(stream, TagRanges.untagged(len(stream))))
 
     @property
     def bound(self) -> bool:
-        return hasattr(self, "_train_tokens")
+        return hasattr(self, "_train")
 
     def _require(self, doing: str) -> None:
         if not self.bound:
             raise RuntimeError(
-                f"{self.uid} has no token streams yet -- bind(root) to build them "
+                f"{self.uid} has no splits yet -- bind(root) to build them "
                 f"from the sources' own tokens.bin files before {doing}"
             )
 
     @property
-    def train_tokens(self) -> TokenStream:
-        self._require("reading train_tokens")
-        return self._train_tokens
+    def train(self) -> Split:
+        self._require("reading train")
+        return self._train
 
     @property
-    def valid_tokens(self) -> TokenStream:
-        self._require("reading valid_tokens")
-        return self._valid_tokens
-
-    def train_batches(self, batch_size: int, sequence_length: int, seed: int) -> Callable[[int], tuple[np.ndarray, np.ndarray]]:
-        """Returns the function from a step number to that step's (inputs,
-        targets), int64 arrays of shape (batch_size, sequence_length) drawn at
-        random positions of train_tokens.
-
-        The batch is a function of (seed, step) alone, so a resumed run draws
-        exactly the batches the interrupted one would have."""
-        import numpy as np
-
-        tokens = self.train_tokens
-
-        def get_train_batch(step: int) -> tuple[np.ndarray, np.ndarray]:
-            rng = np.random.default_rng((seed, step))
-            starts = rng.integers(0, len(tokens) - sequence_length, size=batch_size)
-            # int64 because Embedding needs long
-            inputs = np.stack([tokens[i : i + sequence_length] for i in starts]).astype(np.int64)
-            targets = np.stack([tokens[i + 1 : i + sequence_length + 1] for i in starts]).astype(np.int64)
-            return inputs, targets
-
-        return get_train_batch
-
-    def valid_batches(
-        self, batch_size: int, sequence_length: int
-    ) -> tuple[int, Callable[[int], tuple[np.ndarray, np.ndarray]]]:
-        """Returns how many batches cover valid_tokens and the function from a
-        batch id below that count to its (inputs, targets), int64 arrays of
-        consecutive, non-overlapping sequences of sequence_length.
-
-        A split shorter than one batch is one batch of the sequences it holds,
-        so fewer than batch_size rows; the tail too short to fill a batch is in
-        no batch."""
-        import numpy as np
-
-        tokens = self.valid_tokens
-        sequences = (len(tokens) - 1) // sequence_length
-        if sequences < 1:
-            raise ValueError(
-                f"the validation split holds {len(tokens)} tokens, fewer than one "
-                f"sequence of {sequence_length} and its next token"
-            )
-        size = min(batch_size, sequences) * sequence_length
-
-        def get_valid_batch(batch_id: int) -> tuple[np.ndarray, np.ndarray]:
-            # one contiguous slice: TokenStream serves nothing else
-            window = tokens[batch_id * size : (batch_id + 1) * size + 1].astype(np.int64)
-            return window[:-1].reshape(-1, sequence_length), window[1:].reshape(-1, sequence_length)
-
-        return (len(tokens) - 1) // size, get_valid_batch
+    def valid(self) -> Split:
+        self._require("reading valid")
+        return self._valid

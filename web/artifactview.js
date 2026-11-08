@@ -120,7 +120,7 @@ function logs(calls) {
 // and validation loss share a chart, so the gap between them reads off the
 // curves rather than off two charts side by side. A plot is its `metric` and
 // any uPlot series option to override, as `spanGaps: true` does for
-// validation: measured every val_every steps, its line has to cross the steps
+// validation: measured every eval_every steps, its line has to cross the steps
 // in between instead of breaking at each of them. A metric in the step log that
 // is not named here gets a chart of its own after these, its line crossing gaps
 // (see `layoutFor`).

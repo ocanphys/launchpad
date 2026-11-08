@@ -9,6 +9,7 @@ from artifacts.core.artifact import Resources
 from artifacts.core.SGD.lr_schedule import WarmupCosine
 from artifacts.core.SGD.optimizers import AdamW
 from artifacts.core.SGD.training import LoopConfig, TrainingParameters
+from artifacts.stages.pretraining.evaluations import TokenLoss
 from models.mamba import Mamba
 from models.transformer import Transformer
 from models.transformerFA import TransformerFA
@@ -25,14 +26,16 @@ VALID = {
         "lr_schedule": WarmupCosine(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
         "optimizer": AdamW(betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
     },
-    LoopConfig: {"val_every": 2, "gpu_check_every": 2},
+    LoopConfig: {"evaluations": (TokenLoss(eval_every=2, batch_size=4),), "gpu_check_every": 2},
+    TokenLoss: {"eval_every": 2, "batch_size": 4},
     Transformer: TRANSFORMER,
     TransformerFA: TRANSFORMER,
     Mamba: {"vocab_size": 64, "sequence_length": 8, "num_layers": 1, "d_model": 16},
 }
 POSITIVE = {
     TrainingParameters: ("total_steps", "batch_size"),
-    LoopConfig: ("val_every", "gpu_check_every", "checkpoint_every"),
+    LoopConfig: ("gpu_check_every", "checkpoint_every"),
+    TokenLoss: ("eval_every", "batch_size"),
     Transformer: ("vocab_size", "sequence_length", "num_layers", "d_model", "d_ff", "num_heads", "rope_theta"),
     TransformerFA: ("vocab_size", "sequence_length", "num_layers", "d_model", "d_ff", "num_heads", "rope_theta"),
     Mamba: ("vocab_size", "sequence_length", "num_layers", "d_model", "d_state", "d_conv", "expand"),
@@ -61,8 +64,8 @@ def test_an_int_in_a_float_field_becomes_that_float():
 @pytest.mark.parametrize(
     ("cls", "field", "value"),
     [
-        (LoopConfig, "val_every", True),  # a bool is not an int
-        (LoopConfig, "val_every", "2"),
+        (LoopConfig, "gpu_check_every", True),  # a bool is not an int
+        (LoopConfig, "gpu_check_every", "2"),
         (TrainingParameters, "max_norm", "1.0"),
         (TrainingParameters, "max_norm", float("nan")),
         (LoopConfig, "optimizer_checkpoint_policy", "every"),
@@ -77,4 +80,4 @@ def test_strict_validation_refuses_anything_it_would_have_to_convert(cls, field,
 def test_a_param_config_is_frozen():
     loop = LoopConfig(**VALID[LoopConfig])
     with pytest.raises(ValidationError, match="frozen"):
-        loop.val_every = 3
+        loop.gpu_check_every = 3

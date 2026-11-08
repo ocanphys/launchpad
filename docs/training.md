@@ -26,6 +26,7 @@ from artifacts.core.SGD.training import LoopConfig, TrainingParameters
 from artifacts.mappeddataset import MappedDataSet
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
+from artifacts.stages.pretraining.evaluations import TokenLoss
 from artifacts.tokenizers.bpe import Tokenizer
 from models.transformer import Transformer
 
@@ -69,7 +70,10 @@ leg = Pretraining(
         ),
         optimizer=AdamW(betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
     ),
-    loop_config=LoopConfig(val_every=200, gpu_check_every=100, checkpoint_every=1000),
+    loop_config=LoopConfig(
+        evaluations=(TokenLoss(eval_every=200, batch_size=64),),
+        gpu_check_every=100, checkpoint_every=1000,
+    ),
 )
 ```
 
@@ -78,7 +82,7 @@ leg = Pretraining(
 | `dataset` | The token stream the leg trains on, and through it the tokenizer. |
 | `model` | The architecture: an instance of a `Model` class under `models/`. Its `vocab_size` must match the tokenizer's. |
 | `training_parameters` | Everything that changes the optimization trajectory: steps, batch size, learning rate schedule, optimizer and the seed. |
-| `loop_config` | How the leg is observed and recovered: validation cadence, checkpoint cadence, GPU health checks. |
+| `loop_config` | How the leg is observed and recovered: its evaluations and their cadence, checkpoint cadence, GPU health checks. |
 | `starting_checkpoint` | The leg this one continues, if any. |
 | `run_id` | A name that groups the legs of one run. |
 
@@ -108,7 +112,7 @@ What the leg itself checks when it is built, each a validator on its class:
 
 ::: artifacts.core.SGD.training
     options:
-      members: [TrainingParameters, LoopConfig]
+      members: [TrainingParameters, LoopConfig, Evaluation]
       heading_level: 3
 
 ::: artifacts.core.SGD.lr_schedule
@@ -163,13 +167,13 @@ flowchart TD
   SCK --> LR0
   FRESH --> LR0
   LR0["Sync the rate to the step<br/>set_learning_rate() -> lr_schedule.rate(step)"] --> SLG["Open the step log<br/>StepLog(): next attempt number from train.jsonl"]
-  SLG --> BD["Map the data<br/>dataset.bind(root): train_tokens, valid_tokens"]
+  SLG --> BD["Map the data<br/>dataset.bind(root): train, valid splits<br/>sampler.batches(train): refuses here if it cannot serve to end_step"]
   BD --> LOOP{"step below end_step?"}
   LOOP -->|yes| STEP["One step<br/>set_learning_rate(), get_train_batch(step) -> batch_loss()<br/>backward(), clip_grad_norm_(), optimizer.step()"]
-  STEP --> VAL{"Validation step?<br/>every val_every, and end_step"}
-  VAL -->|yes| EV["evaluate() -> valid_batches()<br/>worker.progress val_batch"]
+  STEP --> VAL{"Evaluation step?<br/>each its eval_every, and all at end_step"}
+  VAL -->|yes| EV["evaluate() -> measure() of each evaluation due<br/>worker.progress val_batch"]
   VAL -->|no| REC
-  EV --> REC["Record the step<br/>StepLog.record(), worker.progress step<br/>StepLog.flush() after validation and before failsafes"]
+  EV --> REC["Record the step<br/>StepLog.record(), worker.progress step<br/>StepLog.flush() after evaluation and before failsafes"]
   REC --> CK{"Checkpoint step?<br/>every checkpoint_every"}
   CK -->|yes| FSV["Write a failsafe<br/>failsafe(): worker.publishing(checkpoints/step.pt)<br/>latest policy: strip optimizer from older ones"]
   CK -->|no| LOOP
@@ -193,8 +197,8 @@ flowchart TD
   E --> G["Clip the gradient norm"]
   G --> H["Optimizer step"]
   H --> I["Record loss, grad norm, learning rate, GPU stats"]
-  I --> V{"Validation step?<br/>every val_every, and the last"}
-  V -->|yes| EV["Evaluate on the validation split"]
+  I --> V{"Evaluation step?<br/>each its eval_every, and all at the last"}
+  V -->|yes| EV["Take the evaluations due"]
   V -->|no| K
   EV --> K{"Checkpoint step?<br/>every checkpoint_every"}
   K -->|yes| FS["Flush the log, write a failsafe checkpoint"]
@@ -212,22 +216,32 @@ attempt wrote it; `resume` sets it again after loading. The loop runs until
 after zero iterations (the last failsafe of an interrupted attempt landed on
 `end_step`).
 
-**The dataset decides how batches are drawn.** `run` asks it once for
-`dataset.train_batches(batch_size, sequence_length, seed)`, a function from step
-number to that step's (inputs, targets), and the loop only passes it the step.
-Batch size, sequence length and seed are fixed for the whole leg, so the
-recipe is settled before the first step; a different recipe (a curriculum,
-labeled batches) is a different dataset artifact, even when it reads the same
-token files. Validation reads the same way through
-`dataset.valid_batches(batch_size, sequence_length)`, the batch count and a
-function from batch id to batch, covering the validation split in order.
+**The leg's sampler decides how batches are drawn.** `run` asks it once for
+`sampler.batches(dataset.train, batch_size, sequence_length, seed, end_step)`,
+a function from step number to that step's (inputs, targets), and the loop only
+passes it the step. The dataset serves tokens; the [sampler](artifact-repository/samplers.md)
+is the recipe, and a different recipe (epochs, a curriculum) is a different
+`Sampler` class on the leg, part of its `lineage_hash`. A sampler that cannot
+serve every step up to `end_step` refuses there, before the first step.
 
-For both `DataSet` and `MappedDataSet`, a step's batch is random windows of the
-token stream chosen by `default_rng((seed, step))`. The batch therefore depends
-on the seed and the step number alone, so a resumed run sees exactly the
-batches the interrupted one would have. No random state is checkpointed: the
-model has no dropout, and batch selection is the only randomness after
-initialization.
+**Evaluations measure the model; they never train it.** Each of
+`loop_config.evaluations` names its own period, `eval_every`. At a step that
+is a multiple of any of them, and at `end_step` for all of them, `evaluate`
+puts the model in eval mode with gradients off and calls `measure` on each
+evaluation due, then merges what they return into that step's row, which is
+flushed then. A leg with no evaluations records training metrics alone. An `Evaluation` is a param config whose
+subclass is the procedure, defined by the stage (pretraining's is
+[`TokenLoss`](artifact-repository/stages.md#evaluations)), so the loop knows
+none of them. Its metrics are named `val_*`, which is how a reader of
+`train.jsonl` tells them from the training metrics, and two evaluations that
+name the same metric are refused at the step they clash. `loop_config` is not
+in `lineage_hash`, so changing an evaluation changes no leg's identity: it
+changes what is measured, never a weight.
+
+Every sampler's batch is a function of its fields, the seed and the step number
+alone, so a resumed run sees exactly the batches the interrupted one would
+have. No random state is checkpointed: the model has no dropout, and batch
+selection is the only randomness after initialization.
 
 ## Checkpoints
 
@@ -350,8 +364,9 @@ runs/
 
 Each step appends a row to `train.jsonl` in the leg's folder through `StepLog`
 (`artifacts/core/SGD/steplog.py`), tagged with the attempt that took it: loss,
-gradient norm and learning rate on every step, validation loss and its
-variance on validation steps, and GPU memory peaks and MFU on the steps they
+gradient norm and learning rate on every step, every evaluation's `val_*`
+metrics on evaluation steps (`val_loss` and `val_loss_var` from `TokenLoss`),
+and GPU memory peaks and MFU on the steps they
 are known. A metric a step did not record is absent from its row, and one that
 diverged to NaN or infinity is null, since JSON has neither.
 
@@ -371,14 +386,8 @@ The architecture a leg trains, and how to add one, is on [Models](models.md).
 
 ## Open recommendations
 
-None applied yet. The first changes what `model.dtype` means, and `dtype` is
-in the lineage hash, so decide it before the first real run.
+None applied yet.
 
-- **Mixed precision.** `dtype` sets the parameter dtype; bf16 gives pure-bf16
-  training, where AdamW updates lose small updates to rounding. Standard
-  practice is fp32 parameters with
-  `torch.autocast(device_type, dtype=torch.bfloat16)` around forward and loss;
-  `dtype` would then name the autocast dtype.
 - **Weight decay groups.** One param group, so embeddings, RMSNorm gains and
   biases are decayed. The usual recipe decays `p.ndim >= 2` only. `resume`
   re-applies the optimizer's fields to every group; with two groups it must

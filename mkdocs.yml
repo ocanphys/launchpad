@@ -14,21 +14,15 @@ plugins:
               warn_missing_types: false
               returns_multiple_items: false
 extra_javascript:
-<<<<<<< HEAD
-=======
   - js/mathjax.js
   - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
->>>>>>> 506415c (docs update)
   - https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js
   - path: js/mermaid-elk.js
     type: module
 markdown_extensions:
   - tables
-<<<<<<< HEAD
-=======
   - pymdownx.arithmatex:
       generic: true
->>>>>>> 506415c (docs update)
   - pymdownx.highlight:
       use_pygments: false
   - pymdownx.superfences:
@@ -52,11 +46,6 @@ nav:
   - Dashboard: dashboard.md
   - Logging:
       - Overview: logging.md
-<<<<<<< HEAD
-  - Artifact Repository: repository.md
-  - Profiling: profiling.md
-  - Chat: chat.md
-=======
       - Capture through Modal (proposed): logging/modal-capture.md
   - Monitoring: monitoring.md
   - Profiling:
@@ -72,9 +61,9 @@ nav:
       - Dataset: artifact-repository/dataset.md
       - Mapped dataset: artifact-repository/mappeddataset.md
       - Stages: artifact-repository/stages.md
+      - Samplers: artifact-repository/samplers.md
   - Model Repository:
       - Overview: model-repository.md
       - Transformer: model-repository/transformer.md
       - Transformer FA: model-repository/transformerFA.md
       - Mamba: model-repository/mamba.md
->>>>>>> 506415c (docs update)

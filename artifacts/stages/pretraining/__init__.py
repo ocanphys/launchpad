@@ -1,5 +1,5 @@
-"""The pretraining stage: __init__.py for the Pretraining leg, jobs.py for
-its batches, loss and evaluation on top of the shared leg and loop in
+"""The pretraining stage: __init__.py for the Pretraining leg, samplers.py for
+its batches, jobs.py for its loss and evaluation on top of the shared leg and loop in
 artifacts.core.SGD. Which model it trains is the leg's `model` parameter, a
 package under models/.
 """
@@ -7,23 +7,28 @@ from __future__ import annotations
 
 from functools import cached_property
 from pathlib import Path
-from typing import ClassVar, Self
+from typing import ClassVar, Literal, Self
 
 from pydantic import model_validator
 
 from artifacts.core.SGD.training import Training
 from artifacts.dataset import DataSet
 from artifacts.mappeddataset import MappedDataSet
+from artifacts.stages.pretraining.samplers import RandomWindows, Sampler
 from artifacts.tokenizers import Tokenizer
 
 
 class Pretraining(Training):
     """A pretraining leg: next-token prediction over the dataset's token
-    stream."""
+    stream, read in the windows its `sampler` names, with forward and loss
+    under `torch.autocast` in the `autocast` dtype, or in the model's dtype
+    when it is None."""
 
     producer: ClassVar[str] = "artifacts.stages.pretraining.jobs.PretrainJob"
 
     dataset: DataSet | MappedDataSet
+    sampler: Sampler = RandomWindows()
+    autocast: Literal["torch.bfloat16"] | None = None
     starting_checkpoint: Pretraining | None = None
 
     @model_validator(mode="after")
@@ -52,8 +57,9 @@ class Pretraining(Training):
     @cached_property
     def lineage_hash(self) -> str:
         """Returns a short id for this leg's trajectory and ancestry: the legs
-        before it, its data, and its model and training parameters exactly as
-        its manifest writes them, the model's class included.
+        before it, its data, and its model, sampler, autocast and training
+        parameters exactly as its manifest writes them, the model's and
+        sampler's classes included.
 
             Artifact.load("runs/my-run/pretraining/0-20000-da2a0676ca").lineage_hash -> "da2a0676ca"
         """
@@ -63,6 +69,8 @@ class Pretraining(Training):
             self.dataset.uid,
             self.tokenizer.uid,
             params["model"],
+            params["sampler"],
+            params["autocast"],
             params["training_parameters"],
         )
 

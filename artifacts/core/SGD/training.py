@@ -22,6 +22,9 @@ from models import Model
 if TYPE_CHECKING:
     import torch
 
+    from artifacts.core.SGD.job import TrainingJob
+    from system.runtime import Worker
+
 
 class TrainingParameters(ParamConfig):
     """What changes the optimization trajectory, including its seed and
@@ -42,21 +45,55 @@ class TrainingParameters(ParamConfig):
     seed: int = 0
 
 
-class LoopConfig(ParamConfig):
-    """Operational settings for validation, failsafe checkpoints, and health checks.
+class Evaluation(ParamConfig):
+    """The base of every measurement the loop takes of its model, every
+    `eval_every` steps of its own and at end_step: a subclass's other fields
+    are its parameters, and `measure` takes it. A stage defines the subclasses;
+    a field annotated `Evaluation` holds any of them, named under "class" in
+    the manifest.
 
-    Every ``checkpoint_every`` steps, the training job writes a failsafe model
-    state. ``optimizer_checkpoint_policy="all"`` writes the matching optimizer
-    state at every failsafe; ``"latest"`` retains it only for the newest one.
-    On CUDA, it reports the MFU and the peak allocated and reserved memory
-    over each window of ``gpu_check_every`` steps, validation and checkpoints
-    included, a few steps after the window closes.
-
-        LoopConfig(val_every=200, gpu_check_every=200)
-          -> LoopConfig(val_every=200, gpu_check_every=200, checkpoint_every=100, optimizer_checkpoint_policy='latest')
+    What it measures goes into the step's row of train.jsonl beside the
+    training metrics, under names starting `val_`, which is how a reader tells
+    the two apart. Never identity: measuring changes no weight.
     """
 
-    val_every: int = Field(gt=0)
+    eval_every: int = Field(gt=0)
+
+    def measure(
+        self, job: TrainingJob, model: torch.nn.Module, dataset: Any, worker: Worker
+    ) -> dict[str, torch.Tensor]:
+        """Returns this measurement of `model`, as named scalar tensors on its device.
+
+        The loop calls it with the model in eval mode and gradients off.
+
+        Args:
+            job: The job running the leg, for its device and loss.
+            model: The model at the step being measured.
+            dataset: The leg's dataset, bound; every evaluation is measured on dataset.valid.
+            worker: The worker running the job, for live progress.
+
+        Returns:
+            Each metric's name, starting `val_`, and its value.
+        """
+        raise NotImplementedError
+
+
+class LoopConfig(ParamConfig):
+    """Operational settings for evaluation, failsafe checkpoints, and health checks.
+
+    The loop takes each of ``evaluations`` every ``eval_every`` steps of its
+    own, and all of them at end_step. Every ``checkpoint_every`` steps, the training job writes
+    a failsafe model state. ``optimizer_checkpoint_policy="all"`` writes the
+    matching optimizer state at every failsafe; ``"latest"`` retains it only
+    for the newest one. On CUDA, it reports the MFU and the peak allocated and
+    reserved memory over each window of ``gpu_check_every`` steps, evaluation
+    and checkpoints included, a few steps after the window closes.
+
+        LoopConfig(evaluations=(TokenLoss(eval_every=200, batch_size=64),), gpu_check_every=200)
+          -> LoopConfig(evaluations=(TokenLoss(eval_every=200, batch_size=64),), gpu_check_every=200, checkpoint_every=100, optimizer_checkpoint_policy='latest')
+    """
+
+    evaluations: tuple[Evaluation, ...]
     gpu_check_every: int = Field(gt=0)
     checkpoint_every: int = Field(default=100, gt=0)
     optimizer_checkpoint_policy: Literal["all", "latest"] = "latest"

@@ -22,6 +22,7 @@ from artifacts.core.storage import MANIFEST
 from artifacts.dataset import DataSet
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
+from artifacts.stages.pretraining.evaluations import TokenLoss
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
 from config import LAB_WORKSPACE
@@ -43,7 +44,7 @@ PRETRAINING = Pretraining(
         lr_schedule=WarmupCosine(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
         optimizer=AdamW(betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
     ),
-    loop_config=LoopConfig(val_every=2, gpu_check_every=2, checkpoint_every=2),
+    loop_config=LoopConfig(evaluations=(TokenLoss(eval_every=2, batch_size=4),), gpu_check_every=2, checkpoint_every=2),
 )
 NOTEBOOK = b'{"cells": [{"cell_type": "markdown", "source": "ephemeral"}, {"cell_type": "code", "source": "x = 1"}]}'
 

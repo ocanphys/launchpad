@@ -22,11 +22,14 @@ class GpuMonitor:
     A window's peaks are final when it closes, since the allocator counts on the
     host; its time is final once the GPU reaches the event that closed it, which
     later calls to `record` poll for, so a window's metrics land together a few
-    steps after it closes. "mfu" is never measured when the GPU, or its unit for
-    the model's dtype, is not in gpus/peaks.py.
+    steps after it closes. "mfu" is measured against the GPU's peak at
+    `precision`, the dtype the matmuls run in, and never when the GPU, or its
+    unit for that precision, is not in gpus/peaks.py.
     """
 
-    def __init__(self, model: "Model", device: torch.device, batch_size: int, every: int, step: int, worker: "Worker"):
+    def __init__(
+        self, model: "Model", precision: str, device: torch.device, batch_size: int, every: int, step: int, worker: "Worker"
+    ):
         self.device = device
         self.every = every
         self.worker = worker
@@ -39,7 +42,7 @@ class GpuMonitor:
         except KeyError as error:
             worker.log.warning(f"MFU unknown: {error}")
             gpu = "unknown"
-        self.peak_flops = gpu_specs.get(gpu, {}).get(PRECISIONS.get(model.dtype, ""), math.nan) * 1e12
+        self.peak_flops = gpu_specs.get(gpu, {}).get(PRECISIONS.get(precision, ""), math.nan) * 1e12
         self.step_flops = model.step_flops(batch_size)
         self.vram = torch.cuda.get_device_properties(self.device).total_memory
         self.start, self.start_step = torch.cuda.Event(enable_timing=True), step

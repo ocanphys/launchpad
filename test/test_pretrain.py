@@ -17,6 +17,7 @@ from artifacts.core.SGD.lr_schedule import WarmupCosine
 from artifacts.core.SGD.optimizers import AdamW
 from artifacts.core.SGD.steplog import StepLog
 from artifacts.core.SGD.training import (
+    Evaluation,
     LoopConfig,
     TrainingParameters,
 )
@@ -26,6 +27,8 @@ from artifacts.dataset.jobs import DataSetJob
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
 from artifacts.stages.pretraining.jobs import PretrainJob
+from artifacts.stages.pretraining.evaluations import TokenLoss
+from artifacts.stages.pretraining.samplers import Epochs, Sweep
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
 from models.mamba import Mamba
@@ -44,7 +47,14 @@ TRAINING = TrainingParameters(
     lr_schedule=WarmupCosine(max_learning_rate=1e-3, min_learning_rate=1e-4, warmup_iters=1, cosine_cycle_iters=100),
     optimizer=AdamW(betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8),
 )
-LOOP = LoopConfig(val_every=2, gpu_check_every=2, checkpoint_every=2)
+LOOP = LoopConfig(evaluations=(TokenLoss(eval_every=2, batch_size=4),), gpu_check_every=2, checkpoint_every=2)
+
+
+class Taken(Evaluation):
+    """Measures val_taken, 1 at every step it is taken."""
+
+    def measure(self, job, model, dataset, worker):
+        return {"val_taken": torch.tensor(1.0)}
 
 
 def rebuilt(artifact: Artifact, **changes) -> Artifact:
@@ -303,13 +313,13 @@ class PretrainJobTests(unittest.TestCase):
         rows = [json.loads(line) for line in (self.folder / "train.jsonl").read_text().splitlines()]
         self.assertEqual([(r["attempt"], r["step"]) for r in rows], [(1, 1), (1, 2), (2, 3), (2, 4)])
         self.assertTrue(all(isinstance(r["loss"], float) for r in rows))
-        # validation runs every val_every steps; the rows in between carry no val_loss
+        # TokenLoss runs every 2 steps; the rows in between carry no val_loss
         for r in rows:
-            validated = {"val_loss", "val_loss_var"} if r["step"] % LOOP.val_every == 0 else set()
+            validated = {"val_loss", "val_loss_var"} if r["step"] % 2 == 0 else set()
             self.assertEqual(set(r), {"step", "attempt", "loss", "grad_norm", "learning_rate"} | validated)
 
     def test_a_crash_between_validations_leaves_no_gap_and_the_last_step_validates(self):
-        sparse = rebuilt(self.leg, loop_config=LoopConfig.model_validate({**LOOP.model_dump(), "val_every": 3, "checkpoint_every": 2}))
+        sparse = rebuilt(self.leg, loop_config=LOOP.model_copy(update={"evaluations": (TokenLoss(eval_every=3, batch_size=4),)}))
         folder = self.root / sparse.artifact_path
         with crash_after_first_failsafe(), self.assertRaisesRegex(RuntimeError, "died"):
             PretrainJob(sparse).run(self.root, worker())
@@ -317,8 +327,23 @@ class PretrainJobTests(unittest.TestCase):
         rows = [json.loads(line) for line in (folder / "train.jsonl").read_text().splitlines()]
         # the failsafe at step 2 flushed steps 1-2 before the crash
         self.assertEqual([(r["attempt"], r["step"]) for r in rows], [(1, 1), (1, 2), (2, 3), (2, 4)])
-        # step 4 is not a multiple of val_every, but it is end_step
+        # step 4 is not a multiple of eval_every, but it is end_step
         self.assertEqual([r["step"] for r in rows if "val_loss" in r], [3, 4])
+
+    def test_each_evaluation_is_taken_on_its_own_period_and_all_at_the_last_step(self):
+        both = (TokenLoss(eval_every=2, batch_size=4), Taken(eval_every=3))
+        leg = rebuilt(self.leg, loop_config=LOOP.model_copy(update={"evaluations": both}))
+        PretrainJob(leg).run(self.root, worker())
+        rows = [json.loads(line) for line in (self.root / leg.artifact_path / "train.jsonl").read_text().splitlines()]
+        self.assertEqual([r["step"] for r in rows if "val_loss" in r], [2, 4])
+        self.assertEqual([r["step"] for r in rows if "val_taken" in r], [3, 4])
+
+    def test_a_leg_with_no_evaluations_records_only_training_metrics(self):
+        leg = rebuilt(self.leg, loop_config=LOOP.model_copy(update={"evaluations": ()}))
+        PretrainJob(leg).run(self.root, worker())
+        rows = [json.loads(line) for line in (self.root / leg.artifact_path / "train.jsonl").read_text().splitlines()]
+        self.assertEqual([r["step"] for r in rows], [1, 2, 3, 4])
+        self.assertFalse(any(name.startswith("val_") for r in rows for name in r))
 
     def test_the_step_log_writes_a_diverged_value_as_null(self):
         steplog = StepLog(self.root, self.leg.artifact_path.as_posix())
@@ -345,6 +370,71 @@ class PretrainJobTests(unittest.TestCase):
         self.assertIsInstance(rebuilt.model, Transformer)
         self.assertIsInstance(rebuilt.starting_checkpoint.model, Transformer)
 
+    def test_a_manifest_names_the_sampler_class_and_identity_follows_it(self):
+        self.assertEqual(
+            self.leg.to_manifest()["parameters"]["sampler"],
+            {"class": "artifacts.stages.pretraining.samplers.RandomWindows"},
+        )
+        epochs = rebuilt(self.leg, sampler=Epochs(max_epochs=3))
+        self.assertEqual(
+            epochs.to_manifest()["parameters"]["sampler"],
+            {"class": "artifacts.stages.pretraining.samplers.Epochs", "max_epochs": 3},
+        )
+        self.assertNotEqual(epochs.lineage_hash, self.leg.lineage_hash)
+        self.assertEqual(Artifact.from_manifest(epochs.to_manifest()).sampler, Epochs(max_epochs=3))
+
+    def test_an_autocast_leg_is_its_own_trajectory_and_trains_in_bf16(self):
+        self.assertIsNone(self.leg.to_manifest()["parameters"]["autocast"])
+        mixed = rebuilt(self.leg, autocast="torch.bfloat16")
+        self.assertEqual(mixed.to_manifest()["parameters"]["autocast"], "torch.bfloat16")
+        self.assertNotEqual(mixed.lineage_hash, self.leg.lineage_hash)
+        with self.assertRaisesRegex(ValidationError, "autocast"):
+            rebuilt(self.leg, autocast="torch.float16")
+
+        # every forward, training and evaluation alike, runs under bf16 autocast; without it, under none
+        for leg, expected in ((mixed, torch.bfloat16), (self.leg, None)):
+            seen = set()
+
+            def batch_loss(job, model, inputs, targets):
+                seen.add(torch.get_autocast_dtype("cpu") if torch.is_autocast_enabled("cpu") else None)
+                return original(job, model, inputs, targets)
+
+            original = PretrainJob.batch_loss
+            with patch.object(PretrainJob, "batch_loss", batch_loss):
+                PretrainJob(leg).run(self.root, worker())
+            self.assertEqual(seen, {expected})
+            self.assertEqual(self.final(leg)["step"], 4)
+
+    def test_a_sweep_leg_trains_on_the_split_in_order_and_one_past_it_refuses(self):
+        # 2000 tokens hold 249 sequences of 8: 62 steps of 4, each the next 4 in order
+        swept = rebuilt(self.leg, sampler=Sweep())
+        self.assertEqual(swept.to_manifest()["parameters"]["sampler"], {"class": "artifacts.stages.pretraining.samplers.Sweep"})
+        firsts = []
+
+        def batch_loss(job, model, inputs, targets):
+            if model.training:
+                firsts.append(inputs[:, 0].tolist())
+            return original(job, model, inputs, targets)
+
+        original = PretrainJob.batch_loss
+        with patch.object(PretrainJob, "batch_loss", batch_loss):
+            PretrainJob(swept).run(self.root, worker())
+        train = self.dataset.bind(self.root).train.tokens
+        self.assertEqual(firsts, [[int(train[s * 8]) for s in range(step * 4, step * 4 + 4)] for step in range(4)])
+        long = rebuilt(swept, training_parameters=TRAINING.model_copy(update={"total_steps": 63}))
+        with self.assertRaisesRegex(ValueError, "62 batches of 4, fewer than end_step 63"):
+            PretrainJob(long).run(self.root, worker())
+
+    def test_an_epochs_leg_trains_and_one_past_its_epochs_refuses_before_its_first_step(self):
+        # 2000 tokens hold 249 sequences of 8: 62 steps an epoch in batches of 4
+        epochs = rebuilt(self.leg, sampler=Epochs(max_epochs=1))
+        PretrainJob(epochs).run(self.root, worker())
+        self.assertEqual(self.final(epochs)["step"], 4)
+        long = rebuilt(epochs, training_parameters=TRAINING.model_copy(update={"total_steps": 63}))
+        with self.assertRaisesRegex(ValueError, "end_step 63 is past 1 epochs of 62 steps"):
+            PretrainJob(long).run(self.root, worker())
+        self.assertEqual(list((self.root / long.artifact_path / "checkpoints").iterdir()), [])
+
     def test_a_leg_trains_any_model_and_continues_only_its_own(self):
         inputs = {"run_id": "r", "dataset": self.dataset, "training_parameters": TRAINING, "loop_config": LOOP}
         mamba = Mamba(vocab_size=MODEL.vocab_size, sequence_length=8, num_layers=1, d_model=16)
@@ -362,10 +452,15 @@ class PretrainJobTests(unittest.TestCase):
 
     def test_validation_scores_a_split_shorter_than_one_batch(self):
         # 2000 tokens hold 249 sequences of 8, all in one batch of up to 300
-        wide = rebuilt(self.leg, training_parameters=TrainingParameters.model_validate({**TRAINING.model_dump(), "batch_size": 300}))
-        metrics = PretrainJob(wide).evaluate(MODEL.build(torch.device("cpu")), self.dataset.bind(self.root), worker())
+        wide = (TokenLoss(eval_every=2, batch_size=300),)
+        metrics = PretrainJob(self.leg).evaluate(MODEL.build(torch.device("cpu")), self.dataset.bind(self.root), worker(), wide)
         self.assertTrue(torch.isfinite(metrics["val_loss"]))
         self.assertEqual(metrics["val_loss_var"].item(), 0.0)  # one batch: no spread, and never NaN
+
+    def test_two_evaluations_measuring_one_metric_are_refused(self):
+        twice = (TokenLoss(eval_every=2, batch_size=4), TokenLoss(eval_every=2, batch_size=8))
+        with self.assertRaisesRegex(ValueError, r"TokenLoss\(eval_every=2, batch_size=8\) measures \['val_loss', 'val_loss_var'\]"):
+            PretrainJob(self.leg).evaluate(MODEL.build(torch.device("cpu")), self.dataset.bind(self.root), worker(), twice)
 
     def test_live_progress_is_the_step_alone_off_cuda(self):
         running = worker()

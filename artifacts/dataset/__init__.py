@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
@@ -12,7 +11,7 @@ from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers import Tokenizer
 
 if TYPE_CHECKING:
-    import numpy as np
+    from artifacts.core.split import Split
 
 END_OF_TEXT = "<|endoftext|>"
 
@@ -98,17 +97,20 @@ class DataSet(Artifact):
 
     # -- the bound view ------------------------------------------------------
 
-    _train_tokens: np.ndarray = PrivateAttr()
-    _valid_tokens: np.ndarray = PrivateAttr()
+    _train: Split = PrivateAttr()
+    _valid: Split = PrivateAttr()
 
     def _load(self, root: Path) -> None:
         """Artifact._load's hook: one memmap per split over the bin its job
-        wrote, set on the fresh object bind read from the stored manifest."""
+        wrote, untagged, set on the fresh object bind read from the stored
+        manifest."""
         import numpy as np  # local: only a process that binds pays for numpy
 
+        from artifacts.core.split import Split, TagRanges
+
         for name, path in (
-            ("_train_tokens", self.paths(root)["training set"]),
-            ("_valid_tokens", self.paths(root)["validation set"]),
+            ("_train", self.paths(root)["training set"]),
+            ("_valid", self.paths(root)["validation set"]),
         ):
             # an empty file cannot be mapped, and an empty split is a legal one
             tokens = (
@@ -116,73 +118,25 @@ class DataSet(Artifact):
                 if path.stat().st_size
                 else np.empty(0, dtype=np.uint16)
             )
-            setattr(self, name, tokens)
+            setattr(self, name, Split(tokens, TagRanges.untagged(len(tokens))))
 
     @property
     def bound(self) -> bool:
-        return hasattr(self, "_train_tokens")
+        return hasattr(self, "_train")
 
     def _require(self, doing: str) -> None:
         if not self.bound:
             raise RuntimeError(
-                f"{self.uid} has no token arrays yet -- bind(root) to map the "
+                f"{self.uid} has no splits yet -- bind(root) to map the "
                 f"train.bin/valid.bin its job wrote before {doing}"
             )
 
     @property
-    def train_tokens(self):
-        self._require("reading train_tokens")
-        return self._train_tokens
+    def train(self) -> Split:
+        self._require("reading train")
+        return self._train
 
     @property
-    def valid_tokens(self):
-        self._require("reading valid_tokens")
-        return self._valid_tokens
-
-    def train_batches(self, batch_size: int, sequence_length: int, seed: int) -> Callable[[int], tuple[np.ndarray, np.ndarray]]:
-        """Returns the function from a step number to that step's (inputs,
-        targets), int64 arrays of shape (batch_size, sequence_length) drawn at
-        random positions of train_tokens.
-
-        The batch is a function of (seed, step) alone, so a resumed run draws
-        exactly the batches the interrupted one would have."""
-        import numpy as np
-
-        tokens = self.train_tokens
-
-        def get_train_batch(step: int) -> tuple[np.ndarray, np.ndarray]:
-            rng = np.random.default_rng((seed, step))
-            starts = rng.integers(0, len(tokens) - sequence_length, size=batch_size)
-            # int64 because Embedding needs long
-            inputs = np.stack([tokens[i : i + sequence_length] for i in starts]).astype(np.int64)
-            targets = np.stack([tokens[i + 1 : i + sequence_length + 1] for i in starts]).astype(np.int64)
-            return inputs, targets
-
-        return get_train_batch
-
-    def valid_batches(
-        self, batch_size: int, sequence_length: int
-    ) -> tuple[int, Callable[[int], tuple[np.ndarray, np.ndarray]]]:
-        """Returns how many batches cover valid_tokens and the function from a
-        batch id below that count to its (inputs, targets), int64 arrays of
-        consecutive, non-overlapping sequences of sequence_length.
-
-        A split shorter than one batch is one batch of the sequences it holds,
-        so fewer than batch_size rows; the tail too short to fill a batch is in
-        no batch."""
-        import numpy as np
-
-        tokens = self.valid_tokens
-        sequences = (len(tokens) - 1) // sequence_length
-        if sequences < 1:
-            raise ValueError(
-                f"the validation split holds {len(tokens)} tokens, fewer than one "
-                f"sequence of {sequence_length} and its next token"
-            )
-        size = min(batch_size, sequences) * sequence_length
-
-        def get_valid_batch(batch_id: int) -> tuple[np.ndarray, np.ndarray]:
-            window = tokens[batch_id * size : (batch_id + 1) * size + 1].astype(np.int64)
-            return window[:-1].reshape(-1, sequence_length), window[1:].reshape(-1, sequence_length)
-
-        return (len(tokens) - 1) // size, get_valid_batch
+    def valid(self) -> Split:
+        self._require("reading valid")
+        return self._valid
