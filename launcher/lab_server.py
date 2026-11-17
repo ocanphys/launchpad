@@ -12,8 +12,9 @@ from config import LAB_PORT, LAB_WORKSPACE, STORAGE
 
 
 def start_jupyterlab() -> None:
-    """Writes the settings overrides, then starts `jupyter lab` on LAB_PORT,
-    rooted at LAB_WORKSPACE.
+    """Writes the settings overrides and the kernel config, then starts
+    `jupyter lab` on LAB_PORT, rooted at LAB_WORKSPACE, where every kernel
+    runs whatever folder its notebook is in.
 
     The workspace is this container's own disk, where the dashboard's
     `/new/<kind>` writes each new notebook, so an experiment nobody declares
@@ -64,6 +65,15 @@ def start_jupyterlab() -> None:
             indent=2,
         )
     )
+
+    # Jupyter starts a kernel in its notebook's folder, on the volume for one under storage/,
+    # and Modal refuses every reload and commit while any process's cwd is on the mount.
+    from IPython.paths import get_ipython_dir
+
+    profile = Path(get_ipython_dir()) / "profile_default"
+    profile.mkdir(parents=True, exist_ok=True)
+    chdir = f"__import__('os').chdir({LAB_WORKSPACE.as_posix()!r})"
+    (profile / "ipython_kernel_config.py").write_text(f"c.IPKernelApp.exec_lines = [{chdir!r}]\n")
 
     LAB_WORKSPACE.mkdir()
     (LAB_WORKSPACE / "storage").symlink_to(STORAGE)

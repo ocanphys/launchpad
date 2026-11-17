@@ -29,8 +29,20 @@ The server is rooted at `LAB_WORKSPACE`, a folder on the container's own disk
 that holds the notebooks `/new/<kind>` starts and a `storage` link to the volume. The
 file browser shows the artifact folders under `storage/` (`storage/sources/`,
 `storage/runs/`), and a path found there, less that prefix, can be passed
-straight to `Artifact.load`. Notebooks are protected by the same secret as the
-dashboard ([Dashboard](dashboard.md#access)).
+straight to `Artifact.load`. Every kernel runs in the workspace, a notebook
+opened under `storage/` included, so relative paths resolve from there.
+Notebooks are protected by the same secret as the dashboard
+([Dashboard](dashboard.md#access)).
+
+### Why kernels run in the workspace
+
+Modal refuses to reload or commit the volume while any process in the
+container has a file open on it, and a working directory counts. Jupyter
+starts a kernel in its notebook's folder, so one notebook opened under
+`storage/` would make `lab.refresh()`, `lab.save()` and every committed
+declaration raise in every notebook, for as long as its kernel lives.
+`start_jupyterlab` writes an IPython kernel config whose first line moves
+each kernel to `LAB_WORKSPACE`.
 
 ## Starting from a template
 

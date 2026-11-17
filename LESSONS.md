@@ -440,3 +440,21 @@ new class. `test_samplers.py` pins what each class draws for fixed seeds
 (`EPOCHS_STARTS`, and `TRAIN_BATCHES_STARTS`, which `RandomWindows` was checked
 against before `train_batches` was deleted), so an accidental change fails
 there. A new sampler gets its pin when it ships.
+
+## One kernel on the volume blocks every notebook's reload and commit
+
+Modal refuses `volume.reload()` and `volume.commit()` while any process in
+the container has a file open on the mount, and a working directory counts:
+`RuntimeError: there are open files preventing the operation: cwd of
+'... ipykernel_launcher ...' is inside volume`. Jupyter starts each kernel in
+its notebook's folder, so opening a `declaring.ipynb` under `storage/` put one
+kernel's cwd on the volume, and `lab.refresh()`, `lab.save()` and
+`create_experiment(commit=True)` then raised in every other notebook. Found
+while chasing a lab that looked hung after a deploy. Moving the calling
+process's own cwd off the mount before the call does not help: the blocker is
+another process.
+
+`start_jupyterlab` writes an IPython kernel config that moves each kernel to
+`LAB_WORKSPACE` as it starts. Anything else that runs in the lab container
+(a terminal, a subprocess a cell starts) must not sit in `storage/` either.
+

@@ -32,7 +32,6 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from functools import cache
@@ -240,25 +239,11 @@ def _volume():
     return modal.Volume.from_name(VOLUME_NAME)
 
 
-def _outside_volume(op):
-    """Run a volume operation with cwd stepped outside the mount first.
-
-    Modal counts a cwd under the volume as an open file, and a notebook rooted
-    there would otherwise fail every reload and commit.
-    """
-    cwd = os.getcwd()
-    os.chdir(tempfile.gettempdir())
-    try:
-        return op()
-    finally:
-        os.chdir(cwd)
-
-
 def refresh() -> None:
     """Reloads the volume, so files written outside this container appear.
     Only a container with the volume mounted can do this; Modal refuses
     anywhere else."""
-    _outside_volume(_volume().reload)
+    _volume().reload()
 
 
 def save() -> None:
@@ -266,7 +251,7 @@ def save() -> None:
     save the notebook in JupyterLab first, then `lab.save()`. Only a
     container with the volume mounted can do this; Modal refuses anywhere
     else."""
-    _outside_volume(_volume().commit)
+    _volume().commit()
 
 
 def current_notebook() -> bytes | None:
