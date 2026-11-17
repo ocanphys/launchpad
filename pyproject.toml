@@ -25,6 +25,8 @@ lab = [
     "jupyterlab",
     "matplotlib",
     "pandas>=3.0.6",
+    "plotly>=7.1.0",
+    "seaborn",
 ]
 dev = [
     "anywidget>=0.11.0",
@@ -33,7 +35,6 @@ dev = [
     "ipympl>=0.10.0",
     "ipywidgets>=8.1.9",
     "modal>=1.5.4",
-    "plotly>=7.1.0",
     "pytest>=9.1.1",
     "ruff>=0.16.3",
 ]
