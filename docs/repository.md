@@ -160,5 +160,5 @@ What is happening now lives outside the volume, in Modal Dicts and one Queue:
   channels (`logs.py`), and what a worker does around a job (`runtime.py`,
   [Workers](workers.md)).
 - **`web/`**: the dashboard page ([Dashboard](dashboard.md)).
-- **`gpus/`**, **`profiling/`**: GPU throughput tables, the training loop's MFU
+- **`gpus/`**, **`profiling/`**: GPU throughput (`peaks.py`) and price (`pricing.py`) tables, the training loop's MFU
   monitor ([Monitoring](monitoring.md)), and the profiler ([Profiling](profiling.md)).

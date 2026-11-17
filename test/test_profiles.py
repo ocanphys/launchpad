@@ -17,6 +17,8 @@ from artifacts.core.SGD.optimizers import SGD, AdamW
 from artifacts.core.storage import write_manifest
 from artifacts.profiles import Profile, _with_prefix, jobs
 from artifacts.profiles.jobs import ProfileJob
+from gpus.pricing import gpu_price_per_s
+from models.mamba import Mamba
 from models.transformer import Transformer
 from models.transformerFA import TransformerFA
 from profiling.util import run_profile
@@ -185,6 +187,8 @@ def test_the_summary_is_a_row_per_step_of_parameters_measurements_and_rates():
     row = summary.loc[0]
     assert row["model.class"] == "models.transformer.Transformer" and row["model.d_model"] == 16
     assert row["optimizer.class"] == "artifacts.core.SGD.optimizers.AdamW" and row["resources.gpu_type"] == "L4"
+    assert row["autocast"] == "torch.bfloat16" and row["compile"] == "no"
+    assert declared(autocast=None).with_results(TEXTS).summary().loc[0, "autocast"] == MODEL.dtype  # None runs in it
     assert row["gpu"] == "NVIDIA L4" and row["device_vram_bytes"] == 2**30
     assert row["persistent_measured_bytes"] == 160  # weights, gradients and optimizer state
     assert row[["step_ms", "zero_grad_ms", "forward_ms"]].tolist() == [20.0, 0.003, 0.004]
@@ -196,7 +200,23 @@ def test_the_summary_is_a_row_per_step_of_parameters_measurements_and_rates():
     assert row["step_flops"] == step_flops and row["achieved_flops_per_s"] == pytest.approx(step_flops / 0.02)
     assert row["peak_flops_per_s"] == 121e12  # an L4's dense bf16 rate
     assert row["mfu"] == pytest.approx(step_flops / 0.02 / 121e12)
+    assert row["model_parameter_count"] == MODEL.parameter_count(embedding=False)
+    assert row["cost_per_ms"] == gpu_price_per_s["L4"] / 1e3
+    assert row["flops_per_dollar"] == pytest.approx(step_flops / (gpu_price_per_s["L4"] * 0.02))
     assert len(pd.concat([summary, summary])) == 4  # a series is one table
+
+
+def test_an_aggregated_summary_is_one_row_with_rates_from_the_reduced_step():
+    slower = REPORT | {"steps": [readings(START), readings(START + 5e4) | {"step_ms": 40.0, "peak_allocated_bytes": 2**22}]}
+    held = declared().with_results({"report": json.dumps(slower)})
+    per_step, mean = held.summary(), held.summary("mean")
+    assert "step" not in mean and len(mean) == 1
+    row = mean.loc[0]
+    assert row["step_ms"] == 30.0 and row["peak_allocated_bytes"] == 2**22  # a peak is the steps' max
+    assert row["mfu"] == pytest.approx(MODEL.step_flops(4) / 0.03 / 121e12)  # the mean step's, not the mean mfu
+    assert row["mfu"] != pytest.approx(per_step["mfu"].mean())
+    assert row["model.d_model"] == 16 and row["model_parameter_count"] == per_step.loc[0, "model_parameter_count"]
+    assert held.summary("min").loc[0, "step_ms"] == 20.0
 
 
 def test_mfu_is_nan_without_a_unit_and_a_forward_step_estimates_no_memory():
@@ -206,7 +226,23 @@ def test_mfu_is_nan_without_a_unit_and_a_forward_step_estimates_no_memory():
     forward = declared(step_kind="forward", kernel_events=False, trace_memory=False)
     assert forward.step_flops == MODEL.forward_flops(4) and forward.estimated_memory == {}
     held = forward.with_results({"report": TEXTS["report"]})
-    assert "persistent_estimated_bytes" not in held.summary()
+    assert held.summary()[["persistent_estimated_bytes", "activation_estimated_bytes"]].isna().all(axis=None)
+
+
+def test_what_a_summary_cannot_give_is_nan_and_logged_when_verbose(caplog):
+    unpeaked = {**REPORT, "gpu": "Some New GPU", "steps": [{"step_ms": 20.0, "phases_unix_us": {}}]}
+    mamba = Mamba(vocab_size=64, sequence_length=8, num_layers=1, d_model=16)
+    held = declared(model=mamba, peak_memory=False).with_results({"report": json.dumps(unpeaked)})
+    row = held.summary("mean").loc[0]
+    nan = ["peak_allocated_bytes", "peak_reserved_bytes", "persistent_estimated_bytes", "activation_estimated_bytes",
+           "model_parameter_count", "step_flops", "peak_flops_per_s", "achieved_flops_per_s", "mfu", "flops_per_dollar"]
+    assert row[nan].isna().all() and row["cost_per_ms"] == gpu_price_per_s["L4"] / 1e3
+    assert caplog.messages == []  # quiet unless verbose
+    held.summary(verbose=True)
+    assert caplog.messages == [f"{held.uid}: no {', '.join(nan)}; NaN in the summary"]
+    caplog.clear()
+    declared().with_results(TEXTS).summary(verbose=True)
+    assert caplog.messages == []  # a profile with everything logs nothing
 
 
 def test_display_steps_draws_each_step_on_its_first_phases_clock(shown):

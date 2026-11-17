@@ -12,6 +12,7 @@ pydantic; the methods import pandas, matplotlib and `profiling` when they are ca
 from __future__ import annotations
 
 import json
+import logging
 import math
 from functools import cached_property
 from pathlib import Path
@@ -25,6 +26,8 @@ from models import Model
 
 if TYPE_CHECKING:
     import pandas as pd
+
+log = logging.getLogger(__name__)
 
 
 class Profile(Artifact):
@@ -155,20 +158,22 @@ class Profile(Artifact):
         return self.autocast or self.model.dtype
 
     @property
-    def step_flops(self) -> int:
+    def step_flops(self) -> float:
         """Returns the declaration's analytic FLOPs for one measured step: the model's step_flops at
-        batch_size, or its forward_flops for a forward step."""
-        if self.step_kind == "forward":
-            return self.model.forward_flops(self.batch_size)
-        return self.model.step_flops(self.batch_size)
+        batch_size, or its forward_flops for a forward step; NaN for a model that counts neither."""
+        count = getattr(self.model, "forward_flops" if self.step_kind == "forward" else "step_flops", None)
+        return math.nan if count is None else count(self.batch_size)
 
     @property
     def peak_flops_per_s(self) -> float:
         """Returns the GPU's dense FLOPs per second at `precision`, from its datasheet
-        (gpus/peaks.py); NaN when it has no unit for that precision."""
+        (gpus/peaks.py); NaN when it has no unit for that precision or no row for the GPU."""
         from gpus.peaks import peak_tflops
 
-        return float(peak_tflops(self.report["gpu"], self.precision)) * 1e12
+        try:
+            return float(peak_tflops(self.report["gpu"], self.precision)) * 1e12
+        except KeyError:  # spec_row found no row for the GPU
+            return math.nan
 
     @property
     def estimated_memory(self) -> dict[str, int]:
@@ -252,41 +257,65 @@ class Profile(Artifact):
 
         return allocations_by_label(self._part("memory")[step])
 
-    def summary(self) -> pd.DataFrame:
-        """Returns one row per measured step: this profile's parameters, flattened ("model.d_model"),
-        what it measured, and what the declaration estimates and derives from that.
+    def summary(self, agg: str | None = None, verbose: bool = False) -> pd.DataFrame:
+        """Returns one row per measured step, or with `agg` one row for the profile: its parameters,
+        flattened ("model.d_model"), autocast filled with model.dtype and compile with "no" where
+        they are None, what it measured, and what the declaration estimates and derives from that.
 
             profile.summary().loc[0, "mfu"] -> 0.1308677610611617
 
         Measured: gpu, device_vram_bytes, persistent_measured_bytes (weights, gradients and
         optimizer state), step_ms, each phase's <phase>_ms and, with peak_memory, the peaks.
         Estimated and derived: persistent_estimated_bytes and activation_estimated_bytes where the
-        model and optimizer can estimate them, step_flops, achieved_flops_per_s (step_flops over
-        step_ms), peak_flops_per_s and mfu, both NaN without a unit for the precision. A series is
-        one table: `pd.concat([p.summary() for p in profiles])`.
+        model and optimizer can estimate them, model_parameter_count (N, without the input
+        embedding), step_flops, peak_flops_per_s, cost_per_ms (Modal's base price of
+        resources.gpu_type, gpus/pricing.py, in dollars), achieved_flops_per_s (step_flops over
+        step_ms), mfu and flops_per_dollar. A series is one table:
+        `pd.concat([p.summary("mean") for p in profiles])`. Every column is always there: a value the
+        profile did not record, or the model, the datasheet or the price table cannot give, is NaN,
+        and with verbose summary logs which columns hold one.
+
+        `agg` reduces the steps' timings and takes the max of their peaks; the rates are then
+        derived from the reduced step_ms, so mfu is the mean step's, not the mean of each step's.
+
+        Args:
+            agg: A pandas reduction of the steps ("mean", "median", "min"); None keeps a row per step.
+            verbose: Whether to log a warning naming the columns that hold NaN.
 
         Returns:
-            The rows, one per step, step numbers in "step".
+            The rows: one per step, step numbers in "step", or one row without "step".
         """
         import pandas as pd
 
-        report = self.report
-        parameters = pd.json_normalize(self.parameters()).iloc[0].to_dict()
-        measured = {"gpu": report["gpu"], "device_vram_bytes": report["device_vram_bytes"],
-                    "persistent_measured_bytes": sum(size["bytes"] for size in report["measured_size"].values())}
-        estimated = {f"{kind}_estimated_bytes": value for kind, value in self.estimated_memory.items()}
-        step_flops, peak = self.step_flops, self.peak_flops_per_s
-        rows = []
-        for step, readings in enumerate(report["steps"]):
-            achieved = step_flops / (readings["step_ms"] / 1e3)
-            rows.append({
-                "step": step, **parameters, **measured, "step_ms": readings["step_ms"],
-                **{f"{name}_ms": (end - start) / 1e3 for name, (start, end) in readings["phases_unix_us"].items()},
-                **{key: readings[key] for key in ("peak_allocated_bytes", "peak_reserved_bytes") if key in readings},
-                **estimated, "step_flops": step_flops, "achieved_flops_per_s": achieved,
-                "peak_flops_per_s": peak, "mfu": achieved / peak,
-            })
-        return pd.DataFrame(rows)
+        from gpus.pricing import gpu_price_per_s
+
+        report, model, estimated = self.report, self.model, self.estimated_memory
+        steps = pd.DataFrame([{
+            "step_ms": readings["step_ms"],
+            **{f"{name}_ms": (end - start) / 1e3 for name, (start, end) in readings["phases_unix_us"].items()},
+            **{key: readings.get(key, math.nan) for key in ("peak_allocated_bytes", "peak_reserved_bytes")},
+        } for readings in report["steps"]])
+        if agg is not None:
+            steps = steps.agg({column: "max" if column.startswith("peak_") else agg for column in steps}).to_frame().T
+        parameters = {**pd.json_normalize(self.parameters()).iloc[0].to_dict(),
+                      "autocast": self.precision, "compile": self.compile or "no"}
+        given = {**parameters, "gpu": report["gpu"], "device_vram_bytes": report["device_vram_bytes"],
+                 "persistent_measured_bytes": sum(size["bytes"] for size in report["measured_size"].values())}
+        table = pd.concat([pd.DataFrame([given] * len(steps)), steps], axis=1).assign(
+            persistent_estimated_bytes=estimated.get("persistent", math.nan),
+            activation_estimated_bytes=estimated.get("activation", math.nan),
+            model_parameter_count=model.parameter_count(embedding=False) if hasattr(model, "parameter_count") else math.nan,
+            step_flops=self.step_flops, peak_flops_per_s=self.peak_flops_per_s,
+            cost_per_ms=gpu_price_per_s.get(self.resources.gpu_type, math.nan) / 1e3)
+        table["achieved_flops_per_s"] = table["step_flops"] / (table["step_ms"] / 1e3)
+        table["mfu"] = table["achieved_flops_per_s"] / table["peak_flops_per_s"]
+        table["flops_per_dollar"] = table["step_flops"] / (table["cost_per_ms"] * table["step_ms"])
+        missing = [column for column in table if column not in parameters and table[column].isna().any()]
+        if verbose and missing:
+            log.warning(f"{self.uid}: no {', '.join(missing)}; NaN in the summary")
+        if agg is None:
+            table.insert(0, "step", table.index)
+        return table
 
     def display_steps(self, steps: list[int] | None = None, depth: int = 3) -> None:
         """Displays each step as a timeline, stacked top to bottom in one figure: memory with its

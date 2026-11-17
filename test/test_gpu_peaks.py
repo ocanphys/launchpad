@@ -1,9 +1,14 @@
-"""Consistency checks on the GPU peak table."""
+"""Consistency checks on the GPU peak and price tables."""
 import math
 
 import pytest
 
 from gpus.peaks import COLUMNS, gpu_specs, peak_tflops, spec_row
+from gpus.pricing import gpu_price_per_s
+
+
+def test_every_gpu_with_a_peak_has_a_price():
+    assert gpu_price_per_s.keys() == gpu_specs.keys()
 
 
 def test_every_row_has_each_column_positive_or_missing():

@@ -85,7 +85,7 @@ files are shown [below](#the-files):
 
 ```text
 step                                                          0
-autocast                                                   None
+autocast                                          torch.float32
 batch_size                                                    4
 compile                                                 default
 kernel_events                                              True
@@ -107,10 +107,27 @@ peak_allocated_bytes                                  487872000
 peak_reserved_bytes                                   580911104
 persistent_estimated_bytes                             25732096
 activation_estimated_bytes                            300154880
+model_parameter_count                                   1936512
 step_flops                                          30224154624
-achieved_flops_per_s                        1060028864595.40979
 peak_flops_per_s                                8100000000000.0
+cost_per_ms                                             1.64e-07
+achieved_flops_per_s                        1060028864595.40979
 mfu                                                    0.130868
+flops_per_dollar                         6463590637777060.0
+```
+
+`summary("mean")` is the run as one row, each timing the mean over the steps and each peak their
+max, without "step". Its rates come from the mean step_ms, so its mfu is the mean step's, not the
+mean of the steps' mfu. Any pandas reduction works: `summary("median")`, `summary("min")`.
+
+Every column is always there. A value the profile did not record (the peaks without
+`peak_memory`), or that the model, the datasheet or the price table cannot give (a forward
+step's memory estimates, a model with no FLOP count, a GPU missing from `gpus/peaks.py` or
+`gpus/pricing.py`), is NaN, along with what is derived from it. `summary(verbose=True)` logs a
+warning naming the columns that hold NaN:
+
+```text
+sweep-profile-7b6d11eaa5: no cost_per_ms, flops_per_dollar; NaN in the summary
 ```
 
 Every FLOP number is an algorithmic estimate, not a hardware counter: `step_flops` is the model
@@ -119,6 +136,10 @@ step), a kernel group's FLOPs are the profiler's per-op formulas from tensor sha
 `peak_flops_per_s` is the vendor's dense rate (`gpus/peaks.py`). `achieved_flops_per_s` is
 `step_flops` over the step's wall time, and `mfu` is that over the peak, NaN for a GPU with no
 unit at the precision.
+`cost_per_ms` is Modal's base list price of `resources.gpu_type`, in dollars (`gpus/pricing.py`):
+a region or non-preemptible execution multiplies it, and a GPU Modal upgraded, an A100 to 80 GB or an
+H100 to an H200, is billed as the one requested, so `gpu` can name a GPU other than the one priced.
+`flops_per_dollar` is `step_flops` over the step's cost.
 
 ## What a profile is
 
@@ -425,7 +446,7 @@ parts the profile's switches recorded, and says which switch to turn on when its
 | Method | Returns |
 | --- | --- |
 | `report` | `report.json` |
-| `summary()` | one row per step: the parameters, flattened, what was measured, and the estimates and rates derived from it |
+| `summary(agg)` | one row per step, or one reduced by `agg`: the parameters, flattened, what was measured, and the estimates, rates and cost derived from it |
 | `display_steps(steps, depth)` | the timeline figure above |
 | `events(step)` | `events_to_rows`' linked table of one step's events |
 | `aggregate_kernels(step, depth)` | `groups, kernels, unattributed_kernels, flop_sources` of one step |
