@@ -27,7 +27,7 @@ from artifacts.dataset.jobs import DataSetJob
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
 from artifacts.stages.pretraining.jobs import PretrainJob
-from artifacts.stages.pretraining.evaluations import TokenLoss
+from artifacts.stages.pretraining.evaluations import BlockGradNorm, TokenLoss
 from artifacts.stages.pretraining.samplers import Epochs, Sweep
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
@@ -486,6 +486,19 @@ class PretrainJobTests(unittest.TestCase):
         twice = (TokenLoss(eval_every=2, batch_size=4), TokenLoss(eval_every=2, batch_size=8))
         with self.assertRaisesRegex(ValueError, r"TokenLoss\(eval_every=2, batch_size=8\) measures \['val_loss', 'val_loss_var'\]"):
             PretrainJob(self.leg).evaluate(MODEL.build(torch.device("cpu")), self.dataset.bind(self.root), worker(), twice)
+
+    def test_block_grad_norm_reads_each_blocks_clipped_gradient(self):
+        both = (TokenLoss(eval_every=2, batch_size=4), BlockGradNorm(eval_every=2))
+        leg = rebuilt(self.leg, loop_config=LOOP.model_copy(update={"evaluations": both}))
+        PretrainJob(leg).run(self.root, worker())
+        rows = [json.loads(line) for line in (self.root / leg.artifact_path / "train.jsonl").read_text().splitlines()]
+        names = {f"grad_norm_tblocks_{i}" for i in range(leg.model.num_layers)}
+        for r in rows:
+            self.assertEqual(names & set(r), names if r["step"] % 2 == 0 else set())
+            if r["step"] % 2 == 0:
+                # the blocks hold some of the parameters grad_norm is taken over, clipped to max_norm
+                blocks = sum(r[name] ** 2 for name in names) ** 0.5
+                self.assertTrue(0 < blocks <= min(r["grad_norm"], TRAINING.max_norm) * (1 + 1e-5))
 
     def test_live_progress_is_the_step_alone_off_cuda(self):
         running = worker()

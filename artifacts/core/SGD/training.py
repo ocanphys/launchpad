@@ -53,8 +53,10 @@ class Evaluation(ParamConfig):
     the manifest.
 
     What it measures goes into the step's row of train.jsonl beside the
-    training metrics, under names starting `val_`, which is how a reader tells
-    the two apart. Never identity: measuring changes no weight.
+    training metrics, under names starting `val_` when it is of the validation
+    split, which is how a reader tells the two apart. One that reads the step's
+    gradients, still on the parameters, reads the training batch's, clipped.
+    Never identity: measuring changes no weight.
     """
 
     eval_every: int = Field(gt=0)
@@ -69,11 +71,11 @@ class Evaluation(ParamConfig):
         Args:
             job: The job running the leg, for its device and loss.
             model: The model at the step being measured.
-            dataset: The leg's dataset, bound; every evaluation is measured on dataset.valid.
+            dataset: The leg's dataset, bound; an evaluation that reads data reads dataset.valid.
             worker: The worker running the job, for live progress.
 
         Returns:
-            Each metric's name, starting `val_`, and its value.
+            Each metric's name, starting `val_` when it is of the validation split, and its value.
         """
         raise NotImplementedError
 

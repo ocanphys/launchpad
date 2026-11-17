@@ -54,6 +54,16 @@ batches, and the variance depends on the batch size it was measured with, so a
 sweep over training batch sizes keeps one evaluation batch size to compare
 across.
 
+`BlockGradNorm(eval_every=10)` shows how the gradient is spread over the
+blocks: every 10 steps it records the L2 norm of each block's gradient, as
+`grad_norm_tblocks_0`, `grad_norm_tblocks_1`, ... for a Transformer (one per
+block of every `ModuleList` directly on the network, so `grad_norm_blocks_<i>`
+for Mamba). It reads the gradients the step's own backward pass left, so it
+adds no forward or backward pass. They are read after clipping, which scales
+every block by one factor on a step whose `grad_norm` exceeds `max_norm`: the
+spread across blocks holds, the size is capped. Each norm gets its own chart
+on the dashboard.
+
 ::: artifacts.stages.pretraining.evaluations
     options:
       heading_level: 3

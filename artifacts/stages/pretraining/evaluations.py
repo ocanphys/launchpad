@@ -58,3 +58,29 @@ class TokenLoss(Evaluation):
         del worker.progress["val_batch"]
         losses = torch.stack(losses)
         return {"val_loss": losses.mean(), "val_loss_var": losses.var(correction=0)}
+
+
+class BlockGradNorm(Evaluation):
+    """The L2 norm of each block's gradient at the step, for each block of every
+    ModuleList directly on the network, as `grad_norm_<list>_<i>`
+    (`grad_norm_tblocks_0` for a Transformer's first block). It reads the step's
+    own gradients, so it costs no forward or backward pass.
+
+    They are read after clipping: a step whose `grad_norm` exceeded max_norm
+    has every block scaled down by one factor, so how the norm is spread over
+    the blocks holds and its size does not.
+
+        BlockGradNorm(eval_every=10) -> BlockGradNorm(eval_every=10)
+    """
+
+    def measure(
+        self, job: PretrainJob, model: torch.nn.Module, dataset: Any, worker: Worker
+    ) -> dict[str, torch.Tensor]:
+        import torch
+
+        return {
+            f"grad_norm_{name}_{i}": torch.nn.utils.get_total_norm([p.grad for p in block.parameters()])
+            for name, blocks in model.named_children()
+            if isinstance(blocks, torch.nn.ModuleList)
+            for i, block in enumerate(blocks)
+        }

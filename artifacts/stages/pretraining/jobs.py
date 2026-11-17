@@ -96,12 +96,12 @@ class PretrainJob(TrainingJob):
             step += 1
             learning_rate = self.set_learning_rate(optimizer, step)
             inputs, targets = self.to_device(get_train_batch(step))
+            optimizer.zero_grad()
             with autocast:
                 loss = self.batch_loss(model, inputs, targets)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             optimizer.step()
-            optimizer.zero_grad()
 
             metrics = {"loss": loss, "grad_norm": grad_norm, "learning_rate": learning_rate} | gpu_monitor.record(step)
             if due := [e for e in evaluations if step % e.eval_every == 0 or step == end_step]:

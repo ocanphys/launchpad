@@ -195,7 +195,8 @@ functions of that number. After `optimizer.step()` the model is the result of
 flowchart TD
   A["step += 1"] --> B["Set the learning rate for this step"]
   B --> C["Draw the batch for this step"]
-  C --> D["Forward pass and loss"]
+  C --> Z["Zero the gradients"]
+  Z --> D["Forward pass and loss"]
   D --> E["Backward pass"]
   E --> G["Clip the gradient norm"]
   G --> H["Optimizer step"]
@@ -237,7 +238,11 @@ subclass is the procedure, defined by the stage (pretraining's is
 [`TokenLoss`](artifact-repository/stages.md#evaluations)), so the loop knows
 none of them. Its metrics are named `val_*`, which is how a reader of
 `train.jsonl` tells them from the training metrics, and two evaluations that
-name the same metric are refused at the step they clash. `loop_config` is not
+name the same metric are refused at the step they clash. The step's gradients
+are zeroed before its forward pass rather than after the optimizer step, so an
+evaluation can read them, clipped, off the parameters
+([`BlockGradNorm`](artifact-repository/stages.md#evaluations) does); its metrics
+are of the training batch and are not named `val_*`. `loop_config` is not
 in `lineage_hash`, so changing an evaluation changes no leg's identity: it
 changes what is measured, never a weight.
 
