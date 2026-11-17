@@ -69,9 +69,11 @@ const EXPERIMENT = "experiment";
 // two places, and "artifacts" lists every artifact once. Set by route().
 let mode = "experiments";
 
-// The experiments whose rows also list what their tagged artifacts are built
-// from, opened by each one's arrow.
+// The experiments whose arrow lists the rows under them, and those whose
+// rows also list what their tagged artifacts are built from, opened by each
+// one's dependency count.
 const expanded = new Set();
+const withDeps = new Set();
 
 // The artifact page's disk image (`/artifact/<path>`: the manifest and step
 // log, a real file read on the server's mount) and the entry it was fetched
@@ -127,8 +129,8 @@ function stamp(states) {
 // In the artifacts view, every artifact on the volume that passes the filter
 // bar, one row each, by path; in the experiments view, unfiltered, only those
 // tagged with an experiment whose name holds the search text, under a row naming each experiment, a row apiece
-// for every experiment it is in, and for an `expanded` experiment everything
-// they depend on, once per experiment.
+// for every experiment it is in, and for a `withDeps` experiment everything
+// they depend on, once per experiment; one not `expanded` shows its row alone.
 // Full rebuild of the rows each time is correct and cheap at this
 // scale; the bar is the one thing focusable, and filterBar hands back the
 // same node until its fields change, so it is mounted only when it is a new
@@ -147,12 +149,12 @@ function draw(states) {
   experimentSearchEl.hidden = !grouped;
   const search = experimentSearchEl.value.trim().toLowerCase();
   const names = [...new Set(paths.flatMap(experiments))].filter((name) => name.toLowerCase().includes(search)).sort();
-  const key = JSON.stringify([mode, [...expanded], names, paths, states, [...pending]]);
+  const key = JSON.stringify([mode, [...expanded], [...withDeps], names, paths, states, [...pending]]);
   if (key === drawn) return;
   drawn = key;
   const row = (path) => artifactRow(path, states[path], ctx);
-  const toggle = (name) => {
-    expanded.has(name) ? expanded.delete(name) : expanded.add(name);
+  const toggle = (set, name) => () => {
+    set.has(name) ? set.delete(name) : set.add(name);
     redraw();
   };
   rowsEl.replaceChildren(...(grouped
@@ -169,9 +171,10 @@ function draw(states) {
         tagged.forEach(collect);
         const untagged = [...dependencies].filter((path) => !tagged.includes(path)).sort();
         const open = expanded.has(name);
+        const deps = withDeps.has(name);
         return [
-          experimentRow(name, tagged.length, untagged.length, open, () => toggle(name)),
-          ...(open ? [...tagged, ...untagged] : tagged).map(row),
+          experimentRow(name, tagged.length, untagged.length, { open, deps }, toggle(expanded, name), toggle(withDeps, name)),
+          ...(!open ? [] : deps ? [...tagged, ...untagged] : tagged).map(row),
         ];
       })
     : paths.map(row)));

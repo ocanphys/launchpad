@@ -139,8 +139,9 @@ the artifacts view.
 
 An experiment's row reads `name  3 (5)`: three artifacts tagged with it, built
 from five other artifacts, counted transitively and once each however many of
-its members depend on them. Its arrow, closed by default, lists those
-dependencies under it after the tagged ones, and stays open across polls. Its
+its members depend on them. Its arrow, closed by default, shows or hides every
+row under it. The `(5)` is a button, off by default, that lists those
+dependencies after the tagged ones. Both stay as set across polls. Its
 **declaration ↗** link opens `experiments/<experiment_uid>/declaration.ipynb`
 in the lab, the notebook that created it or the extension that overwrote it,
 never the `declaration2.ipynb` and on that other extensions keep beside it, and

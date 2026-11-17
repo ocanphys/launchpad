@@ -156,19 +156,24 @@ export function artifactRow(path, state, ctx) {
 }
 
 // The <tr> that opens an experiment's group in the experiments view, across
-// all the table's columns: the arrow that lists its dependencies too, its
-// name, how many artifacts are tagged with it and, in parentheses, how many
-// other artifacts they are built from, the notebook that created it and the
-// one listing every artifact tagged with it.
-export function experimentRow(name, tagged, dependencies, open, onToggle) {
+// all the table's columns: the arrow that shows or hides every row under it,
+// its name, how many artifacts are tagged with it and, as a button in
+// parentheses that lists them too, how many other artifacts they are built
+// from, the notebook that created it and the one listing every artifact tagged with it.
+export function experimentRow(name, tagged, dependencies, { open, deps }, onToggle, onToggleDeps) {
   return el("tr", { class: "experiment-row" },
     el("td", { colspan: 5 },
       el("button", {
         type: "button", class: "deps-arrow", onclick: onToggle,
-        text: open ? "▾" : "▸", title: open ? "hide dependencies" : "show dependencies",
+        text: open ? "▾" : "▸", title: open ? "hide artifacts" : "show artifacts",
       }),
       name,
-      el("span", { class: "dim", text: `  ${tagged} (${dependencies})  ` }),
+      el("span", { class: "dim", text: `  ${tagged} ` }),
+      el("button", {
+        type: "button", class: "deps-toggle" + (deps ? " on" : ""), onclick: onToggleDeps,
+        text: `(${dependencies})`, title: deps ? "hide dependencies" : "show dependencies",
+      }),
+      "  ",
       ["declaration", "notebook"].map((notebook) => el("a", {
         class: "experiment-notebook", href: `/experiment/${encodeURIComponent(name)}/${notebook}`,
         target: "_blank", rel: "noopener", text: `${notebook} ↗`,

@@ -51,6 +51,9 @@
      guide. The experiment row's notebook link reads the same. */
   header > a, a.experiment-notebook { margin-right: .6rem; font-size: 12px; font-weight: normal; color: inherit; opacity: .55; text-decoration: none; }
   header > a:hover, a.experiment-notebook:hover { opacity: .85; }
+  /* The experiment row's dependency count, read like the dim count beside it until on. */
+  .deps-toggle { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; opacity: .45; }
+  .deps-toggle:hover, .deps-toggle.on { opacity: .85; }
 
   /* The one way the page asks the server again (app.js's refresh): green
      after a good answer, red with the error after a bad one. */
