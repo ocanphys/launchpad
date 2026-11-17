@@ -81,8 +81,7 @@ class PretrainJob(TrainingJob):
             dtype=locate(self.artifact.autocast) if self.artifact.autocast else None,
             enabled=self.artifact.autocast is not None,
         )
-        precision = self.artifact.autocast or self.artifact.model.dtype
-        gpu_monitor = GpuMonitor(self.artifact.model, precision, self.device, batch_size, gpu_check_every, step, worker)
+        gpu_monitor = GpuMonitor(self.artifact.model, self.artifact.precision, self.device, batch_size, gpu_check_every, step, worker)
         dataset = self.dataset.bind(root)
         get_train_batch = self.artifact.sampler.batches(
             dataset.train, batch_size, self.artifact.model.sequence_length, seed, end_step

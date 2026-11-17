@@ -12,21 +12,27 @@ flash_gpu = pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_d
                                reason="flash attention needs an Ampere or later GPU")
 
 
-def built(cls, device):
+def built(cls, device, **fields):
     torch.manual_seed(0)
-    return cls(**SHAPE).build(torch.device(device))
+    return cls(**SHAPE, **fields).build(torch.device(device))
 
 
 def tokens(device):
     return torch.randint(0, SHAPE["vocab_size"], (2, SHAPE["sequence_length"]), device=device)
 
 
-def test_the_same_seed_builds_the_same_weights_and_on_the_cpu_the_same_output():
-    reference, flash = built(Transformer, "cpu"), built(TransformerFA, "cpu")
+@pytest.mark.parametrize("tie_embeddings", [False, True])
+@pytest.mark.parametrize(("dtype", "autocast"), [("torch.float32", False), ("torch.bfloat16", False), ("torch.float32", True)])
+def test_the_same_seed_builds_the_same_weights_and_on_the_cpu_the_same_output(dtype, autocast, tie_embeddings):
+    fields = {"dtype": dtype, "tie_embeddings": tie_embeddings}
+    reference, flash = built(Transformer, "cpu", **fields), built(TransformerFA, "cpu", **fields)
     assert reference.state_dict().keys() == flash.state_dict().keys()
     assert all(torch.equal(a, b) for a, b in zip(reference.state_dict().values(), flash.state_dict().values()))
     batch = tokens("cpu")
-    assert torch.equal(reference(batch), flash(batch))
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+        logits = reference(batch), flash(batch)
+    assert logits[0].dtype == (torch.bfloat16 if autocast or dtype == "torch.bfloat16" else torch.float32)
+    assert torch.equal(*logits)
 
 
 @flash_gpu

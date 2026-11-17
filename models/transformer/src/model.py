@@ -173,7 +173,8 @@ class RoPE(nn.Module):
             torch.stack((even_out, odd_out), dim=-1),
             "... blocks pair -> ... (blocks pair)",
         )
-        return x_rope
+        # rotated in the fp32 tables' precision, returned in K's: a bf16 K would otherwise come back fp32
+        return x_rope.to(K.dtype)
 
 
 class MultiHeadAttention(nn.Module):

@@ -33,6 +33,7 @@ from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
 from models.mamba import Mamba
 from models.transformer import Transformer
+from models.transformerFA import TransformerFA
 from system.lease_protocol import LeaseLost
 from system.runtime import Worker
 
@@ -400,6 +401,12 @@ class PretrainJobTests(unittest.TestCase):
         )
         self.assertNotEqual(epochs.lineage_hash, self.leg.lineage_hash)
         self.assertEqual(Artifact.from_manifest(epochs.to_manifest()).sampler, Epochs(max_epochs=3))
+
+    def test_a_leg_its_model_cannot_run_is_refused_at_declaration(self):
+        flash = TransformerFA(**MODEL.model_dump())
+        with self.assertRaisesRegex(ValidationError, "flash attention takes fp16 or bf16, not torch.float32"):
+            rebuilt(self.leg, model=flash)
+        self.assertEqual(rebuilt(self.leg, model=flash, autocast="torch.bfloat16").precision, "torch.bfloat16")
 
     def test_an_autocast_leg_is_its_own_trajectory_and_trains_in_bf16(self):
         self.assertIsNone(self.leg.to_manifest()["parameters"]["autocast"])

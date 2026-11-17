@@ -5,7 +5,7 @@ torch at import so declaring an artifact never pays for it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from pydantic import Field, model_validator
 
@@ -39,6 +39,12 @@ class TransformerFA(Model):
         if self.d_model % self.num_heads:
             raise ValueError("d_model must be divisible by num_heads")
         return self
+
+    def check_artifact(self, artifact: Any) -> None:
+        """Refuses an artifact whose matmuls run in anything but fp16 or bf16: flash attention takes nothing else."""
+        if artifact.precision not in ("torch.bfloat16", "torch.float16"):
+            raise ValueError(f"TransformerFA's flash attention takes fp16 or bf16, not {artifact.precision}: declare "
+                             f"autocast='torch.bfloat16', or the model with dtype='torch.bfloat16'")
 
     def build(self, device: torch.device):
         """Returns a freshly initialized TransformerLM on `device`."""

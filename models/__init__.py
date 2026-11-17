@@ -5,7 +5,7 @@ module stays free of torch so declaring a leg never imports it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from artifacts.core.artifact import ParamConfig
 
@@ -29,6 +29,17 @@ class Model(ParamConfig):
             Transformer(...).build(torch.device("cpu")) -> TransformerLM(...) with every parameter on the cpu
         """
         raise NotImplementedError
+
+    def check_artifact(self, artifact: Any) -> None:
+        """Raises ValueError when this model cannot run as `artifact` declares it. Every artifact
+        holding a model calls it from its own validator, so a declaration the model cannot run fails
+        when it is built; the base runs anything, and a subclass refuses what it cannot.
+
+            Pretraining(model=TransformerFA(...), autocast=None, ...) -> ValidationError (flash attention takes fp16 or bf16)
+
+        Args:
+            artifact: The artifact being validated, holding this model: a Pretraining leg or a Profile.
+        """
 
     def measure_size(self, network: torch.nn.Module) -> dict[str, int]:
         """Returns the parameter count and bytes of the built `network`, read from its weights.

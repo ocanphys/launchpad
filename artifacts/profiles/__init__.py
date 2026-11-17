@@ -22,7 +22,6 @@ from pydantic import Field, PrivateAttr, model_validator
 from artifacts.core.artifact import Artifact, Resources
 from artifacts.core.SGD.optimizers import Optimizer
 from models import Model
-from models.transformerFA import TransformerFA
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -77,7 +76,7 @@ class Profile(Artifact):
     def _runs_as_declared(self) -> Self:
         """Refuses a profile that would not run as it says: allocated anything but its resources,
         on anything but one GPU, with module scopes under torch.compile, which they do not work under,
-        or a TransformerFA in a precision its flash attention does not take."""
+        or as its model cannot run (Model.check_artifact)."""
         if self.allocated_resources not in (None, self.resources):
             raise ValueError(f"allocated_resources ({self.allocated_resources}) must be resources ({self.resources}): "
                              f"a profile is allocated the GPU it measures")
@@ -85,9 +84,7 @@ class Profile(Artifact):
             raise ValueError(f"resources must name one GPU, got {self.resources}")
         if self.compile is not None and self.module_scopes:
             raise ValueError("module_scopes do not work under torch.compile: declare module_scopes=False")
-        if isinstance(self.model, TransformerFA) and self.precision not in ("torch.bfloat16", "torch.float16"):
-            raise ValueError(f"TransformerFA's flash attention takes fp16 or bf16, not {self.precision}: declare "
-                             f"autocast='torch.bfloat16', or the model with dtype='torch.bfloat16'")
+        self.model.check_artifact(self)
         return self
 
     @cached_property

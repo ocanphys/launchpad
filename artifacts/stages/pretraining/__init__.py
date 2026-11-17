@@ -48,6 +48,18 @@ class Pretraining(Training):
             )
         return self
 
+    @model_validator(mode="after")
+    def _model_runs_as_declared(self) -> Self:
+        """Refuses a leg its model cannot run (Model.check_artifact), at declaration rather than on
+        the GPU."""
+        self.model.check_artifact(self)
+        return self
+
+    @property
+    def precision(self) -> str:
+        """Returns the dtype the matmuls run in: autocast, else the model's dtype."""
+        return self.autocast or self.model.dtype
+
     @property
     def tokenizer(self) -> Tokenizer:
         """Returns the tokenizer this leg's dataset was tokenized with: the one

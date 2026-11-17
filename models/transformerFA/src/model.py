@@ -175,7 +175,8 @@ class RoPE(nn.Module):
             torch.stack((even_out, odd_out), dim=-1),
             "... blocks pair -> ... (blocks pair)",
         )
-        return x_rope
+        # rotated in the fp32 tables' precision, returned in K's: a bf16 K would otherwise come back fp32
+        return x_rope.to(K.dtype)
 
 
 class MultiHeadAttention(nn.Module):
@@ -243,10 +244,9 @@ class MultiHeadAttention(nn.Module):
             hK = self.rope(hK, token_positions)
             hQ = self.rope(hQ, token_positions)
         if hQ.is_cuda and not self.capture_internals:
-            # flash only, so a dtype or GPU it cannot run on raises: it needs fp16 or bf16, and Ampere or later.
-            # RoPE's fp32 tables promote hQ and hK, so they take hV's dtype.
+            # flash only, so a dtype or GPU it cannot run on raises: it needs fp16 or bf16, and Ampere or later
             with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                attention_output = F.scaled_dot_product_attention(hQ.to(hV.dtype), hK.to(hV.dtype), hV, is_causal=True)
+                attention_output = F.scaled_dot_product_attention(hQ, hK, hV, is_causal=True)
             attention_scores = None
         else:
             attention_output, attention_scores = SPDA(hQ, hK, hV, mask, return_scores=self.capture_internals)

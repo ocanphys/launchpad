@@ -19,12 +19,12 @@ Only the flash backend is allowed, so where it cannot run, the forward pass
 raises instead of falling back to another kernel:
 
 - **Precision.** Flash attention takes fp16 or bf16: declare
-  `dtype="torch.bfloat16"`, or run under bf16 autocast, as profiling's
-  `autocast="torch.bfloat16"` does. An fp32 network without autocast raises,
-  and a [Profile](../profiling.md#the-step-and-compile) that would run one is
-  refused when it is declared.
-  RoPE's tables are fp32, so the rotated queries and keys are cast to the
-  values' dtype first.
+  `dtype="torch.bfloat16"`, or run under bf16 autocast, as a leg's or a
+  profile's `autocast="torch.bfloat16"` does. An fp32 network without autocast
+  raises, so `TransformerFA.check_artifact` refuses a `Pretraining` leg or a
+  [Profile](../profiling.md#the-step-and-compile) that would run one when it
+  is declared. RoPE rotates in its fp32 tables and returns the queries and keys
+  in their own dtype, so all three reach flash attention in one.
 - **GPU.** An Ampere GPU or later (A10, L4, A100, H100); a T4 raises.
 - **Head dimension.** `d_model / num_heads` at most 256.
 

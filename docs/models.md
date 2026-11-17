@@ -10,9 +10,14 @@ declaring a leg stays cheap.
 
 ## What readers expect of a model
 
-`Model` declares only `build(device)`, which returns the freshly initialized
-torch module on `device`. It has no fields: each architecture declares its own,
-and the code that reads a model asks for exactly the names it needs.
+`Model` declares `build(device)`, which returns the freshly initialized torch
+module on `device`, and `check_artifact(artifact)`, which every artifact
+holding a model (`Pretraining`, `Profile`) calls from its own validator. The
+base runs anything; an architecture refuses what it cannot run as the artifact
+declares it, so the declaration fails when it is built, not on the GPU.
+`TransformerFA` refuses a precision other than fp16 or bf16. `Model` has no
+fields: each architecture declares its own, and the code that reads a model
+asks for exactly the names it needs.
 
 | Name | Read by |
 | --- | --- |
