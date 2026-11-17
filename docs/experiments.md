@@ -20,6 +20,11 @@ runs = [Pretraining(run_id=f"{experiment_uid}-bs{batch_size}", ...) for batch_si
 report = lab.create_experiment(experiment_uid, runs, commit=True)
 ```
 
+Over a grid, `lab.sweep(build, grid)` returns the runs: `build` declares one
+point's whole chain from a namespace of its values, and every point that
+fails validation anywhere in that chain is printed and left out, as the
+template does.
+
 ```mermaid
 flowchart TD
   U{"experiments/uid exists?"} -->|"yes, no extend"| TAKEN["raise FileExistsError"]

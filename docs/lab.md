@@ -52,10 +52,16 @@ anything gets declared. `/new/<kind>` writes a copy of
 contents API, named `new-<kind>-<timestamp>-<suffix>.ipynb`, and opens it;
 nothing is written to the volume.
 
-- **`experiment_template.ipynb`** sweeps batch sizes: one `experiment_uid`,
-  shared sources, tokenizer, dataset and model, a `Pretraining` per batch size
-  with `run_id=f"{experiment_uid}-bs{batch_size}"`, and one
-  `lab.create_experiment` call ([Experiments](experiments.md)).
+- **`experiment_template.ipynb`** tunes pretraining over a grid: one
+  `experiment_uid`, the shared sources, a table of model presets, a
+  `param_grid` (vocabulary, architecture, size, context length, batch size,
+  learning rate, autocast, compile, GPU), and `build(conf)`, which declares one
+  point's whole chain, tokenizer, dataset, model and leg, with a `run_id`
+  naming every swept value. `lab.sweep(build, param_grid)` returns the run of
+  every point that validates and prints the rest with the reason, such as a
+  `TransformerFA` without bf16; points sharing a tokenizer's values share the
+  tokenizer. One `lab.create_experiment` call creates it
+  ([Experiments](experiments.md)).
 - **`artifact_template.ipynb`** defines one pretraining run, previews and
   commits its declaration, and benchmarks its model on the GPU it asks for,
   with kernel tables to read the result.

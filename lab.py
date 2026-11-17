@@ -4,6 +4,7 @@ an experiment's, and the experiment's artifacts read back:
     import lab
     report = lab.declare(tokenizer)               # preview, writes nothing
     report = lab.declare(tokenizer, commit=True)  # publish missing manifests
+    runs = lab.sweep(build, grid)                 # every point of a grid that validates
     report = lab.create_experiment("batch-size-study", runs, commit=True)
     runs = lab.load_experiment("batch-size-study")
 
@@ -33,12 +34,16 @@ import os
 import re
 import shutil
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
+from itertools import product
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 
 import modal
+from pydantic import ValidationError
 
 from artifacts.core.artifact import Artifact, Resources
 from artifacts.core.resolve import resolve
@@ -381,6 +386,37 @@ def declare(
     return report
 
 
+def sweep(build: Callable[[SimpleNamespace], Artifact], grid: dict[str, list]) -> list[Artifact]:
+    """Returns `build(point)` for every point of `grid`, each a namespace holding one value per
+    key, and prints and leaves out each point whose declaration fails validation.
+
+    `build` declares the whole chain from its point, the tokenizer and dataset as much as the
+    leg, so a refusal anywhere in it (a vocab_size the model does not match, a TransformerFA
+    without bf16) leaves that point out, naming the values swept and the reason.
+
+        runs = lab.sweep(build, {"model": [Transformer, TransformerFA], "autocast": [None, "torch.bfloat16"]})
+        -> left out model=TransformerFA autocast=None: Value error, TransformerFA's flash attention takes fp16 or bf16, ...
+
+    Args:
+        build: Returns the artifact one point declares, with everything it is built from.
+        grid: Each name swept and its values; every combination is a point, the last name varying fastest.
+
+    Returns:
+        The artifact of each point that validates, in the grid's order.
+    """
+    swept = [key for key, values in grid.items() if len(values) > 1]
+    label = lambda value: getattr(value, "__name__", value)  # a class by its name
+    artifacts = []
+    for values in product(*grid.values()):
+        point = SimpleNamespace(**dict(zip(grid, values)))
+        try:
+            artifacts.append(build(point))
+        except ValidationError as error:
+            named = " ".join(f"{key}={label(getattr(point, key))}" for key in swept)
+            print(f"left out {named}: {'; '.join(e['msg'] for e in error.errors())}")
+    return artifacts
+
+
 def create_experiment(
     experiment_uid: str,
     artifacts: list[Artifact],
@@ -409,7 +445,7 @@ def create_experiment(
     everything is written, so a failed commit leaves no experiment, and
     running it again completes it.
 
-        lab.create_experiment("batch-size-study", runs, commit=True)  # declarations/experiment_template.ipynb's runs
+        lab.create_experiment("batch-size-study", runs, commit=True)  # three legs, one per batch size
         -> ... declared on artifact paths:
            runs/batch-size-study-bs32/pretraining/0-20000-960dd4bc7f
            runs/batch-size-study-bs64/pretraining/0-20000-2956000f6f
@@ -516,7 +552,7 @@ def load_experiment(experiment_uid: str, root: Path = STORAGE) -> list[Artifact]
     Read off the manifests each call, the mounted volume reloaded first, so
     an artifact tagged after the experiment was created is listed too.
 
-        lab.load_experiment("batch-size-study")  # declarations/experiment_template.ipynb's, created
+        lab.load_experiment("batch-size-study")  # the experiment create_experiment made above
         -> [Pretraining(run_id='batch-size-study-bs128', ...),
             Pretraining(run_id='batch-size-study-bs32', ...),
             Pretraining(run_id='batch-size-study-bs64', ...)]

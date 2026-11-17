@@ -284,5 +284,24 @@ class DeclareTests(unittest.TestCase):
             self.assertEqual(lab.current_notebook(), bytes(f"{LAB_WORKSPACE}/new.ipynb", "utf8"))
 
 
+class SweepTests(unittest.TestCase):
+    def test_it_yields_every_point_that_validates_and_names_each_one_left_out(self):
+        def build(conf) -> Pretraining:
+            # the whole chain from the point: a tokenizer the model's 1000 tokens may not match
+            tokenizer = Tokenizer(vocab_size=conf.vocab_size, special_tokens=("<pad>",), sources=(ODYSSEY,))
+            dataset = DataSet.from_sources(tokenizer, (ODYSSEY,), (ODYSSEY,))
+            fields = {name: getattr(PRETRAINING, name) for name in Pretraining.model_fields}
+            return Pretraining(**fields | {"run_id": f"v{conf.vocab_size}-s{conf.seed}", "dataset": dataset})
+
+        printed = io.StringIO()
+        with redirect_stdout(printed):
+            runs = lab.sweep(build, {"vocab_size": [1000, 2000], "seed": [0, 1], "fixed": ["same"]})
+        self.assertEqual([run.run_id for run in runs], ["v1000-s0", "v1000-s1"])
+        lines = printed.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        # only the swept keys name a point
+        self.assertTrue(lines[0].startswith("left out vocab_size=2000 seed=0: Value error, model.vocab_size (1000) does not match"))
+
+
 if __name__ == "__main__":
     unittest.main()
