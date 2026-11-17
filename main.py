@@ -71,13 +71,6 @@ chat_image = (
     .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
 )
 
-# torch to run a model, fastapi to serve it, and web/ for the page and its login form.
-chat_image = (
-    locked_image("worker", "web")
-    .add_local_dir(local_path="web", remote_path=WEB_DIR.as_posix())
-    .add_local_python_source(*CALL_SOURCE, *ARTIFACTS_SOURCE)
-)
-
 lab_image = (
     locked_image("lab")
     .env({LAB_COMMIT_ENV: get_git_commit() if modal.is_local() else "unknown"})
@@ -135,7 +128,8 @@ def persist_logs() -> None:
     volume.reload()
     persist_snapshot(STORAGE, volume)
 
-
+# TODO: this can be made concurrent. Workers are not physical, each can get its own subprocess
+# inside a container. Currently volume reload and file descriptors open for reading datasets conflict.
 @app.function(image=worker_image, volumes={STORAGE.as_posix(): volume}, timeout=CONTAINER_LIFETIME)
 def run_job(artifact_path: str) -> None:
     """Load the artifact at `artifact_path`, run whatever produces it, under
