@@ -108,11 +108,12 @@ class TrainingJob(Job):
             step = state["step"]
             model.load_state_dict(state["model"])
             if "optimizer" in state:
+                # load_state_dict also restores the saved leg's options (betas,
+                # weight_decay, fused, ...); this leg's are the ones it was built with
+                built = [{k: v for k, v in group.items() if k != "params"} for group in optimizer.param_groups]
                 optimizer.load_state_dict(state["optimizer"])
-                # load_state_dict also restores the saved leg's betas/
-                # weight_decay; this leg's are the ones in its lineage hash
-                for group in optimizer.param_groups:
-                    group.update(self.training_parameters.optimizer.model_dump())
+                for group, options in zip(optimizer.param_groups, built):
+                    group.update(options)
             else:
                 # only reachable from a starting checkpoint: failsafes without
                 # an optimizer were skipped above

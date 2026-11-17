@@ -145,7 +145,10 @@ flowchart TD
 
 In every case the optimizer settings come from this leg, not from the
 checkpoint it loaded: `load_state_dict` restores the saved leg's, so the job
-overwrites them with `training_parameters.optimizer`'s fields after loading.
+puts back every option the optimizer was built with after loading, its
+declared fields and the ones torch picks alike. On CUDA it is built fused, one
+kernel per step for the same update; `fused` is not a field, so it changes no
+leg's identity.
 If the starting checkpoint saved no optimizer state, the job warns and uses a
 fresh optimizer. A leg that starts from another leg also checks that the
 checkpoint's recorded step matches its own `start_step`, and refuses
@@ -389,9 +392,7 @@ The architecture a leg trains, and how to add one, is on [Models](models.md).
 None applied yet.
 
 - **Weight decay groups.** One param group, so embeddings, RMSNorm gains and
-  biases are decayed. The usual recipe decays `p.ndim >= 2` only. `resume`
-  re-applies the optimizer's fields to every group; with two groups it must
-  leave the no-decay group's `weight_decay` at 0.
+  biases are decayed. The usual recipe decays `p.ndim >= 2` only.
 - **`mmap=True` on the volume mount.** Stripping optimizers maps each earlier
   failsafe and renames over it. Whether Modal's FUSE mount supports the map
   and the rename under it needs a check on the real mount. Fallback: plain
@@ -401,10 +402,6 @@ None applied yet.
   resume briefly holds two copies of both. `map_location="cpu"` removes the
   transient at the cost of a slower copy.
 - **`torch.compile(model)`** is usually a free 1.3 to 2x on this shape on CUDA.
-- **Optimizer flags its class does not declare** (`AdamW`'s `amsgrad`,
-  `fused`, `foreach`, `capturable`) come from the saved leg, since the
-  re-apply covers only the declared fields. This bites when a torch
-  upgrade between legs changes a default.
 - **Sweeping stale `.tmp` files.** `worker.publishing` deletes its temporary
   file whenever it does not publish, so an ordinary failure and a lost lease
   both clean up after themselves. A hard kill (OOM, preemption, timeout) runs

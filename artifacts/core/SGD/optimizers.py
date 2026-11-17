@@ -29,8 +29,18 @@ class Optimizer(ParamConfig):
     torch_class: ClassVar[str]  # resolved worker-side via artifacts.core.locate.locate
 
     def build(self, parameters):
-        """Returns the torch optimizer over `parameters`, built with this one's fields."""
-        return locate(self.torch_class)(parameters, **self.model_dump())
+        """Returns the torch optimizer over `parameters`, built with this one's fields, and fused
+        when the parameters are on CUDA: one kernel per step, the same update.
+
+        Args:
+            parameters: The model's parameters, all on one device.
+
+        Returns:
+            The torch optimizer.
+        """
+        parameters = list(parameters)
+        fused = True if parameters[0].is_cuda else None  # None: torch's default for the device
+        return locate(self.torch_class)(parameters, **self.model_dump(), fused=fused)
 
     def measure_size(self, optimizer) -> dict[str, int]:
         """Returns the element count and bytes of the state tensors of the built torch `optimizer`, which

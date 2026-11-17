@@ -458,3 +458,15 @@ another process.
 `LAB_WORKSPACE` as it starts. Anything else that runs in the lab container
 (a terminal, a subprocess a cell starts) must not sit in `storage/` either.
 
+## `load_state_dict` restores every optimizer option, `fused` included
+
+An optimizer's `state_dict` saves each param group's options along with its
+state: lr, betas, weight decay, and the ones nobody declared, `fused`,
+`foreach`, `capturable`. `load_state_dict` puts all of them back, so an
+optimizer built `fused=True` and loaded from a checkpoint written without it
+runs unfused from then on, silently (torch 2.13). Found while making AdamW
+fused on CUDA.
+
+`TrainingJob.resume` copies every group's options before loading and puts
+them back after, so a resumed leg runs with the options it was built with.
+Re-applying only the declared fields misses the undeclared ones.
