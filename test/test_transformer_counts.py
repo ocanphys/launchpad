@@ -13,14 +13,18 @@ SHAPES = [
 
 @pytest.mark.parametrize("cls", [Transformer, TransformerFA])
 @pytest.mark.parametrize("shape", SHAPES)
-def test_counts_match_the_built_network(cls, shape):
+@pytest.mark.parametrize("tie_embeddings", [False, True])
+def test_counts_match_the_built_network(cls, shape, tie_embeddings):
     shape = dict(shape)
     batch = shape.pop("batch")
-    model = cls(**shape, rope_theta=10000)
+    model = cls(**shape, rope_theta=10000, tie_embeddings=tie_embeddings)
     network = model.build(torch.device("cpu"))
+    assert (network.linear.W is network.embedding.weight) == tie_embeddings
+    # parameters() and named_parameters() list a tied matrix once, as embedding.weight
     with FlopCounterMode(display=False) as counter:
         network(torch.randint(0, model.vocab_size, (batch, model.sequence_length)))
-    assert model.parameter_count == sum(p.numel() for p in network.parameters())
+    assert model.parameter_count(embedding=True) == sum(p.numel() for p in network.parameters())
+    assert model.parameter_count() == sum(p.numel() for name, p in network.named_parameters() if name != "embedding.weight")
     assert model.forward_flops(batch) == counter.get_total_flops()
 
 

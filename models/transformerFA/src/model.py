@@ -318,6 +318,7 @@ class TransformerLM(torch.nn.Module):
         d_ff: int,
         num_heads: int,
         rope_theta: float,
+        tie_embeddings: bool,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -329,6 +330,10 @@ class TransformerLM(torch.nn.Module):
         )
         self.norm = RMSNorm(d_model=d_model, device=device, dtype=dtype)
         self.linear = Linear(in_features=d_model, out_features=vocab_size, device=device, dtype=dtype)
+        if tie_embeddings:
+            # one (vocab_size, d_model) Parameter, the head's and its init: the embedding's std=1 would
+            # start the logits far too large
+            self.embedding.weight = self.linear.W
         self.tblocks = torch.nn.ModuleList(
             [
                 TransformerBlock(

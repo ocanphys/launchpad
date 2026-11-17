@@ -208,6 +208,24 @@ class PretrainJobTests(unittest.TestCase):
             for key, tensor in torch.load(straight.paths(other_root)["model"])["model"].items():
                 self.assertTrue(torch.equal(tensor, self.final(self.leg)["model"][key]), key)
 
+    def test_a_tied_leg_resumes_still_tied_and_matches_an_uninterrupted_run(self):
+        tied = rebuilt(self.leg, model=MODEL.model_copy(update={"tie_embeddings": True}))
+        self.assertNotEqual(tied.lineage_hash, self.leg.lineage_hash)
+        with crash_after_first_failsafe(), self.assertRaisesRegex(RuntimeError, "died"):
+            PretrainJob(tied).run(self.root, worker())
+        resumed = worker()
+        PretrainJob(tied).run(self.root, resumed)
+        self.assertIn("found failsafe 2.pt, starting from step 2", logged(resumed))
+        weights = self.final(tied)["model"]
+        self.assertTrue(torch.equal(weights["embedding.weight"], weights["linear.W"]))
+
+        with TemporaryDirectory() as other:
+            other_root = Path(other)
+            straight = rebuilt(leg(build_dataset(other_root)), model=tied.model)
+            PretrainJob(straight).run(other_root, worker())
+            for key, tensor in torch.load(straight.paths(other_root)["model"])["model"].items():
+                self.assertTrue(torch.equal(tensor, weights[key]), key)
+
     def test_durable_progress_is_the_furthest_checkpoint(self):
         progress = lambda: self.leg.durable_progress(self.root)
         self.assertEqual(progress(), {"phase": "step", "done": 0, "total": 4})

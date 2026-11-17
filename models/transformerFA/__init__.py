@@ -32,6 +32,7 @@ class TransformerFA(Model):
     d_ff: int = Field(gt=0)
     num_heads: int = Field(gt=0)
     rope_theta: int = Field(gt=0)
+    tie_embeddings: bool = False  # the head and the input embedding are one matrix
 
     @model_validator(mode="after")
     def _heads_divide_d_model(self) -> Self:
@@ -54,21 +55,32 @@ class TransformerFA(Model):
             d_ff=self.d_ff,
             num_heads=self.num_heads,
             rope_theta=self.rope_theta,
+            tie_embeddings=self.tie_embeddings,
             device=device,
             dtype=locate(self.dtype),
         )
 
-    @property
-    def parameter_count(self) -> int:
-        """Returns the number of trainable parameters, P in docs/model-repository/transformer.md."""
+    def parameter_count(self, embedding: bool = False) -> int:
+        """Returns the number of trainable parameters without the input embedding, N in
+        docs/model-repository/transformer.md, or with it, P. An untied head is counted either way: it
+        is a matmul, where the embedding is a lookup. A tied head is the embedding, so it is in P alone.
+
+            TransformerFA(vocab_size=1000, sequence_length=8, num_layers=1, d_model=16, d_ff=32, num_heads=2,
+                          rope_theta=10000).parameter_count() -> 18608
+
+        Args:
+            embedding: Whether to count the input embedding's vocab_size * d_model weights.
+
+        Returns:
+            N, or P when embedding is True.
+        """
         L, V, d_model, d_ff = self.num_layers, self.vocab_size, self.d_model, self.d_ff
-        embedding = V * d_model
         attention = 4 * d_model**2  # W_Q W_K W_V W_O
         swiglu = 3 * d_model * d_ff  # W_1 W_2 W_3
         norms = 2 * d_model  # two RMSNorm gains per layer
         final_norm = d_model
-        head = V * d_model
-        return embedding + L * (attention + swiglu + norms) + final_norm + head
+        head = 0 if self.tie_embeddings else V * d_model  # a tied head is the embedding
+        return L * (attention + swiglu + norms) + final_norm + head + (V * d_model if embedding else 0)
 
     def estimate_size(self) -> dict[str, int]:
         """Returns the parameters (P in docs/model-repository/transformer.md) and the bytes of the weights at
@@ -81,8 +93,8 @@ class TransformerFA(Model):
 
         from artifacts.core.locate import locate
 
-        return {"parameters": self.parameter_count,
-                "bytes": self.parameter_count * torch.empty((), dtype=locate(self.dtype)).element_size()}
+        parameters = self.parameter_count(embedding=True)
+        return {"parameters": parameters, "bytes": parameters * torch.empty((), dtype=locate(self.dtype)).element_size()}
 
     def forward_flops(self, batch_size: int) -> int:
         """Returns F in docs/model-repository/transformer.md: the matmul FLOPs of one forward pass over batch_size

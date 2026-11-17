@@ -117,7 +117,7 @@ def run_transformer_lm(
     weights: dict[str, Tensor],
     in_indices: Tensor,
 ) -> Tensor:
-    model = TransformerLM(vocab_size, context_length, num_layers, d_model, d_ff, num_heads, rope_theta)
+    model = TransformerLM(vocab_size, context_length, num_layers, d_model, d_ff, num_heads, rope_theta, tie_embeddings=False)
     state = {
         "embedding.weight": weights["token_embeddings.weight"],
         "norm.gain": weights["ln_final.weight"],

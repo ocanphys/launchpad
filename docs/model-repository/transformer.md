@@ -5,8 +5,9 @@ modern shape, built from scratch in `models/transformer/src/model.py`.
 
 ## Architecture
 
-Token embedding, `num_layers` pre-norm blocks, a final RMSNorm, and an untied
-linear head onto the vocabulary. Each block is two residual sublayers:
+Token embedding, `num_layers` pre-norm blocks, a final RMSNorm, and a linear
+head onto the vocabulary, untied unless `tie_embeddings` is set. Each block is
+two residual sublayers:
 
 - `x + attention(norm1(x))`: multi-head causal self-attention with rotary
   position embeddings (RoPE) on queries and keys, `d_model / num_heads` per head.
@@ -26,6 +27,7 @@ attention scores, which is what makes this version the one to inspect.
 | `d_ff` | SwiGLU hidden width, conventionally about `8/3 * d_model`. |
 | `num_heads` | Attention heads. |
 | `rope_theta` | RoPE base frequency. |
+| `tie_embeddings` | `True` makes the head and the input embedding one `(vocab_size, d_model)` matrix, initialized as the head is; `False` by default. |
 
 Plus `vocab_size`, `sequence_length` and `dtype`, as on every model (see
 [what readers expect](../models.md#what-readers-expect-of-a-model)). `sequence_length` is also the
@@ -49,7 +51,12 @@ The same symbols are used in the code (`parameter_count`, `forward_flops`,
 
 ## Parameters
 
-`parameter_count`: the count of each submodule times its parameters, summed.
+`parameter_count(embedding)`: the count of each submodule times its parameters,
+summed. By default it leaves out the input embedding, a lookup with no FLOPs, and
+returns $N$; `embedding=True` returns every trainable parameter, $P$, which is
+what `estimate_size` sizes the weights from. An untied head is in both: it is
+a matmul, counted in the forward FLOPs. A tied head is the embedding, stored
+once, so it is in $P$ alone.
 
 | Submodule | Count | Parameters each |
 | --- | --- | --- |
@@ -58,11 +65,16 @@ The same symbols are used in the code (`parameter_count`, `forward_flops`,
 | SwiGLU ($W_1, W_2, W_3$) | $L$ | $3d_{model}d_{ff}$ |
 | RMSNorm gain, before attention and before SwiGLU | $2L$ | $d_{model}$ |
 | Final RMSNorm gain | $1$ | $d_{model}$ |
-| Head, untied | $1$ | $Vd_{model}$ |
+| Head, untied only | $1$ | $Vd_{model}$ |
 
 $$
-P = L\,d_{model}\left(4d_{model} + 3d_{ff} + 2\right) + (2V + 1)\,d_{model}
+N = L\,d_{model}\left(4d_{model} + 3d_{ff} + 2\right) + d_{model} + h\,V d_{model}
+\qquad
+P = N + V\,d_{model}
 $$
+
+where $h$ is 1 for an untied head and 0 for a tied one. The forward FLOPs are
+the same either way: a tied head is still a matmul.
 
 ## Forward FLOPs
 
