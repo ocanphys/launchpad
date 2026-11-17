@@ -223,8 +223,8 @@ Boundaries:
   needs no record of how far it got: a crash before the mark only makes the next pass repeat it.
 - **Woken on a schedule.** A log persisted only when someone reads it could expire from the Dict
   first.
-- **Polled, not pushed.** The leasebook serves one request at a time (it has no
-  `@modal.concurrent`), and a pushed stream would hold that request open.
+- **Polled, not pushed.** A pushed stream would hold one of the leasebook's
+  concurrent requests open for as long as a page is.
 
 ## Part 2: Specification
 

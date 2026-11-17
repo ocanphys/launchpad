@@ -2,7 +2,8 @@
 
 The launcher is the `leasebook` web app: one container, pinned with
 `max_containers=1`, that is both the dashboard's API and the only thing that
-launches or cancels a job. It keeps one state map of every artifact on the
+launches or cancels a job. It serves its requests concurrently
+(`@modal.concurrent`), each sync route on a thread of its own. It keeps one state map of every artifact on the
 volume, grants leases, spawns workers, and answers the page.
 
 ## Who talks to what
@@ -147,7 +148,7 @@ Modal's Dicts, so a Dict read is a short round trip.
 
 | Route | What it does |
 | --- | --- |
-| `GET /state` | The map, from memory, plus two Dict reads (grant and beat) for each call under way. Polled by the page every two seconds; polling costs the volume nothing. |
+| `GET /state` | The map, from memory, plus two Dict reads (grant and beat) for each call under way, every call read on its own thread. Polled by the page every two seconds; polling costs the volume nothing. |
 | `GET /artifact/{path}` | The artifact as this container's mount holds it, as of the last recompute: its `manifest.json` without the nested dependency manifests, and its `train.jsonl`, read under `mount_lock`. Fetched only when the artifact's entry changed. It reads leniently, showing whatever is on disk. |
 | `GET /logs/{path}` | Every call ever granted for the artifact (`call_history`), each with its log in both storages from the `call_logs` Dict. Dict reads only. |
 | `GET /launcher-logs` | The same, for the launcher's own call id. |
@@ -186,7 +187,7 @@ artifact's own manifest (an unspecified one takes Modal's default), records the
 grant naming that call, recomputes the map, and returns without waiting for
 the job. The launcher records the call itself, in `call_history` and its own
 log, at grant time, so a call is listed by the thing that made it, not by
-whether it ever ran. Launch decisions are serialized; different paths run
+whether it ever ran. Launch and cancel decisions are serialized by one lock, `deciding`, since each reads a lease and then writes it; different paths run
 concurrently, a path nested under another's folder included.
 
 ## Cancelling

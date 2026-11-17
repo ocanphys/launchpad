@@ -449,6 +449,27 @@ def test_an_accepted_launch_or_cancel_recomputes_before_it_answers():
     assert calls["state"] == 1
 
 
+def test_two_launches_are_decided_one_at_a_time():
+    """Requests run concurrently in the container, and a launch reads the
+    lease before it writes it."""
+    api, _ = client()
+    deciding, overlapped = threading.Lock(), []
+
+    def attempt_launch(path, run_job):
+        overlapped.append(not deciding.acquire(blocking=False))
+        time.sleep(0.05)
+        deciding.release()
+        return False, "refused"
+
+    leasebook.attempt_launch = attempt_launch
+    threads = [threading.Thread(target=api.post, args=(f"/launch/{LEG}",)) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert overlapped == [False] * 4
+
+
 def test_the_artifact_route_and_a_recompute_never_read_the_mount_at_once():
     """`mount_lock`: a reload replaces the mount under whatever has a file
     open on it, so the route that opens one waits for the refresh holding

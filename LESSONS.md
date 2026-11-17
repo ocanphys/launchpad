@@ -194,6 +194,22 @@ would wait it out), and keep those route handlers sync `def` -- an `async
 def` runs on the event loop rather than the threadpool, and blocking on a
 `threading.Lock` there stalls every other request in the container.
 
+## One input at a time was serializing more than the mount
+
+The same default did two more jobs nobody had written down. It made a launch
+one decision at a time: `attempt_launch` reads the lease, spawns and then
+writes the lease, so two requests for one path would both find it free and
+both spawn. And it made every request wait for the one before it, so the
+whole dashboard stood still behind one slow log read, or behind `/new/<kind>`
+waiting out a cold lab. Found by reading for why the page slows down with
+many jobs running.
+
+`leasebook` now takes `@modal.concurrent`, and what the default was doing is
+two locks in `build_api`: `deciding` around a launch or a cancel, and
+`recomputing` around the scan and the assignment of the map, so an older scan
+cannot land over a newer one. Anything else there that reads and then writes
+shared state needs a lock of its own; the mount already has `mount_lock`.
+
 ## A call the container never spoke for was invisible
 
 Everything the dashboard knew about a call came from what the call itself

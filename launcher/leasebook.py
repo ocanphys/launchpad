@@ -17,6 +17,7 @@ import queue
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -220,12 +221,15 @@ def build_api(run_job, jupyter, chat, web_dir: Path, guide_dir: Path, templates:
 
         # Set on the way out, for the listener thread below.
         finished = threading.Event()
+        # The threads `/state` reads the Dicts on, one call under way apiece.
+        readers = ThreadPoolExecutor(max_workers=32)
 
         @asynccontextmanager
         async def lifespan(_api):
             yield
             log_launcher.info("leasebook container stopped")
             finished.set()
+            readers.shutdown(wait=False)
             stop_logging()
 
         api = FastAPI(lifespan=lifespan)
@@ -260,10 +264,17 @@ def build_api(run_job, jupyter, chat, web_dir: Path, guide_dir: Path, templates:
         # Everything a request reads off the mount in between is the last
         # recompute's image of it.
         latest: dict[str, dict] = {}
+        # Requests run concurrently (main.py), and the listener is a thread of
+        # its own. `recomputing` keeps an older scan from landing over a newer
+        # one; `deciding` makes a launch or a cancel one decision at a time,
+        # since each reads a lease and then writes it.
+        recomputing = threading.Lock()
+        deciding = threading.Lock()
 
         def recompute(reason: str) -> None:
             nonlocal latest
-            latest = state()
+            with recomputing:
+                latest = state()
             log_launcher.debug(f"refreshed ({reason}): {len(latest)} artifacts on the volume")
 
         recompute("startup")
@@ -311,23 +322,27 @@ def build_api(run_job, jupyter, chat, web_dir: Path, guide_dir: Path, templates:
         #
         # Bounded by the calls under way, never a scan of either Dict: an
         # artifact nothing is working on cannot acquire a lease except
-        # through this container, which recomputes when it grants one.
+        # through this container, which recomputes when it grants one. Those
+        # calls are read side by side, so the request takes two Dict round
+        # trips however many are running.
         @api.get("/state")
         def state_route() -> dict:
             now = time.time()
-            entries = {}
-            for path, entry in latest.items():
-                if entry["verdict"] in ("running", "starting"):
-                    grant = leases.get(path)
-                    beat = beats.get(grant["call_id"]) if grant else None
-                    # A call that has said it exited already put its ending on
-                    # the queue, so the recompute that reads its files is on
-                    # the way. Reading that beat here would call a finished
-                    # run "failed" for the moment in between.
-                    if not (beat or {}).get("exited"):
-                        entry = {**entry, **liveness(entry, grant, beat, now)}
-                entries[path] = entry
-            return entries
+            entries = latest
+            working = [path for path, entry in entries.items() if entry["verdict"] in ("running", "starting")]
+
+            def live(path: str) -> dict:
+                grant = leases.get(path)
+                beat = beats.get(grant["call_id"]) if grant else None
+                # A call that has said it exited already put its ending on
+                # the queue, so the recompute that reads its files is on
+                # the way. Reading that beat here would call a finished
+                # run "failed" for the moment in between.
+                if (beat or {}).get("exited"):
+                    return entries[path]
+                return {**entries[path], **liveness(entries[path], grant, beat, now)}
+
+            return {**entries, **dict(zip(working, readers.map(live, working)))}
 
         # The launcher's own log: the call id `launcher` in both storages, what
         # this container has published and what its file holds, which the page
@@ -390,7 +405,8 @@ def build_api(run_job, jupyter, chat, web_dir: Path, guide_dir: Path, templates:
         # /state shows what it just asked for, with nothing to poll for.
         @api.post("/launch/{artifact_path:path}")
         def launch_endpoint(artifact_path: str) -> dict:
-            launched, message = attempt_launch(artifact_path, run_job)
+            with deciding:
+                launched, message = attempt_launch(artifact_path, run_job)
             if launched:
                 recompute("launch")
             return {"launched": launched, "message": message}
@@ -402,7 +418,8 @@ def build_api(run_job, jupyter, chat, web_dir: Path, guide_dir: Path, templates:
         def cancel_endpoint(artifact_path: str) -> dict:
             if not safe_relpath(artifact_path):
                 return {"cancelled": False, "message": f"invalid artifact_path {artifact_path!r}"}
-            cancelled, message = cancel_call(artifact_path)
+            with deciding:
+                cancelled, message = cancel_call(artifact_path)
             if cancelled:
                 recompute("cancel")
             return {"cancelled": cancelled, "message": message}

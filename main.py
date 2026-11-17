@@ -94,6 +94,10 @@ lab_image = (
     # `/lab` hands straight to Jupyter.
     secrets=[modal.Secret.from_name(LAB_SECRET)],
 )
+# One container, so without this every request waits for the one before it:
+# a second tab's poll, a launch behind a log read, the whole page behind
+# `/new/<kind>` while a cold lab starts.
+@modal.concurrent(max_inputs=32)
 @modal.asgi_app()
 def leasebook():
     """The dashboard and the API it serves, in one container.
