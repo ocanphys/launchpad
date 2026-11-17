@@ -74,6 +74,10 @@ class PretrainJob(TrainingJob):
         (folder / "checkpoints").mkdir(parents=True, exist_ok=True)
         # resume from initial model or most recent failsafe checkpoint.
         model, optimizer, step = self.resume(root, worker)
+        if self.loop_config.compile is not None:
+            # in place, after loading: the module, its parameters and its state_dict keys stay what
+            # resume, the optimizer and failsafe hold
+            model.compile(mode=self.loop_config.compile)
         steplog = StepLog(root, self.artifact.artifact_path.as_posix())
         # forward and loss, in training and evaluation, run in the leg's precision; backward follows it
         autocast = torch.autocast(

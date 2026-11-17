@@ -227,6 +227,33 @@ class PretrainJobTests(unittest.TestCase):
             for key, tensor in torch.load(straight.paths(other_root)["model"])["model"].items():
                 self.assertTrue(torch.equal(tensor, weights[key]), key)
 
+    def test_a_compiled_leg_is_the_same_leg_and_resumes_onto_the_same_weights(self):
+        compiled = rebuilt(self.leg, loop_config=LOOP.model_copy(update={"compile": "max-autotune"}))
+        self.assertEqual(compiled.artifact_path, self.leg.artifact_path)  # loop_config is not identity
+        modes = []
+        original = torch.nn.Module.compile
+
+        def compile(module, mode):
+            modes.append(mode)
+            original(module, backend="eager")  # dynamo traces and wraps in place, without building kernels
+
+        with patch.object(torch.nn.Module, "compile", compile):
+            with crash_after_first_failsafe(), self.assertRaisesRegex(RuntimeError, "died"):
+                PretrainJob(compiled).run(self.root, worker())
+            PretrainJob(compiled).run(self.root, worker())
+        self.assertEqual(modes, ["max-autotune", "max-autotune"])  # each attempt compiles what it resumed
+
+        # the checkpoint keys are the module's own, and the weights an eager run's
+        with TemporaryDirectory() as other:
+            other_root = Path(other)
+            eager = leg(build_dataset(other_root))
+            PretrainJob(eager).run(other_root, worker())
+            expected = torch.load(eager.paths(other_root)["model"])["model"]
+            weights = self.final(compiled)["model"]
+            self.assertEqual(weights.keys(), expected.keys())
+            for key, tensor in expected.items():
+                self.assertTrue(torch.equal(tensor, weights[key]), key)
+
     def test_durable_progress_is_the_furthest_checkpoint(self):
         progress = lambda: self.leg.durable_progress(self.root)
         self.assertEqual(progress(), {"phase": "step", "done": 0, "total": 4})

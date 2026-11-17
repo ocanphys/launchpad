@@ -81,7 +81,7 @@ class Evaluation(ParamConfig):
 
 
 class LoopConfig(ParamConfig):
-    """Operational settings for evaluation, failsafe checkpoints, and health checks.
+    """Operational settings for evaluation, failsafe checkpoints, health checks and compilation.
 
     The loop takes each of ``evaluations`` every ``eval_every`` steps of its
     own, and all of them at end_step. Every ``checkpoint_every`` steps, the training job writes
@@ -89,16 +89,19 @@ class LoopConfig(ParamConfig):
     matching optimizer state at every failsafe; ``"latest"`` retains it only
     for the newest one. On CUDA, it reports the MFU and the peak allocated and
     reserved memory over each window of ``gpu_check_every`` steps, evaluation
-    and checkpoints included, a few steps after the window closes.
+    and checkpoints included, a few steps after the window closes. A ``compile``
+    mode runs the model, in training and evaluation, through ``torch.compile``
+    in that mode; None runs it eagerly.
 
         LoopConfig(evaluations=(TokenLoss(eval_every=200, batch_size=64),), gpu_check_every=200)
-          -> LoopConfig(evaluations=(TokenLoss(eval_every=200, batch_size=64),), gpu_check_every=200, checkpoint_every=100, optimizer_checkpoint_policy='latest')
+          -> LoopConfig(evaluations=(TokenLoss(eval_every=200, batch_size=64),), gpu_check_every=200, checkpoint_every=100, optimizer_checkpoint_policy='latest', compile=None)
     """
 
     evaluations: tuple[Evaluation, ...]
     gpu_check_every: int = Field(gt=0)
     checkpoint_every: int = Field(default=100, gt=0)
     optimizer_checkpoint_policy: Literal["all", "latest"] = "latest"
+    compile: Literal["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"] | None = None
 
 
 class Training(Artifact):

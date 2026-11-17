@@ -82,7 +82,7 @@ leg = Pretraining(
 | `dataset` | The token stream the leg trains on, and through it the tokenizer. |
 | `model` | The architecture: an instance of a `Model` class under `models/`. Its `vocab_size` must match the tokenizer's. |
 | `training_parameters` | Everything that changes the optimization trajectory: steps, batch size, learning rate schedule, optimizer and the seed. |
-| `loop_config` | How the leg is observed and recovered: its evaluations and their cadence, checkpoint cadence, GPU health checks. |
+| `loop_config` | How the leg is observed, recovered and run: its evaluations and their cadence, checkpoint cadence, GPU health checks, and the `torch.compile` mode. |
 | `starting_checkpoint` | The leg this one continues, if any. |
 | `run_id` | A name that groups the legs of one run. |
 
@@ -245,6 +245,21 @@ evaluation can read them, clipped, off the parameters
 are of the training batch and are not named `val_*`. `loop_config` is not
 in `lineage_hash`, so changing an evaluation changes no leg's identity: it
 changes what is measured, never a weight.
+
+**Compiling changes how the model runs, not what it computes.** With
+`loop_config.compile` set to a `torch.compile` mode, `run` compiles the model
+in place with `model.compile(mode=...)`, after `resume` has loaded it and
+before the first step, so training and every evaluation run compiled. In place
+keeps the module, its parameters and its `state_dict` keys the ones the
+optimizer and the failsafes hold, where `torch.compile(model)` would return a
+wrapper whose keys gain an `_orig_mod.` prefix. A compiled kernel can reorder a
+reduction, so a compiled leg matches an eager one to rounding, as a leg on
+another GPU does; like the GPU, the mode is not identity, so a compiled leg and
+an eager one with the same parameters have the same path. Declaring a stored
+leg again with another mode is still a conflict in `lab.declare`, as any
+change to its `loop_config` is. The first step and each evaluation's first batch pay for the
+compile, which the first `gpu_check_every` window's MFU shows. The mode a
+[profile](profiling.md) sweep measured fastest is the one to declare.
 
 Every sampler's batch is a function of its fields, the seed and the step number
 alone, so a resumed run sees exactly the batches the interrupted one would
