@@ -180,9 +180,10 @@ def profile(spec) -> dict:
     # One lab, so one filesystem view: two containers would each hold their own
     # uncommitted copy of the same notebook and the later commit would win.
     max_containers=1,
-    # Without a request Modal reserves 0.125 cores and 128 MiB, shared by the server and every kernel.
-    cpu=0.5,
-    # memory=1024,
+    # Without a request Modal reserves 0.125 cores and 128 MiB, shared by the server and every
+    # kernel, and a kernel that imports torch holds several hundred MiB by itself.
+    cpu=2,
+    memory=4096,
     timeout=CONTAINER_LIFETIME,
     scaledown_window=LAB_IDLE_SECONDS,
 )
