@@ -75,8 +75,8 @@ flowchart TD
    own, torch's compile warnings and Inductor's `AUTOTUNE` tables among them,
    and Python's warnings reach a call's log. A carriage return restarts the
    line, so a progress bar files as its last state.
-3. **Publish.** A thread `start_logging` starts puts every channel the
-   container holds, whole, every `HEARTBEAT_SECONDS`. A channel new since the
+3. **Publish.** A thread `start_logging` starts puts, whole, every channel
+   that gained a row since its last put landed, every `HEARTBEAT_SECONDS`. A channel new since the
    last pass is first started from `continued()`: the longer of the Dict's
    live and volume lists, so a container that restarts mid-call extends a
    channel rather than truncating it. One whose read fails is held back to the
@@ -182,17 +182,20 @@ for them.
 
 Each of these grows with history, and nothing trims it:
 
-- **Publishing.** Every `HEARTBEAT_SECONDS`, a container puts every channel it
-  holds, changed or not. The launcher's own channel holds every row it has ever
-  logged, continued from the file, and the launcher also holds a channel for
-  every call it has logged about since it started.
+- **Publishing.** Every `HEARTBEAT_SECONDS`, a container puts every channel
+  that gained a row, whole: one new row costs the channel's whole history. The
+  launcher's own channel holds every row it has ever logged, continued from
+  the file, and the launcher also keeps in memory a channel for every call it
+  has logged about since it started.
 - **Reading.** `/launcher-logs` returns the launcher's whole log twice, once
   per storage, on every poll of the dashboard, and the page dedupes and redraws
   all of it.
 - **Persisting.** Each pass reads every log file back and puts each as its
   `volume` channel, one at a time, gets and puts `call_history` per artifact,
   and gets every listed call's live channels. It runs in its own container, so
-  the launcher never waits on it.
+  the launcher never waits on it, and in one container at most
+  (`max_containers=1`): a pass that outlasts `PERSIST_LOGS_EVERY` delays the
+  next one, where two at once would append the same rows twice.
 
 ## The step log
 

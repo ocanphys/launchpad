@@ -138,6 +138,7 @@ class BufferHandler(logging.Handler):
         self.call_id = call_id
         self.channels: dict[str, list[dict]] = {}
         self.unread: dict[str, tuple[str, str]] = {}  # a channel not yet continued: its call_id and source
+        self.published: dict[str, int] = {}  # how many rows each channel held at its last put that landed
 
     def emit(self, record: logging.LogRecord) -> None:
         entry = row(record, self.call_id)
@@ -153,9 +154,10 @@ class BufferHandler(logging.Handler):
             self.channels[key].append(entry)
 
     def publish(self) -> None:
-        """Starts each new channel from `continued()`, then puts every channel
-        whole. A channel whose earlier rows can't be read waits for the next
-        pass, since putting it without them would truncate it."""
+        """Starts each new channel from `continued()`, then puts whole every
+        channel that gained a row since its last put landed. A channel whose
+        earlier rows can't be read waits for the next pass, since putting it
+        without them would truncate it."""
         with self.lock:
             unread = dict(self.unread)
         for key, (call_id, source) in unread.items():
@@ -168,9 +170,18 @@ class BufferHandler(logging.Handler):
                 self.channels[key][:0] = earlier
                 del self.unread[key]
         with self.lock:
-            channels = {key: list(rows) for key, rows in self.channels.items() if key not in self.unread}
+            channels = {
+                key: list(rows)
+                for key, rows in self.channels.items()
+                if key not in self.unread and len(rows) != self.published.get(key)
+            }
+
+        def put(key: str, rows: list[dict]) -> None:
+            call_logs.put(key, rows)
+            self.published[key] = len(rows)
+
         for key, rows in channels.items():
-            try_publish(key, partial(call_logs.put, key, rows), _log)
+            try_publish(key, partial(put, key, rows), _log)
 
 
 class _StderrLines:
@@ -224,7 +235,7 @@ def log_to_stdout() -> None:
 
 def start_logging(call_id: str) -> Callable[[], None]:
     """Points this container's logging at stdout, keeps every record in the
-    live channel its stamp names, and publishes them all every
+    live channel its stamp names, and publishes those that gained a row every
     HEARTBEAT_SECONDS; returns what stops it.
 
     `call_id` is whose the container's unstamped records are -- LAUNCHER for

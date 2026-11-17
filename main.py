@@ -115,7 +115,15 @@ def leasebook():
     return build_api(run_job, jupyter, chat, WEB_DIR, GUIDE_DIR, TEMPLATES)
 
 
-@app.function(image=web_image, volumes={STORAGE.as_posix(): volume}, region=REGION, schedule=modal.Period(seconds=PERSIST_LOGS_EVERY))
+@app.function(
+    image=web_image,
+    volumes={STORAGE.as_posix(): volume},
+    region=REGION,
+    schedule=modal.Period(seconds=PERSIST_LOGS_EVERY),
+    # A pass that outlasts the period makes the next one wait for it: two at
+    # once would both append the same rows to the same files.
+    max_containers=1,
+)
 def persist_logs() -> None:
     """Appends every call's new log rows to its file on the volume, writes
     `call_history.json` and commits: the only writer of either.

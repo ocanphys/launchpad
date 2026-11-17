@@ -184,6 +184,18 @@ class LoggingTests(unittest.TestCase):
 
         self.assertEqual([r["msg"] for r in self.store["fc-a:livedict:ambient"]], ["before", "cancellation signal"])
 
+    def test_a_channel_with_nothing_new_is_not_put_again(self):
+        puts = []
+        put = self.store.put
+        with patch.object(logs, "HEARTBEAT_SECONDS", 0.01), \
+                patch.object(self.store, "put", lambda key, rows: puts.append(key) or put(key, rows)):
+            stop = self.start("fc-a")
+            logs.call_logger("job", WORKER, "fc-a").info("once")
+            time.sleep(0.2)  # some twenty passes
+            stop()
+
+        self.assertEqual(puts, ["fc-a:livedict:worker"])
+
     def test_a_publish_that_fails_is_a_warning_the_next_one_carries(self):
         failures = [RuntimeError("Dict unavailable")]
 
