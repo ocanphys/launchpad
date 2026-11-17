@@ -14,7 +14,7 @@
 import { el } from "./el.js";
 import { artifactRow, experimentRow, problemRow } from "./render.js";
 import { renderArtifactPending, renderArtifactView } from "./artifactview.js";
-import { logStream, union } from "./logview.js";
+import { logView, union } from "./logview.js";
 import { filterBar, visible } from "./filter.js";
 
 // --- config -----------------------------------------------------------------
@@ -216,16 +216,16 @@ async function request(route, init = {}) {
 // The bottom frame holds what the container did to the calls it manages as
 // well as what it did for itself, so every line names its call; the time
 // drops its date, the frame being short rather than wide.
-function drawLauncherLogs(logs, emptyText = "no launcher logs yet.") {
-  launcherLogsEl.replaceChildren(logStream(logs, {
-    title: "launcher logs",
-    className: "launcher-logs",
-    hiddenLevels: hiddenLauncherLevels,
-    hiddenSources: hiddenLauncherSources,
-    emptyText,
-    compactTime: true,
-  }));
-}
+const launcherLog = logView({
+  title: "launcher logs",
+  className: "launcher-logs",
+  hiddenLevels: hiddenLauncherLevels,
+  hiddenSources: hiddenLauncherSources,
+  emptyText: "no launcher logs yet.",
+  compactTime: true,
+});
+launcherLogsEl.replaceChildren(launcherLog.node);
+launcherLog.update([], "loading launcher logs…"); // the frame is there before the first answer
 
 // The table view: the server's map and the log frame under it, one tick
 // apiece. Both answer out of memory and the Dicts, so polling them costs the
@@ -239,7 +239,7 @@ async function fetchTable() {
   stamp(states);
   draw(states);
   // Every row says who wrote it in its own `source`, so nothing is tagged here.
-  drawLauncherLogs(union([logs.volume, logs.livedict]));
+  launcherLog.update(union([logs.volume, logs.livedict]));
   launcherLogStatusEl.textContent = "updates every 2s";
 }
 
@@ -394,5 +394,4 @@ splitEl.addEventListener("pointerdown", (event) => {
 refreshEl.addEventListener("click", () => load(refresh));
 experimentSearchEl.addEventListener("input", redraw);
 window.addEventListener("hashchange", route);
-drawLauncherLogs([], "loading launcher logs…"); // the frame is there before the first answer
 route();

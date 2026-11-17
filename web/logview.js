@@ -2,8 +2,8 @@
 // ambient filters and a row of column labels: an artifact's calls
 // (artifactview.js) or the launcher's own log (app.js). Every line names the
 // call it is about and who wrote it, with the logger on the message's hover.
-// `hiddenLevels` and `hiddenSources` are the caller's sets, so both choices
-// outlive the rebuild every poll does.
+// A view is made once and handed each poll's rows: it keeps the lines it has
+// drawn, so a poll builds only the lines that are new.
 
 import { el } from "./el.js";
 
@@ -53,30 +53,47 @@ function logLine(row, compactTime) {
   );
 }
 
-// One checkbox per level present, and an `ambient` one when the container
-// logged anything alongside the call (rows whose `source` says so) -- on, so
-// the default view is everything that happened. A traceback folded into `msg`
-// keeps its line breaks (`.log-msg` is pre-wrap) and, like everything here,
-// goes through textContent.
-export function logStream(rows, { title, className, hiddenLevels, hiddenSources, emptyText, compactTime = false }) {
-  const sorted = [...rows].sort((a, b) => b.ts - a.ts);
-  const levels = [...new Set(sorted.map((row) => row.level))]
-    .sort((a, b) => (LEVELS.indexOf(a) + 1 || 99) - (LEVELS.indexOf(b) + 1 || 99));
+// A log view: `node`, mounted once, and `update(rows, emptyText)`, called
+// with every poll's rows. One checkbox per level present, and an `ambient`
+// one when the container logged anything alongside the call (rows whose
+// `source` says so) -- on, so the default view is everything that happened.
+// `hiddenLevels` and `hiddenSources` are the caller's sets. A traceback
+// folded into `msg` keeps its line breaks (`.log-msg` is pre-wrap) and, like
+// everything here, goes through textContent.
+export function logView({ title, className, hiddenLevels, hiddenSources, emptyText, compactTime = false }) {
+  const heading = el("div", { class: "summary-type log-heading" });
+  const columns = el("div", { class: "log-line log-columns" },
+    COLUMNS.map(([cell, label]) => el("span", { class: cell, text: label })),
+  );
   const lines = el("div", { class: "log-lines" });
+  const empty = el("p", { class: "empty" });
+  let sorted = [];
+  let none = emptyText; // what an empty log says
+  let filters = null; // the checkboxes in the heading, as text
+  let drawn = new Map(); // each line on screen, by its row
+
+  // Puts the visible rows' lines under the column labels, in order: a line
+  // already drawn is kept where it is, so only a new row costs a node.
   const render = () => {
     const visible = sorted.filter((row) => !hiddenLevels.has(row.level) && !hiddenSources.has(row.source));
-    const header = el("div", { class: "log-line log-columns" },
-      COLUMNS.map(([cell, label]) => el("span", { class: cell, text: label })),
-    );
-    lines.replaceChildren(...(visible.length ? [header] : []), ...visible.map((row) => logLine(row, compactTime)));
-    if (!visible.length) lines.append(el("p", {
-      class: "empty",
-      text: sorted.length ? "no logs at the selected filters." : emptyText,
+    const kept = new Map(visible.map((row) => {
+      const key = [row.ts, row.call_id, row.source, row.level, row.logger, row.msg].join(" ");
+      return [key, drawn.get(key) || logLine(row, compactTime)];
     }));
+    drawn = kept;
+    empty.textContent = sorted.length ? "no logs at the selected filters." : none;
+    let at = lines.firstChild;
+    for (const node of visible.length ? [columns, ...kept.values()] : [empty]) {
+      if (node === at) at = at.nextSibling;
+      else lines.insertBefore(node, at);
+    }
+    while (at) {
+      const next = at.nextSibling;
+      at.remove();
+      at = next;
+    }
   };
-  render();
-  // `hidden` is the caller's set either way, so unchecking a box outlives the
-  // rebuild the next poll does.
+
   const checkbox = (label, hidden) =>
     el("label", { class: "log-filter" },
       el("input", {
@@ -89,12 +106,23 @@ export function logStream(rows, { title, className, hiddenLevels, hiddenSources,
       }),
       label,
     );
-  return el("div", { class: className },
-    el("div", { class: "summary-type log-heading" },
-      el("span", { text: title }),
-      ...levels.map((level) => checkbox(level, hiddenLevels)),
-      ...(sorted.some((row) => row.source === "ambient") ? [checkbox("ambient", hiddenSources)] : []),
-    ),
-    lines,
-  );
+
+  const update = (rows, text = emptyText) => {
+    sorted = [...rows].sort((a, b) => b.ts - a.ts);
+    none = text;
+    const levels = [...new Set(sorted.map((row) => row.level))]
+      .sort((a, b) => (LEVELS.indexOf(a) + 1 || 99) - (LEVELS.indexOf(b) + 1 || 99));
+    const ambient = sorted.some((row) => row.source === "ambient");
+    if (filters !== [...levels, ambient].join()) {
+      filters = [...levels, ambient].join();
+      heading.replaceChildren(
+        el("span", { text: title }),
+        ...levels.map((level) => checkbox(level, hiddenLevels)),
+        ...(ambient ? [checkbox("ambient", hiddenSources)] : []),
+      );
+    }
+    render();
+  };
+
+  return { node: el("div", { class: className }, heading, lines), update };
 }

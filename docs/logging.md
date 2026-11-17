@@ -53,7 +53,7 @@ flowchart TD
 
   LIVE --> RD["Read both storages<br/>stream(), artifact_calls()"]
   VOL --> RD
-  RD --> UI["Dedupe and draw<br/>logview.union() -> logStream() -> logLine()"]
+  RD --> UI["Dedupe and draw<br/>logview.union() -> logView().update() -> logLine()"]
 ```
 
 1. **Stamp.** Code logs through `call_logger(name, source, call_id)`, which
@@ -96,7 +96,8 @@ flowchart TD
    `/launcher-logs` returns both for the call id `launcher` (`stream`). Neither
    touches the volume.
 6. **Draw.** The page unions the two storages, counting a row once by `ts`,
-   `level`, `logger` and `msg`, sorts newest first and draws every line. DEBUG
+   `level`, `logger` and `msg`, sorts newest first and draws every line,
+   building only the lines it has not drawn yet. DEBUG
    is hidden until the reader turns it on.
 
 **Which calls belong to an artifact is the `call_history` Dict's to say.**

@@ -13,7 +13,7 @@
 // (`/logs/<path>`, polled while the page is open; see docs/logging.md).
 
 import { el } from "./el.js";
-import { logStream, union } from "./logview.js";
+import { logView, union } from "./logview.js";
 
 // Whether nested parameter values print indented or on one line. Page
 // state rather than DOM state: every fetch rebuilds the view, and the choice
@@ -101,18 +101,16 @@ function logRows(calls) {
     .filter(Boolean);
 }
 
-// Every call that has ever worked on this artifact (see launcher/state.py's
-// artifact_calls), as one stream with a level filter above it: one
-// checkbox per level present, DEBUG off until switched on.
-function logs(calls) {
-  return logStream(logRows(calls), {
-    title: "logs",
-    className: "artifact-logs",
-    hiddenLevels,
-    hiddenSources,
-    emptyText: "no call has ever worked on this artifact yet.",
-  });
-}
+// Every call that has ever worked on the artifact on screen (see
+// launcher/state.py's artifact_calls), as one stream with a level filter
+// above it: one checkbox per level present, DEBUG off until switched on.
+const callLog = logView({
+  title: "logs",
+  className: "artifact-logs",
+  hiddenLevels,
+  hiddenSources,
+  emptyText: "no call has ever worked on this artifact yet.",
+});
 
 // --- training curves ----------------------------------------------------------
 
@@ -327,7 +325,8 @@ export function renderArtifactView(container, entry, page, calls) {
   // have left output behind even for an artifact that's only declared, not
   // built (a job that ran and failed before writing anything), so an empty
   // manifest is never a reason to hide them.
-  nodes.push(curvesSection(page.train), logs(calls));
+  callLog.update(logRows(calls));
+  nodes.push(curvesSection(page.train), callLog.node);
 
   container.replaceChildren(...nodes.filter(Boolean)); // curves are null without a step log
 }

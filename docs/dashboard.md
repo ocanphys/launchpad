@@ -82,8 +82,8 @@ flowchart TD
   POLL --> FA
 
   FT --> DRAW["Draw the table if anything changed<br/>draw(): filterBar(), visible()<br/>artifactRow(): dot(), progressCell(), actionButton()<br/>problemRow()"]
-  FT --> LOGS["Draw the launcher log<br/>drawLauncherLogs() -> union() -> logStream()"]
-  FA --> AV["Draw the artifact page<br/>renderArtifactView(): summary(), curvesSection(), logs()"]
+  FT --> LOGS["Draw the launcher log<br/>union() -> launcherLog.update()"]
+  FA --> AV["Draw the artifact page<br/>renderArtifactView(): summary(), curvesSection(), callLog.update()"]
 
   BTN["Row button<br/>act(route, path, label)"] --> PEND["Mark pending and redraw<br/>pending.set(), redraw()"]
   PEND -->|"POST launch or cancel"| SRV["leasebook"]
@@ -191,6 +191,9 @@ view every `POLL_MS` (2 seconds) and redraws what changed, so a row walks
 - An artifact's page fetches `/state` and `/logs/<path>` each tick, and
   `/artifact/<path>`, the one route that reads a file on the server's mount,
   only when that artifact's entry has changed.
+- A log view (`logview.js`'s `logView`) is made once and handed each tick's
+  rows. It keeps the lines it has drawn, so a tick builds a node only for a
+  row that is new.
 - A tick that fails keeps the last screen up, shows the error and tries again.
   `routeToken`, bumped on every navigation, is checked by both the fetch and
   the polling loop, so an answer for a view the reader has left is dropped and
