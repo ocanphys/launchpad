@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from artifacts.core.artifact import Artifact
+from artifacts.core.locate import locate
 from config import STORAGE
 from launcher.gate import gate
 from launcher.state import volume
@@ -78,6 +79,9 @@ def build_chat(web_dir: Path) -> FastAPI:
     @api.post("/chat")
     def reply(conversation: Conversation) -> StreamingResponse:
         leg, model, tokenizer = load(conversation.leg)
+        # the forward runs in the precision the leg trained in, as TransformerFA's flash attention needs
+        autocast = torch.autocast(device.type, dtype=locate(leg.autocast) if leg.autocast else None,
+                                  enabled=leg.autocast is not None)
         [eot] = tokenizer.encode(EOT)
         context = leg.model.sequence_length
         # The start of a document and the system prompt stay in the window;
@@ -96,7 +100,7 @@ def build_chat(web_dir: Path) -> FastAPI:
             # back until the next token says whether it does.
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             text, sent = "", 0
-            with torch.inference_mode():
+            with torch.inference_mode(), autocast:
                 for _ in range(MAX_NEW_TOKENS):
                     window = torch.tensor([pinned + ids[-room:]], device=device)
                     top = torch.topk(model(window)[0, -1].float(), TOP_K)

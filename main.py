@@ -215,7 +215,7 @@ def jupyter():
 
 @app.function(
     image=chat_image,
-    gpu="T4",
+    gpu="A10",
     volumes={STORAGE.as_posix(): volume},
     secrets=[modal.Secret.from_name(LAB_SECRET)],
     scaledown_window=300,

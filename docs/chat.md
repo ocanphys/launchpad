@@ -1,7 +1,7 @@
 # Chat
 
 A chat page over a finished pretraining leg: `main.py`'s `chat` function, on
-its own T4, serving `launcher.chat` and the page `web/chat.html`. It reads the
+its own A10, serving `launcher.chat` and the page `web/chat.html`. It reads the
 volume and writes nothing, and takes no lease.
 
 The leg is named in the page's URL, `/?leg=<artifact_path>`. A done
@@ -19,9 +19,10 @@ names the architecture and its shapes ([Models](models.md)), and its dataset
 names the tokenizer. So the first request naming a leg reloads the volume (a
 leg finished since the container started is not in its view yet), loads the
 leg, builds `leg.model` on the GPU, loads the `"model"` state_dict out of its
-`model.pt` ([Training](training.md)), and binds `leg.tokenizer`. The page asks
-for the leg as it opens, so a cold start shows there rather than on the first
-reply. A container holds one leg; a request naming another replaces it. A leg
+`model.pt` ([Training](training.md)), and binds `leg.tokenizer`. Each reply
+runs under the leg's own `autocast`, in the precision the leg trained in. The
+page asks for the leg as it opens, so a cold start shows there rather than on
+the first reply. A container holds one leg; a request naming another replaces it. A leg
 whose `model.pt` is not written yet fails at the load, naming the missing file.
 
 ## The prompt
@@ -69,6 +70,10 @@ whitespace after it arrives, and lines wrap between words. Stopping on the
 page aborts the request, and generation ends at the next token.
 
 ## Why
+
+**An A10.** A `TransformerFA` leg's attention runs only on flash attention,
+which takes fp16 or bf16 on an Ampere GPU or later. The A10 is an Ampere GPU,
+so it serves every leg, in bf16 under the leg's `autocast`.
 
 **A leg folder, not a `.pt` path.** A `model.pt` holds tensors and nothing
 about the network they belong to or the tokenizer they speak. Pointing at the
