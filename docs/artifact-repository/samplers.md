@@ -79,6 +79,10 @@ a leg continuing another continues its epoch.
 epochs; the error names the last step they serve. A split too short for one
 batch is refused.
 
+`Epochs().steps_per_epoch(leg)` is the steps-per-epoch row for a leg: it binds
+the leg's dataset, which must be built, and reads its training split's length.
+`leg.end_step / Epochs().steps_per_epoch(leg)` is how many epochs the leg ends at.
+
 ## Sweep
 
 Every sequence once, in order, from position 0: step `s` reads sequences

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import Field
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     import numpy as np
 
     from artifacts.core.split import Split
+    from artifacts.stages.pretraining import Pretraining
 
 
 class Sampler(ParamConfig):
@@ -133,6 +135,22 @@ class Epochs(Sampler):
     """
 
     max_epochs: int | None = Field(default=None, gt=0)
+
+    def steps_per_epoch(self, leg: Pretraining, root: Path | None = None) -> int:
+        """Returns how many steps one epoch of `leg` takes: its training split's sequences of
+        model.sequence_length, in batches of training_parameters.batch_size.
+
+            Epochs().steps_per_epoch(leg, root) -> 62  # 2000 training tokens, sequence_length 8, batch_size 4
+
+        Args:
+            leg: The pretraining leg, whose dataset is bound to read its training split's length.
+            root: Where the dataset is stored; None is the mounted volume.
+
+        Returns:
+            The steps in one epoch, the partial batch at its end dropped.
+        """
+        sequences = (len(leg.dataset.bind(root).train.tokens) - 1) // leg.model.sequence_length
+        return sequences // leg.training_parameters.batch_size
 
     def starts(
         self, split: Split, batch_size: int, sequence_length: int, seed: int, end_step: int

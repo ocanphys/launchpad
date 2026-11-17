@@ -400,6 +400,17 @@ class PretrainJobTests(unittest.TestCase):
         row = json.loads((self.folder / "train.jsonl").read_text(), parse_constant=lambda name: self.fail(name))
         self.assertEqual(row, {"step": 1, "attempt": 1, "loss": None, "grad_norm": None, "learning_rate": 0.5})
 
+    def test_an_epoch_lasts_as_many_steps_as_epochs_reads_before_reshuffling(self):
+        steps = Epochs().steps_per_epoch(self.leg, self.root)
+        self.assertEqual(steps, 62)  # 2000 tokens: 249 sequences of 8, 62 batches of 4
+        train = self.dataset.bind(self.root).train
+        one_epoch = Epochs(max_epochs=1)
+        starts = one_epoch.starts(train, 4, 8, seed=0, end_step=steps)  # the sampler's own epoch holds them all
+        first = np.concatenate([starts(step) for step in range(1, steps + 1)])
+        self.assertEqual(len(set(first.tolist())), 4 * steps)  # no sequence twice within the epoch
+        with self.assertRaises(ValueError):
+            one_epoch.starts(train, 4, 8, seed=0, end_step=steps + 1)  # and not one step more
+
     def test_a_model_vocab_that_disagrees_with_its_tokenizer_is_refused(self):
         with self.assertRaisesRegex(ValueError, "vocab_size"):
             Pretraining(
