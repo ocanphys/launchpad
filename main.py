@@ -82,6 +82,10 @@ lab_image = (
     image=web_image,
     volumes={STORAGE.as_posix(): volume},
     max_containers=1,
+    # Without a request Modal reserves 0.125 cores and 128 MiB, for up to 32
+    # concurrent requests and the state map they all read.
+    cpu=1,
+    memory=1024,
     region=REGION,
     # The password every route here is behind, and the lab's token, which
     # `/lab` hands straight to Jupyter.
