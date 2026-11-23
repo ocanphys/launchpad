@@ -28,3 +28,7 @@ site/
 .claude/settings.local.json
 .claude/worktrees/
 .claude/.cc-writes/
+
+# Secrets
+.env
+.env.*
