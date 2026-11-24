@@ -87,15 +87,3 @@ notebook declared D and reads C back from the volume.*
   loaded into memory and inspected: weights, activations, attention maps,
   generations from a checkpoint. You can compare runs side by side and
   aggregate results across them.
-
-## Docs
-
-Everything about how it works is in the docs, under `docs/`:
-
-```bash
-uv sync
-mkdocs serve        # http://127.0.0.1:8000
-```
-
-A deployed app (`mkdocs build --strict && modal deploy main.py`) also serves them at `/guide/`. Start
-with [docs/framework.md](docs/framework.md), then [docs/getting-started.md](docs/getting-started.md).
