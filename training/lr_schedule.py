@@ -28,15 +28,19 @@ class LRSchedule(ParamConfig):
 
 
 class Constant(LRSchedule):
-    """The same rate at every step.
+    """A linear warmup from 0 to learning_rate over warmup_iters steps, then
+    learning_rate at every step. No warmup by default.
 
-        Constant(lr=3e-4).rate(1000) -> 0.0003
+        Constant(learning_rate=3e-4, warmup_iters=10).rate(5) -> 0.00015
     """
 
-    lr: float
+    learning_rate: float
+    warmup_iters: int = 0
 
     def rate(self, step: int) -> float:
-        return self.lr
+        if step < self.warmup_iters:
+            return step * self.learning_rate / self.warmup_iters
+        return self.learning_rate
 
 
 class WarmupCosine(LRSchedule):

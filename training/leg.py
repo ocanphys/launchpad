@@ -32,7 +32,7 @@ class TrainingParameters(ParamConfig):
     recovery cadence. `lr_schedule` is the only place the learning rate is
     stated.
 
-        TrainingParameters(total_steps=1000, batch_size=64, max_norm=1, lr_schedule=Constant(lr=3e-4),
+        TrainingParameters(total_steps=1000, batch_size=64, max_norm=1, lr_schedule=Constant(learning_rate=3e-4),
                            optimizer=AdamW()).max_norm
           -> 1.0
     """

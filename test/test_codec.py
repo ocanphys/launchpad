@@ -115,7 +115,7 @@ REALS = st.builds(
         TrainingParameters,
         total_steps=POSITIVE,
         max_norm=FLOATS,
-        lr_schedule=st.builds(WarmupCosine, max_learning_rate=FLOATS, min_learning_rate=FLOATS) | st.builds(Constant, lr=FLOATS),
+        lr_schedule=st.builds(WarmupCosine, max_learning_rate=FLOATS, min_learning_rate=FLOATS) | st.builds(Constant, learning_rate=FLOATS),
         optimizer=st.builds(
             AdamW,
             betas=st.tuples(FLOATS, FLOATS),
