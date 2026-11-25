@@ -1,10 +1,59 @@
-"""The codec: an artifact as a manifest dict and back. A manifest names its
-artifact's class under "artifact", records its declaring commit, resources and
-tags at the root only, holds its own fields under "parameters" and a definition per
-dependency under "dependencies". A param config whose class is not exactly the
-one its field names carries that class under "class", at any depth. Nothing
-here opens a file (artifacts.core.storage does); `manifest_json` is the text on
-disk.
+"""Manifests: an artifact's definition as JSON, enough to rebuild it and everything it is built
+from. Nothing here opens a file; `artifacts.core.storage` does.
+
+Every declared artifact owns `root / artifact_path / "manifest.json"`, with its dependencies'
+definitions embedded recursively, so one manifest decodes and compares on its own. `bpe`, as
+declared:
+
+    {
+      "artifact": "artifacts.tokenizers.bpe.Tokenizer",
+      "declaring_commit": "abc1234",
+      "allocated_resources": {"cpu": null, "gpu_count": null, "gpu_type": null},
+      "tags": {"experiment": ["lr_study"]},
+      "parameters": {"special_tokens": ["<pad>"], "vocab_size": 1000},
+      "dependencies": {
+        "sources": [
+          {
+            "artifact": "artifacts.sources.SourceURL",
+            "parameters": {"name": "odyssey", "url": "https://example.org/odyssey.txt"},
+            "dependencies": {}
+          }
+        ]
+      }
+    }
+
+`"artifact"` is the concrete class's dotted path. `"parameters"` and `"dependencies"` split the
+class's fields by annotation (`Artifact.dependencies`), so `sources=(odyssey,)` becomes an array
+of definitions while `special_tokens`, also an array, stays a parameter. An embedded definition
+has only `artifact`, `parameters` and `dependencies`: the recorded fields (`Artifact.RECORDED`)
+are at the root of each artifact's own manifest.
+
+**Which class a param config is.** A param config whose class is exactly its field's annotation
+is written as its fields alone, so that class can be renamed without migrating anything. A
+subclass, at any depth, adds its dotted path under `"class"`, and a field annotated with a union
+of param configs writes it on every value:
+
+    "model": {"class": "models.transformer.Transformer", "d_model": 128, "num_heads": 16, ...}
+
+A class a manifest names is stored format: moving it leaves the manifest unreadable until it is
+rewritten.
+
+**Canonical text.** The text is a pure function of the artifact: the six top-level keys in the
+order above (three in an embedded definition), nested maps sorted by key, a set of dependencies
+as an array sorted by artifact path, `-0.0` written as `0.0`, NaN and infinity refused,
+`indent=2`, UTF-8 unescaped, and a final newline. Two invariants follow:
+
+- `from_manifest(to_manifest(a)) == a`, at the same path, and a decoded manifest re-encodes to
+  exactly its own text.
+- `==` artifacts embed as identical bytes in any parent, though their own manifests may differ in
+  recorded fields. Nothing compares manifest text to decide whether two definitions agree.
+
+There is no format version: one program reads and writes manifests, so a format change
+rewrites every manifest on the volume.
+
+**Trusted classes.** Decoding imports the classes a manifest names, with no allow-list: the
+volume is written only by `lab.declare`, so a wrong path fails to import, and `Artifact.load`
+reports the manifest unreadable.
 """
 
 from __future__ import annotations
@@ -24,15 +73,27 @@ def arms(annotation: object) -> tuple:
     """Returns the arms of a union annotation, None included, or the annotation alone.
 
         arms(Model | None) -> (Model, NoneType)
+
+    Args:
+        annotation: A field's annotation.
+
+    Returns:
+        The union's arms, or a one-tuple of the annotation.
     """
     return get_args(annotation) if get_origin(annotation) in (UnionType, Union) else (annotation,)
 
 
 def canonical(value: object) -> Any:
-    """Returns `value` as JSON data with keys sorted and -0.0 written as 0.0,
-    so equal values give equal JSON.
+    """Returns `value` as JSON data with keys sorted and -0.0 written as 0.0, so equal values give
+    equal JSON.
 
         canonical({"b": -0.0, "a": (1, 2)}) -> {"a": [1, 2], "b": 0.0}
+
+    Args:
+        value: Any JSON-serializable value.
+
+    Returns:
+        The same value as plain JSON data, canonical.
     """
     return json.loads(
         json.dumps(value),
@@ -42,10 +103,18 @@ def canonical(value: object) -> Any:
 
 
 def members(value: Any, container: type | None) -> list[Artifact]:
-    """Returns a dependency field's artifacts in manifest order: a set's
-    sorted by artifact path, never by set iteration.
+    """Returns a dependency field's artifacts in manifest order: a set's sorted by artifact path,
+    never by set iteration.
 
         members(frozenset({iliad, odyssey}), frozenset) -> [iliad, odyssey]
+
+    Args:
+        value: The field's value.
+        container: The field's container, from `Artifact.dependencies`: tuple, frozenset, or None
+            for a single artifact.
+
+    Returns:
+        The artifacts it holds, none for a None value.
     """
     if container is None:
         return [] if value is None else [value]
@@ -73,14 +142,16 @@ def _with_classes(value: object, annotation: object, data: Any) -> object:
 
 
 def parameters(artifact: Artifact) -> dict:
-    """Returns the artifact's own fields as canonical JSON, sorted by name: the
-    "parameters" half of its manifest, without the dependencies' manifests.
+    """Returns the artifact's own fields as canonical JSON, sorted by name: its manifest's
+    `"parameters"`, a subclass of a param config's annotated class carrying `"class"`.
 
-    A param config holding a subclass of its annotated class, at any depth,
-    carries that subclass's dotted path under "class".
+        parameters(odyssey) -> {"name": "odyssey", "url": "https://example.org/odyssey.txt"}
 
-        parameters(SourceURL(name="odyssey", url="https://example.org/odyssey.txt"))
-          -> {"name": "odyssey", "url": "https://example.org/odyssey.txt"}
+    Args:
+        artifact: The artifact to encode.
+
+    Returns:
+        Each own field's name and its JSON value.
     """
     cls = type(artifact)
     names = [n for n in cls.model_fields if n not in cls.dependencies() and n not in cls.RECORDED]
@@ -102,17 +173,20 @@ def _definition_manifest(artifact: Artifact) -> dict:
 
 
 def to_manifest(artifact: Artifact) -> dict:
-    """Returns the artifact as a manifest dict, enough to rebuild it from
-    nothing else: its class, declaring commit, resources, tags, own parameters, and
-    the definition of each artifact it is built from.
+    """Returns the artifact as a manifest dict: its class, recorded fields, own parameters, and the
+    definition of each artifact it is built from, without their recorded fields.
 
-    Only the root records `declaring_commit`, `allocated_resources` and `tags`;
-    each dependency records its own at its own path. The six keys keep this order
-    and everything below them is sorted, so the text is a pure function of the
-    artifact.
+        to_manifest(odyssey)
+        -> {"artifact": "artifacts.sources.SourceURL", "declaring_commit": None,
+            "allocated_resources": {"cpu": None, "gpu_count": None, "gpu_type": None}, "tags": {},
+            "parameters": {"name": "odyssey", "url": "https://example.org/odyssey.txt"},
+            "dependencies": {}}
 
-        to_manifest(odyssey) -> {"artifact": "artifacts.sources.SourceURL", "declaring_commit": "abc1234",
-                                 "allocated_resources": {...}, "tags": {}, "parameters": {...}, "dependencies": {}}
+    Args:
+        artifact: The artifact to encode.
+
+    Returns:
+        The manifest, as a JSON-ready dict.
     """
     definition = _definition_manifest(artifact)
     resources, tags = artifact.allocated_resources, artifact.tags
@@ -145,12 +219,25 @@ def _decoded(data: object) -> object:
 def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifact:
     """Returns the artifact a manifest describes and the tree under it, unbound.
 
-    The root keeps the declaring commit, resources and tags its manifest records; a
-    dependency comes back with all three None, since they are recorded at its own
-    path. `memo`, one dict shared across calls, hands back the same instance
-    for a subtree decoded before (the dataset under every leg of a run).
+    The root keeps the recorded fields its manifest holds, and a dependency comes back with all
+    three None. Every validator runs, so a manifest that breaks an invariant cannot be loaded. Each
+    dependency is decoded from its own `"artifact"` key before the artifact is validated in Python
+    mode, never handed to pydantic as a dict, which would guess between classes with the same
+    fields.
 
         from_manifest(odyssey.to_manifest()) == odyssey -> True
+
+    Args:
+        data: A manifest, as `to_manifest` returns it.
+        memo: Decoded artifacts keyed by manifest, shared across calls, so a subtree many
+            manifests embed (the dataset under every leg of a run) is one instance. `bind` never
+            passes one, since it attaches files to the instance it loads. None for none.
+
+    Returns:
+        The artifact, unbound.
+
+    Raises:
+        TypeError: A class the manifest names is not an Artifact or a param config.
     """
     key = json.dumps(data, sort_keys=True) if memo is not None else ""
     if memo is not None and key in memo:
@@ -182,9 +269,16 @@ def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifa
 def manifest_json(manifest: dict) -> str:
     """Returns one manifest as the text that belongs on disk.
 
-    allow_nan=False because Python writes NaN and Infinity as bare words and
-    reads them back, while no other JSON reader accepts either.
+    It refuses NaN and infinity, which Python writes as bare words and reads back while no other
+    JSON reader accepts either.
 
-        manifest_json({"artifact": "artifacts.sources.SourceURL", ...}) -> '{\\n  "artifact": ...}\\n'
+        manifest_json({"artifact": "artifacts.sources.SourceURL"})
+        -> '{\\n  "artifact": "artifacts.sources.SourceURL"\\n}\\n'
+
+    Args:
+        manifest: A manifest, as `to_manifest` returns it.
+
+    Returns:
+        Its canonical text.
     """
     return json.dumps(manifest, indent=2, ensure_ascii=False, allow_nan=False) + "\n"

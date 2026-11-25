@@ -1,21 +1,34 @@
-"""The base job model -- what a job IS, in general: it produces exactly one
-artifact, which is all it is given. No concrete job lives here; see
-artifacts/sources/, artifacts/tokenizers/, artifacts/tokenized/,
-artifacts/dataset/, artifacts/stages/* for those (docs/jobs.md).
+"""Jobs: the code that builds one artifact.
 
-One job, one artifact. That artifact may comprise several files, but they
-all live in its folder, and declaration (`lab.declare`) has already created
-that folder, writing the manifest into it, before run() is called -- so no
-job makes its own folder, only subfolders inside it.
+Each family pairs its artifact class with exactly one job class, in its `jobs.py`: no
+alternative producers, no job ids, no per-run config files. A virtual artifact, such as
+`MappedDataSet`, has none. The two name each other, the job with a class annotation and the
+artifact with a dotted string, which only `Artifact.job()` imports, in the worker about to run it:
 
-Every path in the artifact's `completion_paths` -- the files whose presence
-means it is done -- is written through `worker.publishing`, which opens the
-file, closes it and renames it into place under a confirmed lease. Nothing a
-job writes to the volume that has to appear whole or not at all is written
-any other way. A
-file that completes nothing is not one of those: a step log is appended to as
-the job runs. A checkpoint still goes through it, since a half-written one
-would poison the resume that reads it.
+    class Tokenizer(Artifact):
+        producer: ClassVar[str] = "artifacts.tokenizers.bpe.jobs.TokenizerJob"
+
+    class TokenizerJob(Job):
+        artifact: Tokenizer
+
+**What a job may write.** Declaration has created the artifact's folder and written its manifest
+before `run` is called, and a job writes only inside that folder:
+
+- Every completion file goes through `worker.publishing`, which hands the job an open temporary
+  file, `{filename}.{call_id}.tmp`, and when the job closes it, confirms the lease and renames it
+  into place. A file exists whole or not at all, and only the call holding the lease publishes.
+  Naming, opening or renaming a temporary path in a job is a defect.
+- A published file is never appended to, replaced or deleted.
+- Auxiliary files in locations the type owns, a leg's checkpoints and step log, never count
+  toward completion. A checkpoint still goes through `publishing`, since a half-written one would
+  poison the resume that reads it; the step log is appended to as the job runs.
+
+**Resuming.** Publication is per file, so a crash between files leaves the artifact partial. On a
+partial artifact a job checks that what is there is consistent with the definition, keeps it, and
+publishes what is missing, or raises.
+
+**By hand.** A job runs from a cell with no lease and console logging:
+`artifact.job().run(root, lab.worker)`.
 """
 
 from abc import ABC, abstractmethod
@@ -25,27 +38,21 @@ from typing import TYPE_CHECKING
 from artifacts.core.artifact import Artifact
 
 if TYPE_CHECKING:
-    # Type-only: `system.runtime.Worker` pulls in `modal`, and the artifact/job
-    # modules otherwise have no third-party imports of their own (see
-    # main.py's CALL_SOURCE comment) -- a real import here would change that
-    # for every notebook that imports a job module just to plan or inspect a
-    # run.
+    # Type-only: `system.runtime.Worker` pulls in `modal`, which a notebook that imports a job
+    # module just to inspect a run would otherwise import too.
     from system.runtime import Worker
 
 
 class Job(ABC):
     """Produces exactly one artifact, which is all it is given.
 
-    A subclass declares itself with a single line -- `artifact: Tokenizer`.
-    That annotation types self.artifact, so the job sees its dependencies
-    for what they are. `Artifact.job()` is how a job is found from its
-    artifact.
+    A subclass annotates `artifact:` with the type it produces, which types `self.artifact`;
+    defining one without it raises TypeError. A job with dependencies binds them in `__init__`
+    under the names the artifact gives them, `self.tokenizer` and never `self.tok`, and `run` uses
+    those, while the artifact's own parameters stay on `self.artifact`.
 
-    A job with dependencies binds them in __init__, under the same names the
-    artifact gives them, and run() uses those: self.tokenizer, never
-    self.tok. What a job reads is then declared in one place instead of
-    being spelled out again at each use, and the artifact's own parameters
-    stay on self.artifact -- which keeps the two kinds of field apart.
+    Args:
+        artifact: The artifact to produce.
     """
 
     artifact: Artifact
@@ -62,17 +69,15 @@ class Job(ABC):
 
     @abstractmethod
     def run(self, root: Path, worker: "Worker") -> None:
-        """Do the work, writing self.artifact's files under root.
+        """Writes `self.artifact`'s files under `root`.
 
-        `worker` is what main.py's `run_job` holds for the call this job is
-        running under (see system.runtime.Worker) -- its `.log` is the logger
-        whose records are filed under this call, boot/heartbeat/done lines
-        included, so a job's own narration belongs there too, not in a
-        print() nothing files.
+        A job narrates through `worker.log`, whose records are filed under this call, never
+        `print()`. One that reports progress writes it to `worker.progress`, in whatever shape says
+        what it means, since the dashboard shows it verbatim; once the call is over its artifact
+        answers the same question from the volume (`Artifact.durable_progress`).
 
-        A job that reports incremental progress writes it to `worker.progress`
-        here, in whatever shape says what it means -- the dashboard shows it
-        verbatim, so nothing downstream has to know what a given job counts.
-        Its artifact answers the same question off the volume once the call is
-        over (`Artifact.durable_progress`).
+        Args:
+            root: The storage root the artifact's folder is under.
+            worker: The call this job runs under (`system.runtime.Worker`): its logger, its
+                progress and the lease `publishing` confirms.
         """

@@ -1,6 +1,6 @@
 """The pretraining stage: __init__.py for the Pretraining leg, samplers.py for
 its batches, jobs.py for its loss and evaluation on top of the shared leg and loop in
-artifacts.core.SGD. Which model it trains is the leg's `model` parameter, a
+training. Which model it trains is the leg's `model` parameter, a
 package under models/.
 """
 from __future__ import annotations
@@ -11,11 +11,11 @@ from typing import ClassVar, Literal, Self
 
 from pydantic import model_validator
 
-from artifacts.core.SGD.training import Training
 from artifacts.dataset import DataSet
 from artifacts.mappeddataset import MappedDataSet
 from artifacts.stages.pretraining.samplers import RandomWindows, Sampler
 from artifacts.tokenizers import Tokenizer
+from training.leg import Training
 
 
 class Pretraining(Training):

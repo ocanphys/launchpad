@@ -17,17 +17,17 @@ from pydantic import ValidationError, create_model
 
 from artifacts.core.artifact import Artifact, ParamConfig, Resources
 from artifacts.core.manifest import manifest_json
-from artifacts.core.SGD.lr_schedule import Constant, WarmupCosine
-from artifacts.core.SGD.optimizers import SGD, AdamW
-from artifacts.core.SGD.training import (
-    LoopConfig,
-    TrainingParameters,
-)
 from artifacts.core.storage import write_manifest
 from artifacts.stages.pretraining.evaluations import TokenLoss
 from lab import _leaves
 from models.mamba import Mamba
 from models.transformer import Transformer
+from training.leg import (
+    LoopConfig,
+    TrainingParameters,
+)
+from training.lr_schedule import Constant, WarmupCosine
+from training.optimizers import SGD, AdamW
 
 
 class Leaf(ParamConfig):

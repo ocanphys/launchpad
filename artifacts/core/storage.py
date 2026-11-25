@@ -1,7 +1,6 @@
-"""Manifest files: where an artifact's manifest lives under a root, reading it
-as a dict and writing one. The only module that opens a manifest; the codec
-(artifacts.core.manifest) turns the dict into an artifact and back, and
-deciding whether a write is allowed is lab.declare's.
+"""Manifest files: where an artifact's manifest lives under a root, reading it as a dict and
+writing one. The only module that opens a manifest: the codec turns the dict into an artifact
+and back, and whether a write is allowed is `lab.declare`'s decision.
 """
 
 import json
@@ -21,7 +20,13 @@ def root_of(root: Path | None) -> Path:
     `root / artifact_path` and surface as a missing file somewhere else.
 
         root_of(None) -> Path("/storage")
-        root_of(Path("tmp")) -> ValueError (root must be an absolute path)
+        root_of(Path("tmp")) -> ValueError: root must be an absolute path, got tmp
+
+    Args:
+        root: A storage root, or None for STORAGE.
+
+    Returns:
+        The root to use.
     """
     resolved = root if root is not None else STORAGE
     if not isinstance(resolved, Path):
@@ -40,13 +45,21 @@ def _manifest_path(root: Path | None, artifact_path: Path | str) -> Path:
 
 
 def read_manifest(root: Path | None, artifact_path: Path | str) -> dict:
-    """Returns the parsed manifest at root / artifact_path.
-
-    Raises FileNotFoundError when nothing is declared there, and ValueError for
-    a path that leaves root or a file that is not JSON, naming the file.
+    """Returns the parsed manifest at `root / artifact_path`.
 
         read_manifest(Path("/storage"), "sources/odyssey")
-          -> {"artifact": "artifacts.sources.SourceURL", "declaring_commit": "abc1234", ...}
+        -> {"artifact": "artifacts.sources.SourceURL", "declaring_commit": "abc1234", ...}
+
+    Args:
+        root: The storage root; None for STORAGE.
+        artifact_path: The artifact's folder, relative to root.
+
+    Returns:
+        The manifest, as a dict.
+
+    Raises:
+        FileNotFoundError: Nothing is declared there.
+        ValueError: The path leaves root, or the file is not JSON, naming the file.
     """
     path = _manifest_path(root, artifact_path)
     try:
@@ -58,13 +71,15 @@ def read_manifest(root: Path | None, artifact_path: Path | str) -> dict:
 
 
 def write_manifest(root: Path | None, artifact_path: Path | str, manifest: dict) -> None:
-    """Writes `manifest` to root / artifact_path / manifest.json as
-    manifest_json's bytes, creating the folder.
+    """Writes `manifest` to `root / artifact_path / manifest.json` as `manifest_json`'s text,
+    creating the folder and overwriting whatever is there.
 
-    Overwrites whatever is there: whether a write is allowed is lab.declare's
-    decision, made before it calls this.
+        write_manifest(Path("/tmp/root"), "sources/odyssey", odyssey.to_manifest())
 
-        write_manifest(Path("/tmp/root"), "sources/odyssey", odyssey.to_manifest())  -> None
+    Args:
+        root: The storage root; None for STORAGE.
+        artifact_path: The artifact's folder, relative to root.
+        manifest: The manifest to write, as `to_manifest` returns it.
     """
     path = _manifest_path(root, artifact_path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -38,7 +38,7 @@ class Mamba(Model):
         import torch
 
         from artifacts.core.locate import locate
-        from models.mamba.src.model import MambaLM
+        from models.mamba.network import MambaLM
 
         return MambaLM(
             vocab_size=self.vocab_size,

@@ -16,12 +16,19 @@ describe no code: [LESSONS.md](LESSONS.md), TODO.md, CLAUDE.md, this file and
 
 **README.md is a front page:** what the repo is, and how to open the docs.
 
-**Design rationale goes on the subject's docs page, under a "Why" heading.** "Why this and
-not the other design" is a document. A docstring that argues it makes the reader read an
-argument to find an API.
+**A module's page is its docstrings and nothing else:** a title and `::: module` blocks.
+The module docstring says what the module is and the rules a caller must know, with the
+examples the rest of the page uses; each function and class says the rest. Prose about a
+module written on its page is prose that can drift from the code.
 
-**A page's reference section is its module's docstrings,** pulled in with `::: module`. The
-page explains how the parts fit; it does not restate a signature.
+**How the modules of a section fit together is one overview page,** first in that
+section's nav, such as [docs/core.md](docs/core.md) for artifacts, manifests and jobs. It
+describes the flow between them and links to their pages; it restates no signature and
+describes no single function.
+
+**Design rationale goes on the section's overview page, under a "Why" heading.** "Why this
+and not the other design" is a document. A docstring that argues it makes the reader read an
+argument to find an API.
 
 **Code and its docs page change in the same commit.** Removing a mechanism means grepping
 its name and clearing every mention in that commit: docstrings, comments, README, docs.
@@ -31,8 +38,7 @@ reference is an error, not a warning.
 
 ## Docstrings
 
-**First line says what it returns, present tense.** Then at most one paragraph, for the
-single thing a caller can get wrong.
+**First line says what it returns, present tense.** 
 
 **Every function ends with `Args:` and `Returns:`, Google style,** which mkdocs renders as
 tables. One line per argument: what it is and what it changes, not its type, which the

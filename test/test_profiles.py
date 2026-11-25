@@ -13,7 +13,6 @@ from pydantic import ValidationError
 
 from artifacts.core.artifact import Artifact, Resources
 from artifacts.core.manifest import manifest_json
-from artifacts.core.SGD.optimizers import SGD, AdamW
 from artifacts.core.storage import write_manifest
 from artifacts.profiles import Profile, _with_prefix, jobs
 from artifacts.profiles.jobs import ProfileJob
@@ -23,6 +22,7 @@ from models.transformer import Transformer
 from models.transformerFA import TransformerFA
 from profiling.util import run_profile
 from system.runtime import Worker
+from training.optimizers import SGD, AdamW
 
 MODEL = Transformer(vocab_size=64, sequence_length=8, num_layers=1, d_model=16, d_ff=32, num_heads=2, rope_theta=10000)
 FIELDS = {"run_id": "sweep", "resources": Resources(gpu_type="L4"), "model": MODEL, "optimizer": AdamW(), "batch_size": 4,
@@ -186,7 +186,7 @@ def test_the_summary_is_a_row_per_step_of_parameters_measurements_and_rates():
     assert summary["step"].tolist() == [0, 1]
     row = summary.loc[0]
     assert row["model.class"] == "models.transformer.Transformer" and row["model.d_model"] == 16
-    assert row["optimizer.class"] == "artifacts.core.SGD.optimizers.AdamW" and row["resources.gpu_type"] == "L4"
+    assert row["optimizer.class"] == "training.optimizers.AdamW" and row["resources.gpu_type"] == "L4"
     assert row["autocast"] == "torch.bfloat16" and row["compile"] == "no"
     assert declared(autocast=None).with_results(TEXTS).summary().loc[0, "autocast"] == MODEL.dtype  # None runs in it
     assert row["gpu"] == "NVIDIA L4" and row["device_vram_bytes"] == 2**30

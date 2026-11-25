@@ -1,4 +1,4 @@
-"""Adapters from the CS336 assignment 1 test interface to models.transformer.src.model.
+"""Adapters from the CS336 assignment 1 test interface to models.transformer.network.
 
 The tests pass weights under the assignment's state-dict names; each adapter loads them into
 our module under its own parameter names.
@@ -7,7 +7,7 @@ our module under its own parameter names.
 import torch
 from torch import Tensor
 
-from models.transformer.src.model import (
+from models.transformer.network import (
     SPDA,
     Embedding,
     Linear,

@@ -117,7 +117,7 @@ bytes, for a caller with no kernel: `local.declare_on_volume` reads them where
 the kernel is and ships them. Without it, a commit reads the kernel's own
 notebook file, `current_notebook()`.
 
-1. Resolve the requested artifact into its graph ([Artifacts](artifacts.md#resolution)).
+1. Resolve the requested artifact into its graph ([Artifacts](artifacts.md#artifacts.core.artifact.resolve)).
 2. Inspect each path once and compare an existing manifest with the request
    using `==`, definition agreement.
 3. Record drift, resource differences and tags to add per node. A node drifts when the

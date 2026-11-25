@@ -45,8 +45,7 @@ from typing import Literal
 import modal
 from pydantic import ValidationError
 
-from artifacts.core.artifact import Artifact, Resources
-from artifacts.core.resolve import resolve
+from artifacts.core.artifact import Artifact, Resources, resolve
 from artifacts.core.storage import MANIFEST, read_manifest, write_manifest
 from config import LAB_COMMIT_ENV, LAB_WORKSPACE, STORAGE, VOLUME_NAME, get_git_commit
 from system.lease_protocol import refreshes

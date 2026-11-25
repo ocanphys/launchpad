@@ -1,18 +1,28 @@
-"""The base artifact model: parameters plugged together with the artifacts
-they're built from, a folder each artifact owns, and a manifest that rebuilds
-it. Concrete types live in sources/, tokenizers/, tokenized/, dataset/,
-mappeddataset/, stages/*.
+"""Artifacts: immutable definitions of what should exist, how they are identified, and how one
+is used once built.
 
-An artifact has three lives, and this class carries all three:
+An artifact is a class and its typed fields. Fields annotated with artifact types are the
+artifacts it is built from, its dependencies, and the rest are its parameters. Constructing one
+reads no storage. The examples on this page use these three:
 
-    recipe    Artifact(params)         parameters, a folder, a manifest
-    job       Job(artifact).run(root)  writes the files into that folder
-    bound     artifact.bind(root)      the stored declaration, files loaded
+    odyssey = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
+    bpe = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(odyssey,))
+    tokens = TokenizedSource(tokenizer=bpe, source=odyssey)
 
-`load`, `status` and `bind` take a root, defaulting to STORAGE. That default
-is for the top of a notebook only. Anything already holding a root (a job, a
-`_load` hook) passes it on, or it silently reads the volume while everything
-around it reads a test folder.
+**Families.** A family is a package under `artifacts/` with its artifact class in `__init__.py`
+and its job in `jobs.py`. A concrete type declares its fields, derives `uid`, `artifact_path`
+and `files` from them, and sets `producer`. Its module imports no torch or numpy.
+
+**Validation.** Every artifact and param config is frozen, refuses unknown fields, NaN and
+infinity, and is strict about types. An int in a float field is stored as that float, so
+`max_norm=1` and `max_norm=1.0` are one artifact at one path; every other conversion is refused
+with a ValidationError naming the field: `True` in an int field, `"0.5"` in a float field, a
+list where a tuple is declared. `Artifact` and `ParamConfig` each set this config, since a
+pydantic config does not reach the models nested in a field.
+
+**Roots.** `load`, `status` and `bind` take a root, defaulting to STORAGE, which is for the top
+of a notebook only: anything already holding a root passes it on, or it reads the volume while
+everything around it reads a test folder.
 """
 
 from __future__ import annotations
@@ -38,26 +48,21 @@ if TYPE_CHECKING:
     from artifacts.core.job import Job
 
 
-# Strict: no str as int, bool as int or list as tuple, though an int in a float
-# field becomes a float. Each base sets it, since a config does not reach the
-# models nested in a field.
-STRICT = ConfigDict(frozen=True, extra="forbid", strict=True, allow_inf_nan=False)
-
-
 class ParamConfig(BaseModel):
-    """A validated, frozen parameter of an artifact: never a dependency, and
-    never a folder or manifest of its own. Subclasses declare their fields and
-    the constraints on them; construction refuses a value that breaks one.
+    """A structured parameter of an artifact, such as a leg's training parameters or its model:
+    validated, frozen and part of its artifact's identity, but never a dependency, and never a
+    folder, manifest or job of its own.
 
-        LoopConfig(evaluations=(), gpu_check_every=0) -> ValidationError (gpu_check_every: greater than 0)
+        LoopConfig(evaluations=(), gpu_check_every=0)
+        -> ValidationError: 1 validation error for LoopConfig, gpu_check_every: Input should be greater than 0
     """
 
-    model_config = STRICT
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, allow_inf_nan=False)
 
 
 class Resources(ParamConfig):
-    """What a job should be given to run this artifact; None means Modal's
-    platform default for that dimension. Never identity.
+    """What a job should be given to run an artifact; None means Modal's platform default for that
+    dimension. Never identity.
 
         Resources(gpu_type="A100", gpu_count=2, cpu=4)
         -> Resources(cpu=4.0, gpu_type='A100', gpu_count=2)
@@ -70,12 +75,9 @@ class Resources(ParamConfig):
 
 @dataclass(frozen=True)
 class Footprint:
-    """What one root holds for one artifact, as files: its manifest, its own
-    outputs by description, and the files that make it complete by path.
-
-    For most artifacts the last two name the same files. A virtual artifact
-    owns no outputs and borrows completion from its dependencies, which is why
-    "is anything of mine written" and "am I done" are separate questions.
+    """What one root holds for one artifact, as files: its manifest, its own outputs by description,
+    and the files that make it complete by path. The last two differ only for a virtual artifact,
+    which owns no outputs and is complete when its dependencies' files are.
     """
 
     manifest: bool
@@ -86,9 +88,10 @@ class Footprint:
     def complete(self) -> bool:
         """Returns whether every file that makes this artifact done is there.
 
-        Ask this, not `all(outputs.values())`: the two agree for everything
-        that owns its bytes and differ exactly for virtual artifacts, where
-        asking the wrong one is silently wrong.
+        Ask this, not `all(outputs.values())`, which is silently wrong for a virtual artifact.
+
+        Returns:
+            True when every completion path exists.
         """
         return all(self.completion.values())
 
@@ -97,8 +100,11 @@ def _check_parameter(annotation: object, where: str) -> None:
     """Raises unless a parameter's `annotation` holds only scalars, Literals,
     tuples and param configs: decoding turns every JSON array into a tuple,
     and hashing needs every value hashable."""
-    if annotation in (Any, object, list, dict, set, frozenset) or get_origin(annotation) in (list, dict, set, frozenset):
-        raise TypeError(f"{where}: annotated {annotation}; a parameter holds scalars, Literals, tuples and param configs")
+    containers = (list, dict, set, frozenset)
+    if annotation in (Any, object, *containers) or get_origin(annotation) in containers:
+        raise TypeError(
+            f"{where}: annotated {annotation}; a parameter holds scalars, Literals, tuples and param configs"
+        )
     if isinstance(annotation, type) and issubclass(annotation, Artifact):
         raise TypeError(
             f"{where}: artifact hidden in a parameter; a dependency is annotated "
@@ -114,38 +120,71 @@ def _check_parameter(annotation: object, where: str) -> None:
 
 
 class Artifact(BaseModel):
-    """An artifact definition: its fields annotated with artifact types are
-    the artifacts it is built from, and every other field is a parameter.
+    """An artifact definition. Two artifacts agree in one of three ways, kept apart:
 
-    `==` and `hash` compare the definition: class, parameters and
-    dependencies, recursively, never `declaring_commit`, `allocated_resources`
-    or `tags`, so an artifact rebuilt from an older manifest is still the same
-    artifact.
+    - **identity**: equal `artifact_path`, what deduplication, leases, manifest locations and
+      every map of artifacts key on;
+    - **definition**: `==` and `hash`, comparing class, parameters and dependencies recursively,
+      never the RECORDED fields or bound state, so an artifact rebuilt from an older manifest is
+      still the same artifact. `resolve`, `bind` and `lab.declare` all ask this;
+    - **provenance**: the RECORDED fields agree.
 
-        SourceURL(name="odyssey", url="https://example.org/odyssey.txt").artifact_path -> Path("sources/odyssey")
+    Sharing a path is never agreement, so agreement is checked with `==`, never by comparing
+    manifest text:
+
+        a = SourceURL(name="odyssey", url="https://a.org/odyssey.txt")
+        b = SourceURL(name="odyssey", url="https://b.org/odyssey.txt")
+        a.artifact_path == b.artifact_path -> True
+        a == b -> False
+        a == SourceURL(name="odyssey", url="https://a.org/odyssey.txt", declaring_commit="abc1234") -> True
+
+    A changed definition is a new construction, `type(a)(**dict(a) | changes)`, never
+    `model_construct`, `model_copy(update=...)` or `object.__setattr__`: an artifact held in a
+    field is never validated again, and a copy keeps cached properties such as a leg's
+    `lineage_hash`, and with it the old path. `model_copy(update=...)` replaces a RECORDED field
+    and nothing else.
     """
 
-    model_config = STRICT
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, allow_inf_nan=False)
 
-    # The fields a manifest records but that never identify the artifact.
     RECORDED: ClassVar[tuple[str, ...]] = ("declaring_commit", "allocated_resources", "tags")
+    """The fields a manifest records but that never identify the artifact. Each is recorded once,
+    at the root of the artifact's own manifest: a parent embeds its dependencies without them, so
+    a dependency decoded from a parent has all three None. Once written, the commit and resources
+    never change, and a matching redeclaration only appends the tags the stored ones lack."""
 
     declaring_commit: str | None = Field(default=None, repr=False)
+    """The commit that declared this artifact's manifest, stamped by `lab.declare` whatever the
+    object holds: HEAD, with `-dirty` when the tree has uncommitted changes; None until declared.
+    It records the declaration, never the code a job runs, which is whatever is deployed."""
     allocated_resources: Resources | None = Field(default_factory=Resources, repr=False)
+    """What its job is given to run; None on a dependency decoded from a parent's manifest,
+    which records it at its own path."""
     tags: dict[str, list[str]] | None = Field(default_factory=dict, repr=False)
+    """Labels to find it by, which the dashboard filters on, such as `{"experiment": ["lr_study"]}`;
+    None on a dependency decoded from a parent's manifest.
+    """
 
-    # The dotted path of the Job class that produces this artifact
     producer: ClassVar[str | None]
+    """The dotted path of the Job class that produces this artifact, or None for a virtual
+    artifact: one that writes no files, is complete when its `completion_paths` exist, and is
+    never launched."""
 
     @staticmethod
     def digest(*parts: object) -> str:
-        """Returns a 10-character hash of `parts`, which subclasses build their
-        `uid` and `artifact_path` from.
+        """Returns a 10-character hash of `parts`, which subclasses build their `uid` and `artifact_path`
+        from.
 
-        Hashes canonical JSON, so equal parameters give an equal id in every
-        process, -0.0 and 0.0 included. Every part must be JSON-serializable.
+        Hashes canonical JSON, so equal parameters give an equal id in every process, -0.0 and 0.0
+        included. Every part must be JSON-serializable.
 
             Artifact.digest(("<pad>",), ["a", "b"]) -> "54cacb94a0"
+
+        Args:
+            *parts: The values the id is derived from.
+
+        Returns:
+            The first 10 hex digits of the sha256 of their canonical JSON.
         """
         blob = json.dumps(manifest.canonical(parts), separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:10]
@@ -153,21 +192,33 @@ class Artifact(BaseModel):
     @classmethod
     @cache
     def dependencies(cls) -> dict[str, type | None]:
-        """Returns the fields that hold artifacts, sorted by name, each mapped
-        to its container: tuple, frozenset, or None for a single artifact.
+        """Returns the fields that hold artifacts, sorted by name, each mapped to its container: tuple,
+        frozenset, or None for a single artifact.
 
-        Read off annotations, never values, so an empty `sources=frozenset()`
-        is still a dependency. The first call also checks every other field is
-        a parameter the codec can rebuild, and raises TypeError naming one
-        that is not; it runs at first use, once forward references resolve.
+        A dependency is annotated `A`, `A | B | None`, `tuple[A, ...]` or `frozenset[A]`, with only
+        artifact types inside: a tuple when order is part of what the artifact is, a frozenset when
+        it is not. Construction makes any iterable a frozenset, so `sources=(a, b)` and
+        `sources=(b, a)` are one definition, and refuses a set holding two members at one path. A
+        field is classified by its annotation, never its value, so `sources=frozenset()` and
+        `starting_checkpoint=None` are still dependencies. The first call raises TypeError naming any
+        other field that holds a list, dict, set, Any, object, or an artifact: a parameter holds
+        scalars, Literals, tuples and param configs, which the codec can rebuild.
 
             Tokenizer.dependencies() -> {"sources": frozenset}
+            TokenizedSource.dependencies() -> {"source": None, "tokenizer": None}
+
+        Returns:
+            Each dependency field's name and its container.
         """
         found = {}
         for name in sorted(set(cls.model_fields) - set(cls.RECORDED)):
             annotation = cls.model_fields[name].annotation
             container = get_origin(annotation) if get_origin(annotation) in (tuple, frozenset) else None
-            held = [arm for arm in manifest.arms(get_args(annotation)[0] if container else annotation) if arm is not type(None)]
+            held = [
+                arm
+                for arm in manifest.arms(get_args(annotation)[0] if container else annotation)
+                if arm is not type(None)
+            ]
             if held and all(isinstance(arm, type) and issubclass(arm, Artifact) for arm in held):
                 found[name] = container
             else:
@@ -181,7 +232,11 @@ class Artifact(BaseModel):
         so `sources=(a, b)` is accepted as strict validation alone would not."""
         if not isinstance(data, dict):
             return data
-        sets = {name: frozenset(data[name]) for name, c in cls.dependencies().items() if c is frozenset and name in data}
+        sets = {
+            name: frozenset(data[name])
+            for name, c in cls.dependencies().items()
+            if c is frozenset and name in data
+        }
         return {**data, **sets}
 
     @model_validator(mode="after")
@@ -203,7 +258,9 @@ class Artifact(BaseModel):
                 paths = Counter(member.artifact_path for member in getattr(self, name))
                 repeated = sorted(str(p) for p, n in paths.items() if n > 1)
                 if repeated:
-                    raise ValueError(f"{type(self).__name__}.{name} holds more than one definition at {', '.join(repeated)}")
+                    raise ValueError(
+                        f"{type(self).__name__}.{name} holds more than one definition at {', '.join(repeated)}"
+                    )
         return self
 
     def _definition(self) -> tuple:
@@ -214,21 +271,31 @@ class Artifact(BaseModel):
         """Returns whether `other` is the same definition: class, parameters and dependencies.
 
             SourceURL(name="a", url=u, declaring_commit="x") == SourceURL(name="a", url=u, declaring_commit="y") -> True
+
+        Args:
+            other: The object to compare with.
+
+        Returns:
+            True when other is an artifact of the same definition.
         """
         return isinstance(other, Artifact) and self._definition() == other._definition()
 
     def __hash__(self) -> int:
-        """Returns a hash that agrees with `==`."""
+        """Returns a hash that agrees with `==`.
+
+        Returns:
+            The hash of the class and every field but the RECORDED ones.
+        """
         return hash(self._definition())
 
     def deps(self) -> list[Artifact]:
-        """Returns the artifacts this one is built from, one level deep:
-        dependency fields in name order, set members sorted by artifact path.
+        """Returns the artifacts this one is built from, one level deep: dependency fields in name
+        order, set members sorted by artifact path, so the order never depends on set iteration.
 
-        resolve walks this to build the graph, so the order must not depend
-        on set iteration; sorting is what makes it deterministic.
+            tokens.deps() -> [odyssey, bpe]
 
-            TokenizedSource(tokenizer=bpe, source=odyssey).deps() -> [odyssey, bpe]
+        Returns:
+            The dependencies, in that order.
         """
         return [
             dep
@@ -237,24 +304,28 @@ class Artifact(BaseModel):
         ]
 
     def to_manifest(self) -> dict:
-        """Returns this artifact as a manifest dict: class, declaring commit,
-        resources, tags, own parameters, and a nested definition per dependency.
+        """Returns this artifact as the manifest at its `artifact_path`: class, recorded fields, own
+        parameters, and a nested definition per dependency, which `from_manifest` rebuilds it from.
 
-        It is what manifest.json at artifact_path holds, and from_manifest
-        rebuilds the artifact from it alone (see artifacts.core.manifest).
+            odyssey.to_manifest()
+            -> {"artifact": "artifacts.sources.SourceURL", "declaring_commit": None,
+                "allocated_resources": {"cpu": None, "gpu_count": None, "gpu_type": None}, "tags": {},
+                "parameters": {"name": "odyssey", "url": "https://example.org/odyssey.txt"},
+                "dependencies": {}}
 
-            odyssey.to_manifest()["parameters"] -> {"name": "odyssey", "url": "https://example.org/odyssey.txt"}
+        Returns:
+            The manifest, as a JSON-ready dict.
         """
         return manifest.to_manifest(self)
 
     def parameters(self) -> dict:
-        """Returns this artifact's own fields as JSON: the `"parameters"` half
-        of `to_manifest`, without the dependencies' manifests.
-
-        For display (launcher/state.py), where every dependency's nested
-        manifest would bury the fields that tell one artifact from another.
+        """Returns this artifact's own fields as JSON, the `"parameters"` of `to_manifest`, for display
+        where the dependencies' nested manifests would bury them.
 
             bpe.parameters() -> {"special_tokens": ["<pad>"], "vocab_size": 1000}
+
+        Returns:
+            Each own field's name and its JSON value.
         """
         return manifest.parameters(self)
 
@@ -262,11 +333,15 @@ class Artifact(BaseModel):
     def from_manifest(data: dict, memo: dict[str, Artifact] | None = None) -> Artifact:
         """Returns the artifact a manifest describes and the tree under it, unbound.
 
-        `memo`, one dict shared across calls, hands back the same instance for
-        a manifest decoded before, so a subtree many artifacts share is decoded
-        once (see artifacts.core.manifest.from_manifest).
-
             Artifact.from_manifest(odyssey.to_manifest()) == odyssey -> True
+
+        Args:
+            data: A manifest, as to_manifest returns it.
+            memo: Decoded artifacts keyed by manifest, shared across calls, so a subtree many
+                artifacts share is decoded once; None for none.
+
+        Returns:
+            The artifact, unbound.
         """
         return manifest.from_manifest(data, memo)
 
@@ -274,15 +349,26 @@ class Artifact(BaseModel):
     def load(
         artifact_path: Path | str, root: Path | None = None, memo: dict[str, Artifact] | None = None
     ) -> Artifact:
-        """Returns the artifact declared at `root / artifact_path`, always
-        unbound, even when every one of its files is there; bind it to use them.
-
-        Raises unless the manifest rebuilds an artifact whose artifact_path is
-        the folder it was read from. A path is a pure function of parameters,
-        so a disagreeing manifest was copied or renamed, and nothing beside it
-        is what it claims. `memo` is `from_manifest`'s.
+        """Returns the artifact declared at `root / artifact_path`, unbound even when its files are
+        there.
 
             Artifact.load("sources/odyssey") -> SourceURL(name='odyssey', url='https://example.org/odyssey.txt')
+
+        Args:
+            artifact_path: The artifact's folder, relative to root; absolute or climbing out of root
+                is refused.
+            root: The storage root; None for STORAGE.
+            memo: Passed on to from_manifest.
+
+        Returns:
+            The artifact the manifest describes, unbound.
+
+        Raises:
+            FileNotFoundError: Nothing is declared at the path.
+            ValueError: Anything else keeps the manifest from rebuilding this artifact (unreadable
+                JSON, an unknown class, a field that does not fit, or a path that is not the folder
+                it was read from, so it was copied or renamed), naming the file, so a scan turns one
+                bad manifest into one bad row.
         """
         wanted = Path(artifact_path)
         data = storage.read_manifest(root, wanted)
@@ -296,14 +382,18 @@ class Artifact(BaseModel):
         return artifact
 
     def status(self, root: Path | None = None) -> Footprint:
-        """Returns a Footprint of what `root` holds for this artifact, as files.
+        """Returns what `root` holds for this artifact, as files: no manifest parsed, no definition
+        compared, no lease read.
 
-        A filesystem observation and nothing else: no manifest parsed, no
-        definition compared, no lease read. What a footprint means (declared,
-        partial, done, conflicting) is lab.declare's to say, against a request
-        this method never sees.
+            odyssey.status(Path("/storage"))
+            -> Footprint(manifest=True, outputs={"raw text": True},
+                         completion={Path("/storage/sources/odyssey/body.txt"): True})
 
-            odyssey.status(root) -> Footprint(manifest=True, outputs={"raw text": True}, completion={...: True})
+        Args:
+            root: The storage root to look in; None for STORAGE.
+
+        Returns:
+            Which of its manifest, outputs and completion files exist.
         """
         at = storage.root_of(root)
         return Footprint(
@@ -315,21 +405,35 @@ class Artifact(BaseModel):
     def pprint(self, expand_all: bool = True, indent_guides: bool = True) -> None:
         """Prints this artifact and everything it holds, by default fully expanded with indent guides.
 
-            SourceURL(name="odyssey", url="https://example.org/odyssey.txt").pprint()
+            odyssey.pprint()
+
+        Args:
+            expand_all: Whether every nested value is expanded onto its own lines.
+            indent_guides: Whether nesting levels are drawn with guide lines.
         """
         rich_pprint(self, expand_all=expand_all, indent_guides=indent_guides)
 
     def bind(self, root: Path | None = None) -> Self:
-        """Returns this artifact rebuilt from the manifest stored at `root`,
-        with its files loaded onto it, ready to be used rather than just named.
+        """Returns the artifact stored at this one's path, its files loaded, ready to be used rather
+        than just named.
 
-        The stored manifest is the authority on what lives at a path: a
-        definition disagreeing with it raises rather than being handed someone
-        else's outputs, and the result carries the stored declaring commit and
-        resources.
-        The object bind is called on is never modified.
+        It loads the stored artifact, then runs the family's `_load` hook on that fresh copy, which
+        reads only the files its artifact or its direct dependencies name and may bind those
+        dependencies with the same root. What it attaches is runtime state, built fresh on every
+        bind, and never enters the fields, identity or manifest. The result carries the stored
+        recorded fields; the object bind is called on is never modified.
 
-            bound = bpe.bind(root); bound.decode(bound.encode("hello")) -> "hello"
+            odyssey.bind() -> SourceURL(name='odyssey', url='https://example.org/odyssey.txt')
+
+        Args:
+            root: The storage root to read from; None for STORAGE.
+
+        Returns:
+            The stored artifact, its files loaded.
+
+        Raises:
+            ValueError: The stored definition differs from this one.
+            FileNotFoundError: A completion file is missing.
         """
         at = storage.root_of(root)
         stored = Artifact.load(self.artifact_path, at)
@@ -356,48 +460,66 @@ class Artifact(BaseModel):
     @property
     @abstractmethod
     def uid(self) -> str:
-        """Returns a readable id derived from this artifact's own parameters,
-        for naming it to people: logs, errors, the dashboard."""
+        """Returns a readable id derived from this artifact's own parameters, for naming it to people:
+        logs, errors, the dashboard.
+
+            bpe.uid -> "bpe-1000-d44bf6191c"
+
+        Returns:
+            The id.
+        """
 
     @property
     @abstractmethod
     def artifact_path(self) -> Path:
-        """Returns the folder this artifact owns, relative to root.
+        """Returns the folder this artifact owns, relative to root: nonempty, normalized, and a pure
+        function of the identifying fields.
 
-        Must be a pure function of the identifying fields: equal artifacts
-        share a folder, and load rejects a manifest found at any other path.
+        A folder under another's prefix is still its own artifact, and a lease covers one exact path.
+        The encoding is a storage contract, so changing it needs a migration; readable names and
+        short digests may collide, which the conflict checks on a shared path catch.
+
+            tokens.artifact_path -> Path("tokenized/bpe-1000-d44bf6191c/odyssey")
+
+        Returns:
+            The folder, relative to root.
         """
 
     @property
     @abstractmethod
     def files(self) -> dict[str, str]:
-        """Returns the filenames inside artifact_path, keyed by a short
-        description of each (e.g. "weights", "config").
+        """Returns the filenames inside `artifact_path`, keyed by a short description of each: unique
+        bare names, never `manifest.json`, so `paths` can join them to any root.
 
-        Names, not paths, so paths() can join them to any root: the volume or
-        a test folder.
+            odyssey.files -> {"raw text": "body.txt"}
+
+        Returns:
+            Each output's description and its filename.
         """
 
     def paths(self, root: Path) -> dict[str, Path]:
-        """Returns each of `files` as a full path under `root`, keyed the same way.
-
-        These are where this artifact's job may write; completion_paths, not
-        this, says when it is done.
+        """Returns each of `files` as a full path under `root`: where this artifact's job may write.
 
             odyssey.paths(Path("/storage")) -> {"raw text": Path("/storage/sources/odyssey/body.txt")}
+
+        Args:
+            root: The storage root to join under.
+
+        Returns:
+            Each output's description and its full path.
         """
-        return {
-            desc: root / self.artifact_path / name for desc, name in self.files.items()
-        }
+        return {desc: root / self.artifact_path / name for desc, name in self.files.items()}
 
     def job(self) -> Job:
         """Returns the Job that produces this artifact, imported from `producer`.
 
-        The one place that dotted path becomes a class. Its only caller is
-        main.run_job, inside the container about to run it, so nothing that
-        resolves, inspects or draws a graph imports a family's jobs.py.
+        Its only caller is `main.run_job`, inside the container about to run it, so nothing that
+        resolves, inspects or draws a graph imports a family's `jobs.py`.
 
-            odyssey.job() -> SourceURLJob(odyssey)
+            type(odyssey.job()) -> SourceURLJob
+
+        Returns:
+            The producing job, constructed on this artifact.
         """
         if self.producer is None:
             raise ValueError(
@@ -407,27 +529,34 @@ class Artifact(BaseModel):
         return locate(self.producer)(self)
 
     def completion_paths(self, root: Path) -> list[Path]:
-        """Returns the paths whose presence means this artifact is done.
-
-        Its own files, for almost everything. A virtual artifact owning no
-        bytes (mappeddataset.MappedDataSet) overrides this to point at its
-        dependencies' files, which is why it is separate from `paths()`, the
-        question of where this artifact may write.
+        """Returns the paths whose presence means this artifact is done: its own files, except for a
+        virtual artifact (`MappedDataSet`), which points at its dependencies' files.
 
             odyssey.completion_paths(Path("/storage")) -> [Path("/storage/sources/odyssey/body.txt")]
+
+        Args:
+            root: The storage root to join under.
+
+        Returns:
+            The full paths that must exist.
         """
         return list(self.paths(root).values())
 
     def durable_progress(self, root: Path) -> dict | None:
-        """Returns how far along the volume says this artifact is, as how many
-        of its completion paths exist, or None when there is nothing to count.
+        """Returns how far along the volume says this artifact is, as how many of its completion paths
+        exist, which the dashboard shows when no call is running.
 
-        The dashboard shows this when no call is running, and the call's own
-        self-report (system.runtime.Worker.progress) when one is. A subclass
-        whose job writes intermediate state overrides it: SGD.Training reports
-        its furthest checkpoint, which says more than "0 of 1 files".
+        A job that writes intermediate state overrides it: a training leg reports its furthest
+        checkpoint.
 
-            odyssey.durable_progress(root) -> {"phase": "files", "done": 1, "total": 1}
+            odyssey.durable_progress(Path("/storage")) -> {"phase": "files", "done": 1, "total": 1}
+            tokens.durable_progress(Path("/storage")) -> {"phase": "files", "done": 0, "total": 1}
+
+        Args:
+            root: The storage root to look in.
+
+        Returns:
+            The phase, how many are done and the total, or None with no completion paths.
         """
         completion = self.status(root).completion
         if not completion:
@@ -437,3 +566,48 @@ class Artifact(BaseModel):
             "done": sum(completion.values()),
             "total": len(completion),
         }
+
+
+def resolve(*roots: Artifact) -> list[Artifact]:
+    """Returns every artifact the roots are built from and then each root, in one graph:
+    dependencies before dependents, each path once. It reads no storage and decides nothing
+    about running, so an artifact shared by several requests is one path, declared once and
+    built once.
+
+    It walks `deps()` depth-first. A path reached twice, from one root or from two, must hold an
+    `==` definition, which compares the whole subtree, so a shared path cannot hide a conflicting
+    leaf; the first object reaching a path is kept, recorded fields and all.
+
+        resolve(tokens) -> [odyssey, bpe, tokens]
+        resolve(tokens, bpe) -> [odyssey, bpe, tokens]
+
+    Args:
+        *roots: The requested artifacts.
+
+    Returns:
+        The graph's artifacts, each after everything it is built from.
+
+    Raises:
+        ValueError: Two different definitions share a path, or the graph has a cycle.
+    """
+    visited: dict[Path, Artifact] = {}
+    active: list[Path] = []  # the current descent, for cycle detection
+
+    def visit(node: Artifact) -> None:
+        path = node.artifact_path
+        if path in visited:
+            if visited[path] != node:
+                raise ValueError(f"different definitions at {path}")
+            return
+        if path in active:
+            chain = " -> ".join(str(p) for p in (*active, path))
+            raise ValueError(f"cycle: {chain}")
+        active.append(path)
+        for dep in node.deps():
+            visit(dep)
+        active.pop()
+        visited[path] = node
+
+    for root in roots:
+        visit(root)
+    return list(visited.values())

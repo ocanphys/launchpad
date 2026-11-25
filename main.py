@@ -39,9 +39,10 @@ def locked_image(*groups: str) -> modal.Image:
 # groups of python packages from this repo - these are added to images which specify
 # the python environments of the containers.
 CALL_SOURCE = ("config", "system", "launcher")
-# models/ rides along wherever manifests are decoded: each architecture's leg
-# class lives in its models/ package, and every models/ package is torch-free at import
-ARTIFACTS_SOURCE = ("artifacts", "models")
+# models/ and training/ ride along wherever manifests are decoded: a leg's manifest names
+# its architecture's class in models/ and its optimizer's and schedule's in training/, and
+# each is torch-free at import
+ARTIFACTS_SOURCE = ("artifacts", "models", "training")
 
 
 WEB_DIR = Path("/web")  # where web_image mounts the web/ folder

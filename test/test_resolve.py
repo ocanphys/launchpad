@@ -6,8 +6,7 @@ import unittest
 from pathlib import Path
 from typing import ClassVar
 
-from artifacts.core.artifact import Artifact
-from artifacts.core.resolve import resolve
+from artifacts.core.artifact import Artifact, resolve
 from artifacts.sources import Source, SourceURL
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer

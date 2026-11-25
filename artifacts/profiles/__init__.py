@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 from pydantic import Field, PrivateAttr, model_validator
 
 from artifacts.core.artifact import Artifact, Resources
-from artifacts.core.SGD.optimizers import Optimizer
 from models import Model
+from training.optimizers import Optimizer
 
 if TYPE_CHECKING:
     import pandas as pd

@@ -1,5 +1,5 @@
 """The evaluations a pretraining leg's loop can take of its model, each an
-Evaluation (artifacts.core.SGD.training) listed in the leg's
+Evaluation (training.leg) listed in the leg's
 loop_config.evaluations. Torch loads inside `measure`, so declaring one does
 not import it.
 """
@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
-from artifacts.core.SGD.training import Evaluation
 from artifacts.stages.pretraining.samplers import Sweep
+from training.leg import Evaluation
 
 if TYPE_CHECKING:
     import torch

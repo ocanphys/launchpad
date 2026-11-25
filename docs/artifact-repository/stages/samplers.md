@@ -1,7 +1,7 @@
 # Samplers
 
 `artifacts.stages.pretraining.samplers`: which token positions each step reads
-from a split, whether a training step of a [pretraining leg](stages.md) or a
+from a split, whether a training step of a [pretraining leg](../stages.md) or a
 batch of an evaluation. A leg's `sampler` field holds one
 `Sampler` subclass, and its manifest names that class under `"class"` beside its
 fields, the way it names its `lr_schedule`.
@@ -90,7 +90,7 @@ Every sequence once, in order, from position 0: step `s` reads sequences
 Nothing is random, so the seed is unused, and a leg ending past the last full
 batch is refused, so a leg declaring `sampler=Sweep()` trains on one pass of
 its split in a fixed order. `TokenLoss` reads the validation split with it, passing seed
-0 ([Evaluations](stages.md#evaluations)), so the positions behind every
+0 ([Evaluations](evaluations.md)), so the positions behind every
 validation loss, and their tags, are as recomputable as a training step's.
 
 ## Why

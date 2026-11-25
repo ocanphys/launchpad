@@ -24,7 +24,7 @@ tokenizer's special tokens; both are refused at construction.
 After `bind(root)`, `train` and `valid` are each a `Split`: the split's
 `tokens`, a `uint16` memmap (an empty split is an empty array), and its `tags`,
 the tag of every token position. A dataset serves tokens and tags only; how
-batches are drawn from them is the leg's [sampler](samplers.md).
+batches are drawn from them is the leg's [sampler](stages/samplers.md).
 
 ```python
 split = dataset.bind(root).train

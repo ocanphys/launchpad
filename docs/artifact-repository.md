@@ -28,5 +28,5 @@ flowchart LR
 
 Families never import functions or constants from one another; the only thing
 one takes from another is an artifact class to name as a dependency type
-([Artifacts](artifacts.md#defining-a-family)). A new family also means a page
+([Artifacts](artifacts.md)). A new family also means a page
 under `docs/artifact-repository/`, a row above, and a nav entry.

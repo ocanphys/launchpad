@@ -55,4 +55,4 @@ Transformer.
 
 ## Reference
 
-The class docstrings are on [Models](../models.md#reference).
+::: models.transformerFA.TransformerFA

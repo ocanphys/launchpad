@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING
 import torch
 
 from artifacts.core.locate import locate
-from artifacts.core.SGD.job import TrainingJob
-from artifacts.core.SGD.training import Evaluation
-from artifacts.core.SGD.steplog import StepLog
 from artifacts.stages.pretraining import Pretraining
-from gpus.monitor import GpuMonitor
+from training.job import TrainingJob
+from training.leg import Evaluation
+from training.monitor import GpuMonitor
+from training.steplog import StepLog
 
 if TYPE_CHECKING:
     import numpy as np

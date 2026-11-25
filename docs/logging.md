@@ -201,7 +201,7 @@ Each of these grows with history, and nothing trims it:
 ## The step log
 
 A leg's `train.jsonl`, one row per training step tagged with the attempt that
-took it, is the worker's own file, written by `artifacts/core/SGD/steplog.py`
+took it, is the worker's own file, written by `training/steplog.py`
 ([Training a Model](training.md#what-you-can-watch)). It reaches the volume when
 the worker commits under its lease, and `/artifact/<path>` reads it off the
 launcher's mount as the last reload left it; no attempt's rows are streamed

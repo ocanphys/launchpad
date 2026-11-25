@@ -15,4 +15,4 @@ ever waiting on the GPU. For measuring a model on its own, see [Profiling](profi
 
 ## Reference
 
-::: gpus.monitor
+::: training.monitor

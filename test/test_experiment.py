@@ -14,9 +14,9 @@ from unittest.mock import patch
 
 import lab
 from artifacts.core.artifact import Artifact
-from artifacts.core.SGD.lr_schedule import WarmupCosine
-from artifacts.core.SGD.optimizers import AdamW
-from artifacts.core.SGD.training import LoopConfig, TrainingParameters
+from training.lr_schedule import WarmupCosine
+from training.optimizers import AdamW
+from training.leg import LoopConfig, TrainingParameters
 from artifacts.core.storage import MANIFEST
 from artifacts.dataset import DataSet
 from artifacts.sources import SourceURL

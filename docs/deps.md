@@ -106,7 +106,7 @@ What these guarantee in practice:
   class (fields, path, owned files, optionally a `_load` for what binding reads)
   and its job. The core does not change, and families depend on one another
   only by naming each other's classes as dependency types
-  ([Artifacts](artifacts.md#defining-a-family)).
+  ([Artifacts](artifacts.md)).
 - **A new architecture** is a new `Model` subclass under `models/`; one
   training artifact type trains every architecture ([Models](models.md)).
 - **A parameter** may only have a type whose values survive storage exactly,

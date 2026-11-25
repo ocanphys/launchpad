@@ -44,7 +44,7 @@ class Transformer(Model):
         import torch
 
         from artifacts.core.locate import locate
-        from models.transformer.src.model import TransformerLM
+        from models.transformer.network import TransformerLM
 
         return TransformerLM(
             vocab_size=self.vocab_size,

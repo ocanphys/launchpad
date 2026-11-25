@@ -15,15 +15,15 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 from pydantic import Field, model_validator
 
 from artifacts.core.artifact import Artifact, ParamConfig
+from models import Model
 from training.lr_schedule import LRSchedule
 from training.optimizers import Optimizer
-from models import Model
 
 if TYPE_CHECKING:
     import torch
 
-    from training.job import TrainingJob
     from system.runtime import Worker
+    from training.job import TrainingJob
 
 
 class TrainingParameters(ParamConfig):

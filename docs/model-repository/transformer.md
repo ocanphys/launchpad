@@ -1,7 +1,7 @@
 # Transformer
 
 `models.transformer.Transformer`: a decoder-only language model in the usual
-modern shape, built from scratch in `models/transformer/src/model.py`.
+modern shape, built from scratch in `models/transformer/network.py`.
 
 ## Architecture
 
@@ -157,4 +157,4 @@ network and $F$ to torch's `FlopCounterMode` on its forward pass.
 
 ## Reference
 
-The class docstrings are on [Models](../models.md#reference).
+::: models.transformer.Transformer

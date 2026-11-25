@@ -8,6 +8,17 @@ a package under `models/` (`transformer`, `transformerFA`, `mamba`) holding one
 network from them. The package imports no torch until `build()` runs, so
 declaring a leg stays cheap.
 
+## Implementations
+
+Each architecture has its own page under Repository: its architecture, its fields, and what it
+can count.
+
+| Model | Class | Mixer | Notes |
+| --- | --- | --- | --- |
+| [Transformer](model-repository/transformer.md) | `models.transformer.Transformer` | Causal attention with RoPE | Dense attention; can capture scores. |
+| [Transformer FA](model-repository/transformerFA.md) | `models.transformerFA.TransformerFA` | Causal attention with RoPE | Same shapes; PyTorch's flash attention on CUDA. |
+| [Mamba](model-repository/mamba.md) | `models.mamba.Mamba` | Selective state space scan | No FLOP count yet. |
+
 ## What readers expect of a model
 
 `Model` declares `build(device)`, which returns the freshly initialized torch
@@ -24,7 +35,7 @@ asks for exactly the names it needs.
 | `vocab_size` | `Pretraining`, which refuses a model whose vocabulary is not its tokenizer's. |
 | `sequence_length` | The pretraining job, for the shape of every batch it draws; chat, for its context window. |
 | `dtype` | `build()`, as a dotted torch dtype (`"torch.float32"`) resolved on the worker; profiling reports it. |
-| `step_flops(batch_size)` | `gpus/monitor.py`, which turns it into MFU, and the profiler. |
+| `step_flops(batch_size)` | `training/monitor.py`, which turns it into MFU, and the profiler. |
 
 Nothing enforces the table. A model that lacks a name breaks only the reader
 that needs it: `Mamba` has no FLOP counts yet, so training it works and MFU
@@ -72,7 +83,9 @@ so the rewrite moves the legs as well.
 Add a package under `models/` whose `__init__.py` defines a `Model` subclass:
 its fields and their constraints, including the names in the table above,
 and `build(device)` importing torch inside it. `Pretraining` needs no change,
-since it reads only those names.
+since it reads only those names. The architecture also gets a page under
+`docs/model-repository/`, a row in [Implementations](#implementations), and a nav entry under
+Repository.
 
 ## Why a subclass per architecture
 
@@ -89,9 +102,3 @@ the same fields, as `Transformer` and `TransformerFA` have.
 ## Reference
 
 ::: models.Model
-
-::: models.transformer.Transformer
-
-::: models.transformerFA.TransformerFA
-
-::: models.mamba.Mamba

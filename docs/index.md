@@ -9,6 +9,7 @@ is described.
 
 | Page | What it covers |
 | --- | --- |
+| [How it fits together](core.md) | How artifacts, manifests and jobs interact, and why. |
 | [Artifacts](artifacts.md) | Defining, validating and identifying artifacts; resolution. |
 | [Manifests](manifests.md) | How a definition is written to disk and read back. |
 | [Lab](lab.md) | The notebook API: declaration, loading, binding. |

@@ -113,7 +113,7 @@ parameters. So an experiment cannot be a subtree, because the same artifact
 belongs to several experiments. Membership is a tag, which sits beside the
 definition the way `declaring_commit` and `allocated_resources` do: recorded at
 the root of the artifact's manifest and excluded from identity
-([Manifests](manifests.md#recorded-fields)), so joining an experiment never
+([Artifacts](artifacts.md#artifacts.core.artifact.Artifact.RECORDED)), so joining an experiment never
 moves an artifact.
 
 ```mermaid

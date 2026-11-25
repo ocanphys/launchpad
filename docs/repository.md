@@ -140,7 +140,12 @@ What is happening now lives outside the volume, in Modal Dicts and one Queue:
 - **`artifacts/`**: the artifact families, each a package holding its artifact
   class and, in `jobs.py`, its job; `artifacts/core/` holds the base classes,
   the codec, storage and resolution ([Artifacts](artifacts.md)).
-- **`models/`**: one package per architecture ([Models](models.md)).
+- **`models/`**: one package per architecture: its param config in `__init__.py`, torch-free,
+  and its network in `network.py` ([Models](models.md)).
+- **`training/`**: how a leg trains: the `Training` base and its parameters (`leg.py`), the loop
+  every stage shares (`job.py`), the optimizers and learning rate schedules a leg declares, its
+  step log, and the loop's MFU monitor ([Training a Model](training.md),
+  [Monitoring](monitoring.md)).
 - **`lab.py`**, **`local.py`**: the notebook API, and the laptop's bridge to the
   volume ([Lab](lab.md)).
 - **`main.py`**: the deployment and nothing else: the app, the volume, the
@@ -160,5 +165,5 @@ What is happening now lives outside the volume, in Modal Dicts and one Queue:
   channels (`logs.py`), and what a worker does around a job (`runtime.py`,
   [Workers](workers.md)).
 - **`web/`**: the dashboard page ([Dashboard](dashboard.md)).
-- **`gpus/`**, **`profiling/`**: GPU throughput (`peaks.py`) and price (`pricing.py`) tables, the training loop's MFU
-  monitor ([Monitoring](monitoring.md)), and the profiler ([Profiling](profiling.md)).
+- **`gpus/`**, **`profiling/`**: GPU throughput (`peaks.py`) and price (`pricing.py`) tables, and the
+  profiler ([Profiling](profiling.md)).

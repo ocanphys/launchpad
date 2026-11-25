@@ -5,9 +5,9 @@ dataset and a model description and trains for a fixed number of steps. This
 page covers what you declare, what the job does when it runs, how checkpoints
 make a run resumable, and how legs chain into a long run.
 
-The work is split in two layers. `Training` (`artifacts/core/SGD/training.py`)
+The work is split in two layers. `Training` (`training/leg.py`)
 is what every leg shares: its param configs, `start_step` and `end_step`, and
-the model it trains. `TrainingJob` (`artifacts/core/SGD/job.py`) builds the
+the model it trains. `TrainingJob` (`training/job.py`) builds the
 model and optimizer a leg names, resumes, and writes failsafes. `Pretraining`
 (`artifacts/stages/pretraining/`) adds the dataset, reads its tokenizer there,
 names its job and decides its `uid`, `artifact_path` and `lineage_hash`;
@@ -20,9 +20,9 @@ is a parameter. Here three books from Project Gutenberg train the model and a
 fourth validates it:
 
 ```python
-from artifacts.core.SGD.lr_schedule import WarmupCosine
-from artifacts.core.SGD.optimizers import AdamW
-from artifacts.core.SGD.training import LoopConfig, TrainingParameters
+from training.lr_schedule import WarmupCosine
+from training.optimizers import AdamW
+from training.leg import LoopConfig, TrainingParameters
 from artifacts.mappeddataset import MappedDataSet
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
@@ -110,16 +110,16 @@ What the leg itself checks when it is built, each a validator on its class:
   model whose `vocab_size` differs from the tokenizer's, and a starting
   checkpoint trained with another tokenizer (`_one_tokenizer_for_life`).
 
-::: artifacts.core.SGD.training
+::: training.leg
     options:
       members: [TrainingParameters, LoopConfig, Evaluation]
       heading_level: 3
 
-::: artifacts.core.SGD.lr_schedule
+::: training.lr_schedule
     options:
       heading_level: 3
 
-::: artifacts.core.SGD.optimizers
+::: training.optimizers
     options:
       heading_level: 3
 
@@ -223,7 +223,7 @@ after zero iterations (the last failsafe of an interrupted attempt landed on
 **The leg's sampler decides how batches are drawn.** `run` asks it once for
 `sampler.batches(dataset.train, batch_size, sequence_length, seed, end_step)`,
 a function from step number to that step's (inputs, targets), and the loop only
-passes it the step. The dataset serves tokens; the [sampler](artifact-repository/samplers.md)
+passes it the step. The dataset serves tokens; the [sampler](artifact-repository/stages/samplers.md)
 is the recipe, and a different recipe (epochs, a curriculum) is a different
 `Sampler` class on the leg, part of its `lineage_hash`. A sampler that cannot
 serve every step up to `end_step` refuses there, before the first step.
@@ -235,13 +235,13 @@ puts the model in eval mode with gradients off and calls `measure` on each
 evaluation due, then merges what they return into that step's row, which is
 flushed then. A leg with no evaluations records training metrics alone. An `Evaluation` is a param config whose
 subclass is the procedure, defined by the stage (pretraining's is
-[`TokenLoss`](artifact-repository/stages.md#evaluations)), so the loop knows
+[`TokenLoss`](artifact-repository/stages/evaluations.md)), so the loop knows
 none of them. Its metrics are named `val_*`, which is how a reader of
 `train.jsonl` tells them from the training metrics, and two evaluations that
 name the same metric are refused at the step they clash. The step's gradients
 are zeroed before its forward pass rather than after the optimizer step, so an
 evaluation can read them, clipped, off the parameters
-([`BlockGradNorm`](artifact-repository/stages.md#evaluations) does); its metrics
+([`BlockGradNorm`](artifact-repository/stages/evaluations.md) does); its metrics
 are of the training batch and are not named `val_*`. `loop_config` is not
 in `lineage_hash`, so changing an evaluation changes no leg's identity: it
 changes what is measured, never a weight.
@@ -386,7 +386,7 @@ runs/
 ## What you can watch
 
 Each step appends a row to `train.jsonl` in the leg's folder through `StepLog`
-(`artifacts/core/SGD/steplog.py`), tagged with the attempt that took it: loss,
+(`training/steplog.py`), tagged with the attempt that took it: loss,
 gradient norm and learning rate on every step, every evaluation's `val_*`
 metrics on evaluation steps (`val_loss` and `val_loss_var` from `TokenLoss`),
 and GPU memory peaks and MFU on the steps they

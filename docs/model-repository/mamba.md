@@ -1,7 +1,7 @@
 # Mamba
 
 `models.mamba.Mamba`: a selective state space language model after Gu & Dao
-(2023), in `models/mamba/src/model.py`.
+(2023), in `models/mamba/network.py`.
 
 ## Architecture
 
@@ -43,4 +43,4 @@ are unavailable until they are written.
 
 ## Reference
 
-The class docstrings are on [Models](../models.md#reference).
+::: models.mamba.Mamba

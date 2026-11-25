@@ -28,7 +28,7 @@ from system.logs import LIVE, VOLUME, stream
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 # What the manifest at each artifact path decoded to, for this process's
-# life. A definition at a path is immutable once declared (docs/manifests.md), and the
+# life. A definition at a path is immutable once declared (docs/core.md), and the
 # map shows nothing else from the manifest, so a path read once is never read
 # again here; what launching needs fresh (resources) `attempt_launch` reads
 # off the volume itself, and `state` reads each manifest's tags on every scan.

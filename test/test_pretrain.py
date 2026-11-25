@@ -13,21 +13,13 @@ import torch
 from pydantic import ValidationError
 
 from artifacts.core.artifact import Artifact
-from artifacts.core.SGD.lr_schedule import WarmupCosine
-from artifacts.core.SGD.optimizers import AdamW
-from artifacts.core.SGD.steplog import StepLog
-from artifacts.core.SGD.training import (
-    Evaluation,
-    LoopConfig,
-    TrainingParameters,
-)
 from artifacts.core.storage import write_manifest
 from artifacts.dataset import DataSet
 from artifacts.dataset.jobs import DataSetJob
 from artifacts.sources import SourceURL
 from artifacts.stages.pretraining import Pretraining
-from artifacts.stages.pretraining.jobs import PretrainJob
 from artifacts.stages.pretraining.evaluations import BlockGradNorm, TokenLoss
+from artifacts.stages.pretraining.jobs import PretrainJob
 from artifacts.stages.pretraining.samplers import Epochs, Sweep
 from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
@@ -36,6 +28,14 @@ from models.transformer import Transformer
 from models.transformerFA import TransformerFA
 from system.lease_protocol import LeaseLost
 from system.runtime import Worker
+from training.leg import (
+    Evaluation,
+    LoopConfig,
+    TrainingParameters,
+)
+from training.lr_schedule import WarmupCosine
+from training.optimizers import AdamW
+from training.steplog import StepLog
 
 SOURCE = SourceURL(name="first", url="https://example.org/first.txt")
 TOKENIZER = Tokenizer(vocab_size=64, special_tokens=("<pad>",), sources=(SOURCE,))

@@ -6,13 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from artifacts.core.artifact import Resources
-from artifacts.core.SGD.lr_schedule import WarmupCosine
-from artifacts.core.SGD.optimizers import AdamW
-from artifacts.core.SGD.training import LoopConfig, TrainingParameters
 from artifacts.stages.pretraining.evaluations import TokenLoss
 from models.mamba import Mamba
 from models.transformer import Transformer
 from models.transformerFA import TransformerFA
+from training.leg import LoopConfig, TrainingParameters
+from training.lr_schedule import WarmupCosine
+from training.optimizers import AdamW
 
 TRANSFORMER = {
     "vocab_size": 64, "sequence_length": 8, "num_layers": 1, "d_model": 16, "d_ff": 32, "num_heads": 2,

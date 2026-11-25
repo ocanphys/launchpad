@@ -383,7 +383,7 @@ Artifacts and param configs are pydantic models under one strict config, and
 each of these passed a test until a probe hit it:
 
 - **A config does not reach nested models.** Each model validates with its
-  own config, so `Artifact` and `ParamConfig` both set `STRICT`; a base that
+  own config, so `Artifact` and `ParamConfig` both set the strict `model_config`; a base that
   forgot it would validate its subclasses laxly, coercing `"1"` to `1`.
 - **pydantic serializes a value by its field's annotation, not its class.**
   A `Transformer` in a field annotated `Model` dumps as `Model`'s fields only,
@@ -470,3 +470,18 @@ fused on CUDA.
 `TrainingJob.resume` copies every group's options before loading and puts
 them back after, so a resumed leg runs with the options it was built with.
 Re-applying only the declared fields misses the undeclared ones.
+
+## A class's module path is part of identity
+
+A manifest names each concrete artifact class, and each param config holding a subclass of
+its annotated class, by dotted module path. A leg's `lineage_hash` and a profile's
+`parameters_hash` digest those paths too, so moving `AdamW` from `artifacts.core.SGD` to
+`training` gave every leg and profile a new folder, and old manifests named a module that no
+longer existed. Found while moving `artifacts/core/SGD/` to `training/`: the sources,
+tokenizers and datasets kept their paths, the legs and profiles did not.
+
+Moving a class that a manifest names is a volume migration: rewrite the class paths in every
+manifest, move each folder whose path changed, and re-key `call_history.json` and the
+`call_history` Dict, with nothing leased. `migrations/training_package.py` did this once.
+Moving anything a manifest never names (a job, a base class, a network) changes nothing on
+the volume.

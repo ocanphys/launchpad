@@ -13,7 +13,7 @@ In a notebook (`declarations/profiling.ipynb` is the template):
 
 ```python
 from artifacts.core.artifact import Resources
-from artifacts.core.SGD.optimizers import SGD
+from training.optimizers import SGD
 from artifacts.profiles import Profile
 from models.transformer import Transformer
 from profiling.util import run_profile
@@ -92,7 +92,7 @@ kernel_events                                              True
 ...                                                               every other field, flattened
 model.class                      models.transformer.Transformer
 model.d_model                                               128
-optimizer.class               artifacts.core.SGD.optimizers.SGD
+optimizer.class               training.optimizers.SGD
 resources.gpu_type                                           T4
 gpu                                                    Tesla T4
 device_vram_bytes                                   15828320256

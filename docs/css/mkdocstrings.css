@@ -1,0 +1,4 @@
+/* Room between one documented object's source block and the next object's heading. */
+.doc-object + .doc-object {
+  margin-top: 3em;
+}

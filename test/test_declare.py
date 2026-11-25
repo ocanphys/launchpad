@@ -12,12 +12,6 @@ from unittest.mock import patch
 
 import lab
 from artifacts.core.artifact import Artifact, Resources
-from artifacts.core.SGD.lr_schedule import WarmupCosine
-from artifacts.core.SGD.optimizers import AdamW
-from artifacts.core.SGD.training import (
-    LoopConfig,
-    TrainingParameters,
-)
 from artifacts.core.storage import MANIFEST
 from artifacts.dataset import DataSet
 from artifacts.sources import SourceURL
@@ -27,6 +21,12 @@ from artifacts.tokenized import TokenizedSource
 from artifacts.tokenizers.bpe import Tokenizer
 from config import LAB_WORKSPACE
 from models.transformer import Transformer
+from training.leg import (
+    LoopConfig,
+    TrainingParameters,
+)
+from training.lr_schedule import WarmupCosine
+from training.optimizers import AdamW
 
 ODYSSEY = SourceURL(name="odyssey", url="https://example.org/odyssey.txt")
 TOKENIZER = Tokenizer(vocab_size=1000, special_tokens=("<pad>",), sources=(ODYSSEY,))

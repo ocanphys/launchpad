@@ -73,7 +73,7 @@ dataset = MappedDataSet.from_sources(tokenizer=tokenizer,
 `run_id` groups legs of one run, and `allocated_resources` picks the GPU:
 
 ```python
-from artifacts.core.SGD.training import LoopConfig, TrainingParameters
+from training.leg import LoopConfig, TrainingParameters
 from artifacts.stages.pretraining import Pretraining
 from artifacts.stages.pretraining.evaluations import TokenLoss
 from models.transformer import Transformer
