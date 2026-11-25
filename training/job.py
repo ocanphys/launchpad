@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from artifacts.core.job import Job
-from artifacts.core.SGD.training import Training
+from training.leg import Training
 
 if TYPE_CHECKING:
     from system.runtime import Worker
